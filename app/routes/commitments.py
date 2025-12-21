@@ -116,6 +116,16 @@ async def create_commitment(
     """Create a new commitment"""
     db = Database()
     
+    # Check tier limits for free users
+    tier = user.get("tier", "free")
+    if tier == "free":
+        all_commitments = await db.get_commitments(user["id"])
+        if len(all_commitments) >= 2:
+            raise HTTPException(
+                status_code=403,
+                detail="Free tier allows only 2 commitments. Upgrade to Pro for unlimited."
+            )
+    
     # Check concurrent commitment limit for education
     if data.type == "education" and data.status == "active":
         active_education = await db.get_active_commitments(user["id"])

@@ -133,6 +133,19 @@ async def generate_calendar(
     """Generate calendar days for a year based on active cycle"""
     db = Database()
     
+    # Check tier limits for free users (1 year only)
+    tier = user.get("tier", "free")
+    if tier == "free":
+        # Get all years with calendar data
+        all_days = await db.get_all_calendar_years(user["id"])
+        existing_years = set(d.get("date", "")[:4] for d in all_days if d.get("date"))
+        
+        if str(data.year) not in existing_years and len(existing_years) >= 1:
+            raise HTTPException(
+                status_code=403,
+                detail="Free tier allows only 1 year. Upgrade to Pro for unlimited years."
+            )
+    
     # Get active cycle
     cycle = await db.get_active_cycle(user["id"])
     

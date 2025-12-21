@@ -248,6 +248,11 @@ class Database:
         self.client.table("calendar_days").delete().eq("user_id", user_id).gte("date", start_date).lte("date", end_date).execute()
         return True
     
+    async def get_all_calendar_years(self, user_id: str) -> list:
+        """Get all calendar days for a user (to check which years exist)"""
+        result = self.client.table("calendar_days").select("date").eq("user_id", user_id).limit(1000).execute()
+        return result.data or []
+    
     # ==========================================
     # Mutations Log
     # ==========================================

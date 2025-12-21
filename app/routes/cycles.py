@@ -80,6 +80,16 @@ async def create_cycle(
     db = Database()
     engine = create_calendar_engine(user["id"])
     
+    # Check tier limits for free users
+    tier = user.get("tier", "free")
+    if tier == "free":
+        existing_cycles = await db.get_cycles(user["id"])
+        if len(existing_cycles) >= 1:
+            raise HTTPException(
+                status_code=403,
+                detail="Free tier allows only 1 rotation cycle. Upgrade to Pro for unlimited."
+            )
+    
     # Calculate cycle length
     cycle_length = sum(block.duration for block in data.pattern)
     
