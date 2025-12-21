@@ -11,10 +11,10 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
     
-    # Supabase
-    supabase_url: str
-    supabase_anon_key: str
-    supabase_service_key: str
+    # Supabase - Required for full functionality
+    supabase_url: str = "https://vooqsegebpcipjrhcxsy.supabase.co"
+    supabase_anon_key: str = ""  # Set via SUPABASE_ANON_KEY env var
+    supabase_service_key: str = ""  # Set via SUPABASE_SERVICE_KEY env var  
     supabase_jwt_secret: str = ""
     
     # Gemini AI
