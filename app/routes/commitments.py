@@ -10,6 +10,7 @@ from datetime import date
 
 from app.database import Database
 from app.middleware.auth import get_current_user
+from loguru import logger
 
 
 router = APIRouter()
@@ -116,14 +117,17 @@ async def create_commitment(
     """Create a new commitment"""
     db = Database()
     
+    logger.info(f"User {user['id']} creating commitment: {data.name} ({data.type})")
+    
     # Check tier limits for free users
     tier = user.get("tier", "free")
     if tier == "free":
         all_commitments = await db.get_commitments(user["id"])
         if len(all_commitments) >= 2:
+            logger.warning(f"Free tier user {user['id']} blocked from creating additional commitment")
             raise HTTPException(
                 status_code=403,
-                detail="Free tier allows only 2 commitments. Upgrade to Pro for unlimited."
+                detail="You've hit the 2 commitment limit on the free plan. Want to track more? Upgrade to Pro for unlimited commitments."
             )
     
     # Check concurrent commitment limit for education
@@ -163,6 +167,8 @@ async def create_commitment(
     }
     
     commitment = await db.create_commitment(commitment_data)
+    
+    logger.info(f"Commitment created: {commitment.get('id')} for user {user['id']}")
     
     return {
         "success": True,

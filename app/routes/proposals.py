@@ -3,10 +3,11 @@ Watchman Proposals Routes
 Endpoints for LLM-powered proposal parsing and preview generation
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date
+from loguru import logger
 
 from app.database import Database
 from app.middleware.auth import get_current_user, require_pro_tier
@@ -26,6 +27,66 @@ class ParseInputRequest(BaseModel):
 class CreateProposalRequest(BaseModel):
     text: str
     auto_validate: bool = True
+
+
+@router.post("/parse-pdf")
+async def parse_pdf(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_pro_tier)
+):
+    """
+    Parse PDF content using Gemini's multimodal capabilities.
+    Requires Pro tier.
+    """
+    # Validate file type
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a PDF file. Other formats aren't supported yet."
+        )
+    
+    # Size limit: 10MB
+    contents = await file.read()
+    if len(contents) > 10 * 1024 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail="PDF is a bit large. Please keep it under 10MB."
+        )
+    
+    logger.info(f"User {user['id']} uploading PDF: {file.filename} ({len(contents)} bytes)")
+    
+    db = Database()
+    proposal_service = create_proposal_service(user["id"])
+    
+    # Get user context
+    commitments = await db.get_active_commitments(user["id"])
+    cycle = await db.get_active_cycle(user["id"])
+    
+    context = {
+        "active_commitments": [
+            {"name": c.get("name"), "type": c.get("type")}
+            for c in commitments
+        ],
+        "rotation_summary": f"Cycle: {cycle.get('name')}" if cycle else "No active cycle"
+    }
+    
+    # Parse PDF via Gemini
+    result = await proposal_service.parse_pdf(contents, context)
+    
+    if not result.get("success"):
+        logger.warning(f"PDF parsing failed for user {user['id']}: {result.get('error')}")
+        return {
+            "success": False,
+            "error": result.get("error", "Couldn't extract schedule from PDF"),
+            "raw_response": result.get("raw_response")
+        }
+    
+    logger.info(f"PDF parsed successfully for user {user['id']}")
+    return {
+        "success": True,
+        "data": result.get("parsed"),
+        "confidence": result.get("confidence", 0.8)
+    }
 
 
 @router.post("/parse")

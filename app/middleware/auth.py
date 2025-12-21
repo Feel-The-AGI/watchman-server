@@ -86,10 +86,13 @@ async def get_current_user(
     user = await db.get_user_by_auth_id(auth_id)
     
     if not user:
+        logger.warning(f"User not found in database for auth_id: {auth_id}")
         raise HTTPException(
             status_code=404,
             detail="User not found"
         )
+    
+    logger.debug(f"Authenticated user: {user.get('id')} (tier: {user.get('tier', 'free')})")
     
     return user
 
@@ -118,9 +121,10 @@ async def require_pro_tier(
     tier = user.get("tier", "free")
     
     if tier not in ["pro", "admin"]:
+        logger.info(f"Pro feature blocked for user {user.get('id')} (tier: {tier})")
         raise HTTPException(
             status_code=403,
-            detail="This feature requires a Pro subscription"
+            detail="This feature is part of the Pro plan. Upgrade to unlock intelligent parsing and full statistics."
         )
     
     return user

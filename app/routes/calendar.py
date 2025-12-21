@@ -13,6 +13,8 @@ from app.middleware.auth import get_current_user
 from app.engines.calendar_engine import create_calendar_engine
 
 
+from loguru import logger
+
 router = APIRouter()
 
 
@@ -133,18 +135,23 @@ async def generate_calendar(
     """Generate calendar days for a year based on active cycle"""
     db = Database()
     
-    # Check tier limits for free users (1 year only)
+    # Check tier limits for free users (6 months only)
     tier = user.get("tier", "free")
     if tier == "free":
-        # Get all years with calendar data
-        all_days = await db.get_all_calendar_years(user["id"])
-        existing_years = set(d.get("date", "")[:4] for d in all_days if d.get("date"))
+        logger.info(f"Free tier user {user['id']} attempting calendar generation for {data.year}")
+        # Free users can only plan 6 months ahead from today
+        from datetime import date as date_module
+        today = date_module.today()
+        max_date = date_module(today.year, today.month + 6, 1) if today.month <= 6 else date_module(today.year + 1, today.month - 6, 1)
         
-        if str(data.year) not in existing_years and len(existing_years) >= 1:
+        if data.year > max_date.year:
+            logger.warning(f"Free tier user {user['id']} blocked from generating {data.year} - exceeds 6 month limit")
             raise HTTPException(
                 status_code=403,
-                detail="Free tier allows only 1 year. Upgrade to Pro for unlimited years."
+                detail="The free plan covers 6 months of planning ahead. Want to see further into the future? Upgrade to Pro for unlimited years."
             )
+    
+    logger.info(f"User {user['id']} generating calendar for year {data.year}")
     
     # Get active cycle
     cycle = await db.get_active_cycle(user["id"])

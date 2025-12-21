@@ -11,6 +11,7 @@ from datetime import date
 from app.database import Database
 from app.middleware.auth import get_current_user
 from app.engines.calendar_engine import create_calendar_engine
+from loguru import logger
 
 
 router = APIRouter()
@@ -80,14 +81,17 @@ async def create_cycle(
     db = Database()
     engine = create_calendar_engine(user["id"])
     
+    logger.info(f"User {user['id']} creating cycle: {data.name}")
+    
     # Check tier limits for free users
     tier = user.get("tier", "free")
     if tier == "free":
         existing_cycles = await db.get_cycles(user["id"])
         if len(existing_cycles) >= 1:
+            logger.warning(f"Free tier user {user['id']} blocked from creating additional cycle")
             raise HTTPException(
                 status_code=403,
-                detail="Free tier allows only 1 rotation cycle. Upgrade to Pro for unlimited."
+                detail="You've reached the free plan limit of 1 rotation cycle. Ready for more flexibility? Upgrade to Pro for unlimited rotations."
             )
     
     # Calculate cycle length

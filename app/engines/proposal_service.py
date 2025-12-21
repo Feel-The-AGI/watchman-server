@@ -12,6 +12,7 @@ from loguru import logger
 import json
 import re
 
+import base64
 from app.config import get_settings
 
 
@@ -478,6 +479,111 @@ Parse this input and generate a structured mutation."""
         preview["affected_dates"] = list(set(preview["affected_dates"]))
         
         return preview
+
+
+    async def parse_pdf(
+        self,
+        pdf_bytes: bytes,
+        context: Optional[Dict] = None
+    ) -> Dict:
+        """
+        Parse PDF content using Gemini's multimodal capabilities.
+        
+        Args:
+            pdf_bytes: Raw PDF file bytes
+            context: Optional context about user's current state
+        
+        Returns:
+            Parsed proposal with structured changes
+        """
+        if not self.settings.gemini_api_key:
+            logger.warning("Gemini API key not configured")
+            return {
+                "success": False,
+                "error": "PDF parsing requires Gemini API key"
+            }
+        
+        try:
+            logger.info(f"Parsing PDF ({len(pdf_bytes)} bytes) via Gemini")
+            client = self._get_gemini_client()
+            
+            # Build context string
+            context_str = ""
+            if context:
+                context_str = f"""
+Current User Context:
+- Active commitments: {json.dumps(context.get('active_commitments', []), indent=2)}
+- Work rotation: {context.get('rotation_summary', 'Not specified')}
+"""
+            
+            # Create prompt for PDF parsing
+            prompt = f"""You are a calendar mutation parser for Watchman.
+
+Extract any scheduling information from this PDF and convert it into structured calendar changes.
+Look for:
+- Course schedules, exam dates, class times
+- Work shifts or rotation schedules  
+- Appointment dates and times
+- Leave periods or holidays
+- Any commitment with dates
+
+{context_str}
+
+If the PDF doesn't contain scheduling information, explain what you found instead."""
+
+            # Encode PDF as base64 for Gemini
+            pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+            
+            # Call Gemini with PDF content
+            response = client.models.generate_content(
+                model="gemini-2.5-pro",
+                contents=[
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"text": prompt},
+                            {
+                                "inline_data": {
+                                    "mime_type": "application/pdf",
+                                    "data": pdf_base64
+                                }
+                            }
+                        ]
+                    }
+                ],
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": CalendarMutation.model_json_schema(),
+                }
+            )
+            
+            # Parse response
+            try:
+                mutation = CalendarMutation.model_validate_json(response.text)
+                result = mutation.model_dump()
+            except Exception as e:
+                logger.warning(f"Pydantic validation failed: {e}")
+                result = self._parse_response(response.text)
+                if not self._validate_schema(result):
+                    return {
+                        "success": False,
+                        "error": "Couldn't extract structured schedule from PDF",
+                        "raw_response": response.text
+                    }
+            
+            logger.info(f"Successfully parsed PDF - found {len(result.get('changes', []))} changes")
+            return {
+                "success": True,
+                "parsed": result,
+                "confidence": result.get("confidence", 0.8)
+            }
+            
+        except Exception as e:
+            logger.error(f"PDF parsing error: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to parse PDF: {str(e)}"
+            }
 
 
 def create_proposal_service(user_id: str) -> ProposalService:
