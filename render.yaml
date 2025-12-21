@@ -33,7 +33,7 @@ services:
       - key: STRIPE_PRICE_ID_PRO
         sync: false
       - key: CORS_ORIGINS
-        value: https://watchman-client.onrender.com,https://watchman.app
+        value: https://trywatchman.vercel.app,https://watchman-client.vercel.app,https://watchman.app
     healthCheckPath: /health
     autoDeploy: true
     
@@ -62,6 +62,6 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: CORS_ORIGINS
-        value: http://localhost:3000,https://watchman-client-staging.onrender.com
+        value: https://trywatchman.vercel.app,https://watchman-client.vercel.app
     healthCheckPath: /health
     autoDeploy: true
