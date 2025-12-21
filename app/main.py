@@ -46,8 +46,8 @@ def create_app() -> FastAPI:
         description="A deterministic life-state simulator with approval-gated mutations. Guard your hours. Live by rule, not noise.",
         version="1.0.0",
         lifespan=lifespan,
-        docs_url="/docs" if settings.debug else None,
-        redoc_url="/redoc" if settings.debug else None,
+        docs_url="/docs",  # Always enabled - endpoints require auth anyway
+        redoc_url="/redoc",
     )
     
     # CORS middleware
