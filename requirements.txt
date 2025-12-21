@@ -1,0 +1,44 @@
+# Watchman Server Dependencies
+# FastAPI Framework
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Pydantic for validation
+pydantic
+pydantic-settings
+
+# Supabase
+supabase
+
+# Database
+asyncpg
+python-dateutil
+
+# Authentication
+python-jose[cryptography]
+passlib[bcrypt]
+
+# HTTP Client for Gemini API
+httpx
+aiohttp
+
+# Google Generative AI (Gemini) - New unified SDK
+google-genai
+
+# Utilities
+python-dotenv
+orjson
+
+# CORS
+starlette
+
+# Testing
+pytest
+pytest-asyncio
+
+# Stripe for payments
+stripe
+
+# Logging
+loguru

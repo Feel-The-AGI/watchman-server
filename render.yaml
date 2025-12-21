@@ -1,0 +1,67 @@
+# Watchman Server - Render Configuration
+# For deployment on Render.com
+
+services:
+  # Production Service (main branch)
+  - type: web
+    name: watchman-api
+    env: python
+    region: oregon
+    plan: starter
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_ID_PRO
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://watchman-client.onrender.com,https://watchman.app
+    healthCheckPath: /health
+    autoDeploy: true
+    
+  # Staging Service (dev branch)
+  - type: web
+    name: watchman-api-staging
+    env: python
+    region: oregon
+    plan: starter
+    branch: dev
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: APP_ENV
+        value: staging
+      - key: DEBUG
+        value: true
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: http://localhost:3000,https://watchman-client-staging.onrender.com
+    healthCheckPath: /health
+    autoDeploy: true
