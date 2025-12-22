@@ -4,10 +4,9 @@ Computes statistics from calendar state.
 Provides: work days, off days, leave days, study hours, load by month, peak weeks.
 """
 
-from datetime import date, datetime, timedelta
-from typing import List, Dict, Optional
+from datetime import date, timedelta
+from typing import List, Dict
 from collections import defaultdict
-from loguru import logger
 
 
 class StatsEngine:

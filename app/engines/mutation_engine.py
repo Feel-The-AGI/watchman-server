@@ -4,15 +4,10 @@ Handles proposal validation, binary constraints, escalation ladder, and alternat
 Implements the core design law: Nothing mutates the calendar without explicit approval.
 """
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import List, Dict, Optional, Tuple
-from loguru import logger
 import uuid
 
-from app.models import (
-    MutationStatus, ConstraintViolation, MutationAlternative,
-    CommitmentType, WorkType
-)
 
 
 class MutationEngine:

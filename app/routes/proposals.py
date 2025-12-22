@@ -153,8 +153,9 @@ async def create_proposal(
     constraints = await db.get_active_constraints(user["id"])
     cycle = await db.get_active_cycle(user["id"])
     
-    # Parse the input
+    # Parse the input - include cycle info in context
     context = {
+        "rotation_summary": f"Cycle: {cycle.get('name')}" if cycle else "No active cycle",
         "active_commitments": [
             {"name": c.get("name"), "type": c.get("type"), "status": c.get("status")}
             for c in commitments

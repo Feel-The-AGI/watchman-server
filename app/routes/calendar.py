@@ -5,8 +5,8 @@ Endpoints for calendar day management and generation
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import Optional, List
-from datetime import date, datetime
+from typing import Optional
+from datetime import date
 
 from app.database import Database
 from app.middleware.auth import get_current_user

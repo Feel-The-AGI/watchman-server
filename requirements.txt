@@ -36,6 +36,12 @@ starlette
 # Testing
 pytest
 pytest-asyncio
+httpx
+
+# Linting
+ruff
+mypy
+black
 
 # Stripe for payments
 stripe

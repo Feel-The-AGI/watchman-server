@@ -5,7 +5,7 @@ Endpoints for mutation management (proposals, approvals, rejections)
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 from datetime import datetime
 
 from app.database import Database

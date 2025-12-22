@@ -11,8 +11,7 @@ import hashlib
 import json
 
 from app.models import (
-    WorkType, CalendarDay, CalendarDayCreate, Cycle, CycleBlock,
-    LeaveBlock, Commitment, DayState, DayCommitment
+    WorkType, CalendarDayCreate
 )
 
 
@@ -231,7 +230,7 @@ class CalendarEngine:
             # Get study days based on commitment constraints
             study_on = constraints_json.get("study_on", ["off"])
             exclude = constraints_json.get("exclude", ["work_night"])
-            frequency = constraints_json.get("frequency", "weekly")
+            _frequency = constraints_json.get("frequency", "weekly")  # noqa: F841 - reserved for future use
             duration_hours = constraints_json.get("duration_hours", 2.0)
             
             # Apply commitment to appropriate days

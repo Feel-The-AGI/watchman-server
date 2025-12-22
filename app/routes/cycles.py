@@ -79,7 +79,8 @@ async def create_cycle(
 ):
     """Create a new cycle"""
     db = Database()
-    engine = create_calendar_engine(user["id"])
+    # Engine reserved for future calendar auto-generation
+    _engine = create_calendar_engine(user["id"])  # noqa: F841
     
     logger.info(f"User {user['id']} creating cycle: {data.name}")
     
