@@ -230,8 +230,10 @@ async def get_quick_summary(user: dict = Depends(get_current_user)):
     pending_mutations = await db.get_pending_mutations(user["id"])
     
     # Calculate quick stats
-    work_days = sum(1 for d in calendar_days if d.get("work_type") in ["work_day", "work_night"])
+    work_days = sum(1 for d in calendar_days if d.get("work_type") == "work_day")
+    work_nights = sum(1 for d in calendar_days if d.get("work_type") == "work_night")
     off_days = sum(1 for d in calendar_days if d.get("work_type") == "off")
+    leave_days = sum(1 for d in calendar_days if d.get("state_json", {}).get("is_leave"))
     
     total_study_hours = sum(
         sum(c.get("hours", 0) for c in d.get("state_json", {}).get("commitments", [])
@@ -242,7 +244,7 @@ async def get_quick_summary(user: dict = Depends(get_current_user)):
     summary = f"""
 **{year} Overview**
 - {len(calendar_days)} days planned
-- {work_days} work days | {off_days} off days
+- {work_days} day shifts | {work_nights} night shifts | {off_days} off days
 - {len(commitments)} active commitments
 - {round(total_study_hours, 1)} total study hours scheduled
 - {len(pending_mutations)} proposals pending review
@@ -255,9 +257,11 @@ async def get_quick_summary(user: dict = Depends(get_current_user)):
             "year": year,
             "total_days": len(calendar_days),
             "work_days": work_days,
+            "work_nights": work_nights,
             "off_days": off_days,
-            "active_commitments": len(commitments),
-            "total_study_hours": round(total_study_hours, 1),
+            "leave_days": leave_days,
+            "study_hours": round(total_study_hours, 1),
+            "commitment_count": len(commitments),
             "pending_proposals": len(pending_mutations)
         }
     }
