@@ -99,7 +99,7 @@ async def update_settings(
 @router.get("/constraints")
 async def list_constraints(user: dict = Depends(get_current_user)):
     """Get all constraints"""
-    db = Database()
+    db = Database(use_admin=True)
     constraints = await db.get_constraints(user["id"])
     
     return {
@@ -114,7 +114,7 @@ async def create_constraint(
     user: dict = Depends(get_current_user)
 ):
     """Create a new custom constraint"""
-    db = Database()
+    db = Database(use_admin=True)
     
     constraint_data = {
         "user_id": user["id"],
@@ -142,7 +142,7 @@ async def update_constraint(
     user: dict = Depends(get_current_user)
 ):
     """Update a constraint"""
-    db = Database()
+    db = Database(use_admin=True)
     
     update_data = {
         "name": data.name,
@@ -167,7 +167,7 @@ async def delete_constraint(
     user: dict = Depends(get_current_user)
 ):
     """Delete a constraint"""
-    db = Database()
+    db = Database(use_admin=True)
     
     # Check if it's a system constraint
     constraints = await db.get_constraints(user["id"])
@@ -249,7 +249,7 @@ async def grant_tier(
 @router.get("/subscription")
 async def get_subscription(user: dict = Depends(get_current_user)):
     """Get user's subscription details"""
-    db = Database()
+    db = Database(use_admin=True)
     subscription = await db.get_subscription(user["id"])
     
     return {

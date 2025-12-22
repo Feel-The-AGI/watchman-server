@@ -44,7 +44,7 @@ class UpdateCycleRequest(BaseModel):
 @router.get("")
 async def list_cycles(user: dict = Depends(get_current_user)):
     """Get all cycles for the current user"""
-    db = Database()
+    db = Database(use_admin=True)
     cycles = await db.get_cycles(user["id"])
     
     return {
@@ -56,7 +56,7 @@ async def list_cycles(user: dict = Depends(get_current_user)):
 @router.get("/active")
 async def get_active_cycle(user: dict = Depends(get_current_user)):
     """Get the currently active cycle"""
-    db = Database()
+    db = Database(use_admin=True)
     cycle = await db.get_active_cycle(user["id"])
     
     if not cycle:
@@ -78,7 +78,7 @@ async def create_cycle(
     user: dict = Depends(get_current_user)
 ):
     """Create a new cycle"""
-    db = Database()
+    db = Database(use_admin=True)
     # Engine reserved for future calendar auto-generation
     _engine = create_calendar_engine(user["id"])  # noqa: F841
     
@@ -141,7 +141,7 @@ async def update_cycle(
     user: dict = Depends(get_current_user)
 ):
     """Update an existing cycle"""
-    db = Database()
+    db = Database(use_admin=True)
     
     # Build update data
     update_data = {}
@@ -193,7 +193,7 @@ async def delete_cycle(
     user: dict = Depends(get_current_user)
 ):
     """Delete a cycle"""
-    db = Database()
+    db = Database(use_admin=True)
     await db.delete_cycle(cycle_id)
     
     return {
@@ -209,7 +209,7 @@ async def preview_cycle(
     user: dict = Depends(get_current_user)
 ):
     """Preview what a year would look like with this cycle"""
-    db = Database()
+    db = Database(use_admin=True)
     
     # Get the cycle
     cycles = await db.get_cycles(user["id"])

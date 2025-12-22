@@ -37,7 +37,7 @@ async def get_calendar_days(
     user: dict = Depends(get_current_user)
 ):
     """Get calendar days for a date range"""
-    db = Database()
+    db = Database(use_admin=True)
     
     days = await db.get_calendar_days(
         user["id"],
@@ -58,7 +58,7 @@ async def get_year(
     user: dict = Depends(get_current_user)
 ):
     """Get all calendar days for a specific year"""
-    db = Database()
+    db = Database(use_admin=True)
     
     start_date = f"{year}-01-01"
     end_date = f"{year}-12-31"
@@ -80,7 +80,7 @@ async def get_month(
     user: dict = Depends(get_current_user)
 ):
     """Get all calendar days for a specific month"""
-    db = Database()
+    db = Database(use_admin=True)
     
     # Calculate start and end dates
     start_date = f"{year}-{month:02d}-01"
@@ -110,7 +110,7 @@ async def get_day(
     user: dict = Depends(get_current_user)
 ):
     """Get a specific calendar day with full details"""
-    db = Database()
+    db = Database(use_admin=True)
     
     day = await db.get_calendar_day(user["id"], date_str)
     
@@ -133,7 +133,7 @@ async def generate_calendar(
     user: dict = Depends(get_current_user)
 ):
     """Generate calendar days for a year based on active cycle"""
-    db = Database()
+    db = Database(use_admin=True)
     
     # Check tier limits for free users (6 months only)
     tier = user.get("tier", "free")
@@ -216,7 +216,7 @@ async def add_leave_block(
     user: dict = Depends(get_current_user)
 ):
     """Add a leave block"""
-    db = Database()
+    db = Database(use_admin=True)
     
     if data.end_date < data.start_date:
         raise HTTPException(
@@ -272,7 +272,7 @@ async def add_leave_block(
 @router.get("/leave")
 async def list_leave_blocks(user: dict = Depends(get_current_user)):
     """Get all leave blocks"""
-    db = Database()
+    db = Database(use_admin=True)
     leave_blocks = await db.get_leave_blocks(user["id"])
     
     return {
@@ -287,7 +287,7 @@ async def delete_leave_block(
     user: dict = Depends(get_current_user)
 ):
     """Delete a leave block"""
-    db = Database()
+    db = Database(use_admin=True)
     await db.delete_leave_block(leave_id)
     
     return {

@@ -55,7 +55,7 @@ async def parse_pdf(
     
     logger.info(f"User {user['id']} uploading PDF: {file.filename} ({len(contents)} bytes)")
     
-    db = Database()
+    db = Database(use_admin=True)
     proposal_service = create_proposal_service(user["id"])
     
     # Get user context
@@ -98,7 +98,7 @@ async def parse_input(
     Parse unstructured text input using LLM.
     Requires Pro tier.
     """
-    db = Database()
+    db = Database(use_admin=True)
     proposal_service = create_proposal_service(user["id"])
     
     # Build context from user's current state
@@ -144,7 +144,7 @@ async def create_proposal(
     Create a new proposal from text input.
     Parses the input, validates against constraints, and creates a mutation record.
     """
-    db = Database()
+    db = Database(use_admin=True)
     proposal_service = create_proposal_service(user["id"])
     mutation_engine = create_mutation_engine(user["id"])
     
@@ -235,7 +235,7 @@ async def preview_proposal(
     """
     Preview what a proposal would do without creating a mutation.
     """
-    db = Database()
+    db = Database(use_admin=True)
     proposal_service = create_proposal_service(user["id"])
     mutation_engine = create_mutation_engine(user["id"])
     stats_engine = create_stats_engine(user["id"])
@@ -324,7 +324,7 @@ async def quick_add_commitment(
     Quickly add a commitment without LLM parsing.
     Available for free tier.
     """
-    db = Database()
+    db = Database(use_admin=True)
     mutation_engine = create_mutation_engine(user["id"])
     
     # Check concurrent limits

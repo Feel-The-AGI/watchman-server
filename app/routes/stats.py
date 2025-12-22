@@ -17,7 +17,7 @@ router = APIRouter()
 @router.get("/dashboard")
 async def get_dashboard_stats(user: dict = Depends(get_current_user)):
     """Get quick statistics for the dashboard"""
-    db = Database()
+    db = Database(use_admin=True)
     stats_engine = create_stats_engine(user["id"])
     
     # Get recent data
@@ -53,7 +53,7 @@ async def get_yearly_stats(
     user: dict = Depends(get_current_user)
 ):
     """Get comprehensive statistics for a full year"""
-    db = Database()
+    db = Database(use_admin=True)
     stats_engine = create_stats_engine(user["id"])
     
     calendar_days = await db.get_calendar_days(
@@ -84,7 +84,7 @@ async def get_monthly_stats(
     user: dict = Depends(get_current_user)
 ):
     """Get statistics for a specific month"""
-    db = Database()
+    db = Database(use_admin=True)
     stats_engine = create_stats_engine(user["id"])
     
     # Get month boundaries
@@ -118,7 +118,7 @@ async def get_monthly_stats(
 @router.get("/commitments")
 async def get_commitment_stats(user: dict = Depends(get_current_user)):
     """Get statistics for each commitment"""
-    db = Database()
+    db = Database(use_admin=True)
     stats_engine = create_stats_engine(user["id"])
     
     commitments = await db.get_commitments(user["id"])
@@ -144,7 +144,7 @@ async def get_load_distribution(
     user: dict = Depends(get_current_user)
 ):
     """Get how study/commitment load is distributed across day types"""
-    db = Database()
+    db = Database(use_admin=True)
     stats_engine = create_stats_engine(user["id"])
     
     if year is None:
@@ -172,7 +172,7 @@ async def export_stats(
     user: dict = Depends(require_pro_tier)
 ):
     """Export statistics data (Pro tier required)"""
-    db = Database()
+    db = Database(use_admin=True)
     stats_engine = create_stats_engine(user["id"])
     
     calendar_days = await db.get_calendar_days(
@@ -214,7 +214,7 @@ async def export_stats(
 @router.get("/summary")
 async def get_quick_summary(user: dict = Depends(get_current_user)):
     """Get a quick text summary of current state"""
-    db = Database()
+    db = Database(use_admin=True)
     
     today = date.today()
     year = today.year
