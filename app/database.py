@@ -326,3 +326,66 @@ class Database:
         """Update a subscription"""
         result = self.client.table("subscriptions").update(data).eq("id", subscription_id).execute()
         return result.data[0] if result.data else None
+    
+    # ==========================================
+    # Account Deletion
+    # ==========================================
+    
+    async def delete_all_user_data(self, user_id: str) -> dict:
+        """
+        Delete all data for a user across all tables.
+        Returns a summary of what was deleted.
+        """
+        deleted = {}
+        
+        # Delete in order (respecting foreign key constraints)
+        # 1. Calendar snapshots
+        result = self.client.table("calendar_snapshots").delete().eq("user_id", user_id).execute()
+        deleted["calendar_snapshots"] = len(result.data) if result.data else 0
+        
+        # 2. Mutations log
+        result = self.client.table("mutations_log").delete().eq("user_id", user_id).execute()
+        deleted["mutations_log"] = len(result.data) if result.data else 0
+        
+        # 3. Calendar days
+        result = self.client.table("calendar_days").delete().eq("user_id", user_id).execute()
+        deleted["calendar_days"] = len(result.data) if result.data else 0
+        
+        # 4. Leave blocks
+        result = self.client.table("leave_blocks").delete().eq("user_id", user_id).execute()
+        deleted["leave_blocks"] = len(result.data) if result.data else 0
+        
+        # 5. Commitments
+        result = self.client.table("commitments").delete().eq("user_id", user_id).execute()
+        deleted["commitments"] = len(result.data) if result.data else 0
+        
+        # 6. Constraints
+        result = self.client.table("constraints").delete().eq("user_id", user_id).execute()
+        deleted["constraints"] = len(result.data) if result.data else 0
+        
+        # 7. Cycles
+        result = self.client.table("cycles").delete().eq("user_id", user_id).execute()
+        deleted["cycles"] = len(result.data) if result.data else 0
+        
+        # 8. Subscriptions
+        result = self.client.table("subscriptions").delete().eq("user_id", user_id).execute()
+        deleted["subscriptions"] = len(result.data) if result.data else 0
+        
+        # 9. Users table (public.users)
+        result = self.client.table("users").delete().eq("id", user_id).execute()
+        deleted["users"] = len(result.data) if result.data else 0
+        
+        return deleted
+    
+    async def delete_auth_user(self, auth_id: str) -> bool:
+        """
+        Delete user from Supabase Auth (auth.users).
+        Requires admin client with service role key.
+        """
+        try:
+            admin_client = get_supabase_admin()
+            admin_client.auth.admin.delete_user(auth_id)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete auth user {auth_id}: {e}")
+            return False

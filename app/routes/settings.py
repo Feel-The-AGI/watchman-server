@@ -259,3 +259,39 @@ async def get_subscription(user: dict = Depends(get_current_user)):
             "subscription": subscription
         }
     }
+
+
+@router.delete("/delete-account")
+async def delete_account(user: dict = Depends(get_current_user)):
+    """
+    Permanently delete user account and all associated data.
+    This action cannot be undone.
+    """
+    from loguru import logger
+    
+    db = Database(use_admin=True)
+    
+    user_id = user["id"]
+    auth_id = user.get("auth_id")
+    
+    logger.warning(f"Account deletion requested for user {user_id} (auth: {auth_id})")
+    
+    # Step 1: Delete all user data from public tables
+    deleted_summary = await db.delete_all_user_data(user_id)
+    logger.info(f"Deleted user data: {deleted_summary}")
+    
+    # Step 2: Delete from Supabase Auth
+    auth_deleted = False
+    if auth_id:
+        auth_deleted = await db.delete_auth_user(auth_id)
+        if auth_deleted:
+            logger.info(f"Deleted auth user {auth_id}")
+        else:
+            logger.error(f"Failed to delete auth user {auth_id}")
+    
+    return {
+        "success": True,
+        "message": "Account deleted successfully",
+        "deleted": deleted_summary,
+        "auth_deleted": auth_deleted
+    }
