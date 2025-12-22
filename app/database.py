@@ -63,6 +63,11 @@ class Database:
         result = self.client.table("users").select("*").eq("auth_id", auth_id).single().execute()
         return result.data if result.data else None
     
+    async def create_user(self, data: dict) -> Optional[dict]:
+        """Create a new user"""
+        result = self.client.table("users").insert(data).execute()
+        return result.data[0] if result.data else None
+    
     async def get_user_by_id(self, user_id: str) -> Optional[dict]:
         """Get user by internal ID"""
         result = self.client.table("users").select("*").eq("id", user_id).single().execute()

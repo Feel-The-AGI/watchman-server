@@ -51,7 +51,7 @@ async def get_current_user(
 ) -> dict:
     """
     Dependency to get the current authenticated user.
-    Raises HTTPException if not authenticated.
+    Auto-creates user in database if they exist in Supabase Auth but not in users table.
     """
     if credentials is None:
         raise HTTPException(
@@ -86,11 +86,33 @@ async def get_current_user(
     user = await db.get_user_by_auth_id(auth_id)
     
     if not user:
-        logger.warning(f"User not found in database for auth_id: {auth_id}")
-        raise HTTPException(
-            status_code=404,
-            detail="User not found"
-        )
+        # Auto-create user from Supabase Auth data
+        logger.info(f"Auto-creating user for auth_id: {auth_id}")
+        
+        # Extract user info from JWT payload
+        user_metadata = payload.get("user_metadata", {})
+        email = payload.get("email") or user_metadata.get("email", "")
+        name = user_metadata.get("full_name") or user_metadata.get("name") or email.split("@")[0]
+        
+        # Create user in database
+        user = await db.create_user({
+            "auth_id": auth_id,
+            "email": email,
+            "name": name,
+            "tier": "free",
+            "role": "user",
+            "onboarding_completed": False,
+            "settings": {"max_concurrent_commitments": 2}
+        })
+        
+        if not user:
+            logger.error(f"Failed to create user for auth_id: {auth_id}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to create user account"
+            )
+        
+        logger.info(f"User created: {user.get('id')} ({email})")
     
     logger.debug(f"Authenticated user: {user.get('id')} (tier: {user.get('tier', 'free')})")
     

@@ -19,7 +19,7 @@ router = APIRouter()
 
 class CycleBlockSchema(BaseModel):
     label: str = Field(..., description="work_day, work_night, or off")
-    duration: int = Field(..., gt=0, description="Duration in days")
+    duration: int = Field(..., ge=0, description="Duration in days")
 
 
 class CreateCycleRequest(BaseModel):
