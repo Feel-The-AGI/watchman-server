@@ -30,7 +30,7 @@ async def list_mutations(
     user: dict = Depends(get_current_user)
 ):
     """Get mutations for the current user"""
-    db = Database()
+    db = Database(use_admin=True)
     mutations = await db.get_mutations(user["id"], status=status, limit=limit)
     
     return {
@@ -43,7 +43,7 @@ async def list_mutations(
 @router.get("/pending")
 async def list_pending_mutations(user: dict = Depends(get_current_user)):
     """Get pending mutations (proposals awaiting approval)"""
-    db = Database()
+    db = Database(use_admin=True)
     mutations = await db.get_pending_mutations(user["id"])
     
     return {
@@ -59,7 +59,7 @@ async def get_mutation(
     user: dict = Depends(get_current_user)
 ):
     """Get a specific mutation with full details"""
-    db = Database()
+    db = Database(use_admin=True)
     mutation = await db.get_mutation(mutation_id)
     
     if not mutation:
@@ -81,7 +81,7 @@ async def review_mutation(
     user: dict = Depends(get_current_user)
 ):
     """Review a mutation (approve or reject)"""
-    db = Database()
+    db = Database(use_admin=True)
     
     mutation = await db.get_mutation(mutation_id)
     
@@ -172,7 +172,7 @@ async def select_alternative(
     user: dict = Depends(get_current_user)
 ):
     """Select an alternative proposal from a failed mutation"""
-    db = Database()
+    db = Database(use_admin=True)
     
     mutation = await db.get_mutation(mutation_id)
     
@@ -218,7 +218,7 @@ async def get_undo_info(
     user: dict = Depends(get_current_user)
 ):
     """Get information about what undoing this mutation would do"""
-    db = Database()
+    db = Database(use_admin=True)
     
     mutation = await db.get_mutation(mutation_id)
     
@@ -268,7 +268,7 @@ async def undo_mutation(
     user: dict = Depends(get_current_user)
 ):
     """Undo an approved mutation by restoring previous state"""
-    db = Database()
+    db = Database(use_admin=True)
     
     mutation = await db.get_mutation(mutation_id)
     
