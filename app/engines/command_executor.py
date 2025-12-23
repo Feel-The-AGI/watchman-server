@@ -212,21 +212,37 @@ class CommandExecutor:
             raise ValueError(f"Unknown action: {action}")
     
     async def _action_update_cycle(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Update the work cycle"""
-        cycle_data = {
-            "id": payload.get("id", str(uuid4())),
-            "name": payload.get("name", "My Rotation"),
-            "pattern": payload.get("pattern", []),
-            "anchor": payload.get("anchor", {}),
-            "total_days": sum(block.get("days", 0) for block in payload.get("pattern", []))
-        }
+        """Update the work cycle - can update full cycle or just anchor"""
+        
+        # Get existing cycle to preserve data not being updated
+        current = await self.settings_service.get(self.user_id)
+        existing_cycle = current.get("settings", {}).get("cycle", {}) or {}
+        
+        # If only anchor is provided (correction), preserve existing pattern
+        if "anchor" in payload and "pattern" not in payload:
+            # Anchor-only update
+            cycle_data = {
+                "id": existing_cycle.get("id", str(uuid4())),
+                "name": existing_cycle.get("name", "My Rotation"),
+                "pattern": existing_cycle.get("pattern", []),
+                "anchor": payload.get("anchor", existing_cycle.get("anchor", {})),
+                "total_days": existing_cycle.get("total_days", 15)
+            }
+        else:
+            # Full cycle update
+            cycle_data = {
+                "id": payload.get("id", existing_cycle.get("id", str(uuid4()))),
+                "name": payload.get("name", existing_cycle.get("name", "My Rotation")),
+                "pattern": payload.get("pattern", existing_cycle.get("pattern", [])),
+                "anchor": payload.get("anchor", existing_cycle.get("anchor", {})),
+                "total_days": sum(block.get("days", 0) for block in payload.get("pattern", [])) or existing_cycle.get("total_days", 15)
+            }
         
         await self.settings_service.update_section(self.user_id, "cycle", cycle_data)
         
         # Also update work settings if provided
         if "shift_hours" in payload:
-            current = await self.settings_service.get(self.user_id)
-            work = current["settings"].get("work", {})
+            work = current.get("settings", {}).get("work", {})
             work["shift_hours"] = payload.get("shift_hours", work.get("shift_hours", 12))
             work["shift_start"] = payload.get("shift_start", work.get("shift_start", "06:00"))
             await self.settings_service.update_section(self.user_id, "work", work)
