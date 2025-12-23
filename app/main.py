@@ -13,6 +13,7 @@ import httpx
 
 from app.config import get_settings
 from app.routes import auth, cycles, commitments, calendar, mutations, proposals, stats, settings as settings_routes
+from app.routes import chat, commands, master_settings
 from app.database import init_supabase
 
 
@@ -96,7 +97,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     
-    # Include routers
+    # Include routers - Original routes
     app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
     app.include_router(cycles.router, prefix="/api/cycles", tags=["Cycles"])
     app.include_router(commitments.router, prefix="/api/commitments", tags=["Commitments"])
@@ -105,6 +106,11 @@ def create_app() -> FastAPI:
     app.include_router(proposals.router, prefix="/api/proposals", tags=["Proposals"])
     app.include_router(stats.router, prefix="/api/stats", tags=["Statistics"])
     app.include_router(settings_routes.router, prefix="/api/settings", tags=["Settings"])
+    
+    # Include routers - New overhaul routes
+    app.include_router(chat.router, prefix="/api", tags=["Chat"])
+    app.include_router(commands.router, prefix="/api", tags=["Commands"])
+    app.include_router(master_settings.router, prefix="/api", tags=["Master Settings"])
     
     @app.get("/", tags=["Health"])
     async def root():
