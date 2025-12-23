@@ -40,16 +40,20 @@ async def send_message(
     - If auto_execute=True: Command is executed immediately
     - If auto_execute=False: A proposal is created for user approval
     """
-    db = Database(use_admin=True)
-    chat_service = create_chat_service(db, user["id"])
+    from loguru import logger
     
     try:
+        db = Database(use_admin=True)
+        chat_service = create_chat_service(db, user["id"])
+        
         result = await chat_service.send_message(
             content=request.content,
             auto_execute=request.auto_execute
         )
         return result
     except Exception as e:
+        logger.error(f"Chat message error for user {user['id']}: {str(e)}")
+        logger.exception("Full traceback:")
         raise HTTPException(status_code=500, detail=str(e))
 
 
