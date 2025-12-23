@@ -75,7 +75,8 @@ class ChatService:
             raise ValueError("GEMINI_API_KEY not set")
         
         self.client = genai.Client(api_key=api_key)
-        self.model = "gemini-2.5-pro-preview-06-05"
+        # Use the latest Gemini 2.0 Flash for speed, or 1.5 Pro for quality
+        self.model = "gemini-2.0-flash-exp"
     
     async def send_message(
         self, 
@@ -130,7 +131,8 @@ class ChatService:
             
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
-            response_text = "I'm having trouble processing that right now. Could you try again?"
+            logger.error(f"Model: {self.model}, Contents length: {len(contents)}")
+            response_text = f"I'm having trouble processing that right now. Error: {str(e)[:100]}"
         
         # Check if response is a command (JSON)
         command = self._extract_command(response_text)
