@@ -179,9 +179,23 @@ async def generate_calendar(
     # Get leave blocks
     leave_blocks = await db.get_leave_blocks(user["id"])
     
-    # Generate the year
-    engine = create_calendar_engine(user["id"])
-    days = engine.generate_year(data.year, cycle, leave_blocks)
+    # Parse anchor date from cycle - only generate from anchor forward
+    anchor_info = cycle.get("anchor", {})
+    anchor_date_str = anchor_info.get("date") or cycle.get("anchor_date")
+    
+    if anchor_date_str:
+        from datetime import date as date_module
+        anchor_date = date_module.fromisoformat(anchor_date_str) if isinstance(anchor_date_str, str) else anchor_date_str
+        # Start from anchor date, not Jan 1
+        start_date = max(date_module(data.year, 1, 1), anchor_date)
+        end_date = date_module(data.year, 12, 31)
+        
+        engine = create_calendar_engine(user["id"])
+        days = engine.generate_range(start_date, end_date, cycle, leave_blocks)
+    else:
+        # No anchor - generate full year
+        engine = create_calendar_engine(user["id"])
+        days = engine.generate_year(data.year, cycle, leave_blocks)
     
     # Convert to dictionaries for database
     days_data = [
@@ -196,9 +210,10 @@ async def generate_calendar(
         for d in days
     ]
     
-    # Delete existing and insert new
-    if existing:
-        await db.delete_calendar_days(user["id"], f"{data.year}-01-01", f"{data.year}-12-31")
+    # Delete existing from the start date forward, then insert new
+    if days_data:
+        first_date = days_data[0]["date"]
+        await db.delete_calendar_days(user["id"], first_date, f"{data.year}-12-31")
     
     # Upsert all days
     await db.upsert_calendar_days(days_data)
