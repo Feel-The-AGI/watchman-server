@@ -1,4 +1,3 @@
-"""
 """Watchman Engines Module - Conversation-first architecture"""
 
 from app.engines.calendar_engine import CalendarEngine, create_calendar_engine
