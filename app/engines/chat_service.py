@@ -21,8 +21,14 @@ from app.engines.command_executor import CommandExecutor
 # System prompt template
 SYSTEM_PROMPT = """You are Watchman, an intelligent calendar assistant for shift workers.
 
-CURRENT USER STATE:
+IMPORTANT: The user's current settings are shown below. DO NOT ask for information that's already here.
+
+=== USER'S CURRENT SETTINGS ===
 {master_settings}
+=== END SETTINGS ===
+
+If the user has a cycle defined above, USE IT. Don't ask them to repeat it.
+If they say "fill my calendar" and a cycle exists, just generate the update_cycle command with the existing pattern.
 
 AVAILABLE COMMANDS:
 1. update_cycle - Change work rotation pattern
@@ -75,7 +81,6 @@ class ChatService:
             raise ValueError("GEMINI_API_KEY not set")
         
         self.client = genai.Client(api_key=api_key)
-        # Use the latest Gemini 2.0 Flash for speed, or 1.5 Pro for quality
         self.model = "gemini-2.5-pro"
     
     async def send_message(
@@ -99,6 +104,9 @@ class ChatService:
         # Get context
         master_settings = await self.settings_service.get_snapshot(self.user_id)
         chat_history = await self.get_history(limit=10)
+        
+        # Log what settings we have
+        logger.info(f"User {self.user_id} settings: {json.dumps(master_settings, default=str)[:500]}")
         
         # Build messages for Gemini
         system_prompt = SYSTEM_PROMPT.format(
