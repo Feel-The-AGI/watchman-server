@@ -106,7 +106,7 @@ class CommandExecutor:
             "message_id": message_id
         }
         
-        result = await self.db.client.table("proposals").insert(proposal_data).execute()
+        result = self.db.client.table("proposals").insert(proposal_data).execute()
         
         if result.data and len(result.data) > 0:
             proposal = result.data[0]
@@ -325,7 +325,7 @@ class CommandExecutor:
     async def _action_undo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Undo the last command"""
         # Find last applied command
-        result = await self.db.client.table("command_log").select("*").eq(
+        result = self.db.client.table("command_log").select("*").eq(
             "user_id", self.user_id
         ).eq("status", "applied").order("created_at", desc=True).limit(1).execute()
         
@@ -340,7 +340,7 @@ class CommandExecutor:
             await self.settings_service.update(self.user_id, before_state)
         
         # Mark command as undone
-        await self.db.client.table("command_log").update({
+        self.db.client.table("command_log").update({
             "status": "undone"
         }).eq("id", command["id"]).execute()
         
@@ -349,7 +349,7 @@ class CommandExecutor:
     async def _action_redo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Redo the last undone command"""
         # Find last undone command
-        result = await self.db.client.table("command_log").select("*").eq(
+        result = self.db.client.table("command_log").select("*").eq(
             "user_id", self.user_id
         ).eq("status", "undone").order("created_at", desc=True).limit(1).execute()
         
@@ -364,7 +364,7 @@ class CommandExecutor:
             await self.settings_service.update(self.user_id, after_state)
         
         # Mark command as redone
-        await self.db.client.table("command_log").update({
+        self.db.client.table("command_log").update({
             "status": "redone"
         }).eq("id", command["id"]).execute()
         
@@ -490,7 +490,7 @@ class CommandExecutor:
             "explanation": explanation
         }
         
-        result = await self.db.client.table("command_log").insert(log_data).execute()
+        result = self.db.client.table("command_log").insert(log_data).execute()
         
         if result.data and len(result.data) > 0:
             return result.data[0]
@@ -551,13 +551,13 @@ class CommandExecutor:
             ]
             
             # Delete existing days for this year
-            await self.db.client.table("calendar_days").delete().eq(
+            self.db.client.table("calendar_days").delete().eq(
                 "user_id", self.user_id
             ).gte("date", f"{year}-01-01").lte("date", f"{year}-12-31").execute()
             
             # Insert new days
             if days_data:
-                await self.db.client.table("calendar_days").upsert(days_data).execute()
+                self.db.client.table("calendar_days").upsert(days_data).execute()
             
             logger.info(f"Regenerated {len(days_data)} calendar days for user {self.user_id}")
         except Exception as e:

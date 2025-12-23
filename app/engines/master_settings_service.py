@@ -48,7 +48,7 @@ class MasterSettingsService:
         Returns:
             The master settings document
         """
-        result = await self.db.client.table("master_settings").select("*").eq("user_id", user_id).execute()
+        result = self.db.client.table("master_settings").select("*").eq("user_id", user_id).execute()
         
         if result.data and len(result.data) > 0:
             row = result.data[0]
@@ -79,7 +79,7 @@ class MasterSettingsService:
             "version": 1
         }
         
-        result = await self.db.client.table("master_settings").insert(data).execute()
+        result = self.db.client.table("master_settings").insert(data).execute()
         
         if result.data and len(result.data) > 0:
             row = result.data[0]
@@ -119,7 +119,7 @@ class MasterSettingsService:
         
         new_version = current["version"] + 1
         
-        result = await self.db.client.table("master_settings").update({
+        result = self.db.client.table("master_settings").update({
             "settings": settings,
             "version": new_version
         }).eq("user_id", user_id).execute()

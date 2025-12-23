@@ -248,7 +248,7 @@ class ChatService:
             "metadata": {}
         }
         
-        result = await self.db.client.table("chat_messages").insert(message_data).execute()
+        result = self.db.client.table("chat_messages").insert(message_data).execute()
         
         if result.data and len(result.data) > 0:
             return result.data[0]
@@ -257,7 +257,7 @@ class ChatService:
     
     async def get_history(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get chat history for user"""
-        result = await self.db.client.table("chat_messages").select("*").eq(
+        result = self.db.client.table("chat_messages").select("*").eq(
             "user_id", self.user_id
         ).order("created_at", desc=True).limit(limit).execute()
         
@@ -265,7 +265,7 @@ class ChatService:
     
     async def clear_history(self) -> Dict[str, Any]:
         """Clear chat history for user"""
-        await self.db.client.table("chat_messages").delete().eq(
+        self.db.client.table("chat_messages").delete().eq(
             "user_id", self.user_id
         ).execute()
         
