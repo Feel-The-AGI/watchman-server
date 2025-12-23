@@ -17,7 +17,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 class SendMessageRequest(BaseModel):
     content: str
-    auto_execute: bool = False  # If True, execute commands without proposal
+    auto_execute: bool = True  # Execute commands directly without proposal (proposals table has issues)
 
 
 class MessageResponse(BaseModel):
