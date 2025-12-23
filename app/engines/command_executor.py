@@ -507,13 +507,17 @@ class CommandExecutor:
         
         engine = create_calendar_engine(self.user_id)
         
-        # Get anchor year
+        # Get anchor date - this is when the user started, don't fill before this
         anchor_date_str = cycle["anchor"].get("date")
         if not anchor_date_str:
             return
         
         anchor_date = date.fromisoformat(anchor_date_str)
-        year = anchor_date.year
+        
+        # Generate from anchor date to end of that year + next year
+        # Don't fill days BEFORE the anchor - user didn't work then
+        start_date = anchor_date
+        end_date = date(anchor_date.year + 1, 12, 31)  # Through next year
         
         # Convert settings cycle to engine format
         cycle_for_engine = {
@@ -533,9 +537,9 @@ class CommandExecutor:
             for lb in settings.get("leave_blocks", [])
         ]
         
-        # Generate calendar
+        # Generate calendar from anchor date onward
         try:
-            days = engine.generate_year(year, cycle_for_engine, leave_blocks)
+            days = engine.generate_range(start_date, end_date, cycle_for_engine, leave_blocks)
             
             # Convert to dict for upsert
             days_data = [
@@ -550,16 +554,16 @@ class CommandExecutor:
                 for d in days
             ]
             
-            # Delete existing days for this year
+            # Delete ALL existing days for this user first
             self.db.client.table("calendar_days").delete().eq(
                 "user_id", self.user_id
-            ).gte("date", f"{year}-01-01").lte("date", f"{year}-12-31").execute()
+            ).execute()
             
-            # Insert new days
+            # Insert new days (only from anchor onward)
             if days_data:
                 self.db.client.table("calendar_days").upsert(days_data).execute()
             
-            logger.info(f"Regenerated {len(days_data)} calendar days for user {self.user_id}")
+            logger.info(f"Regenerated {len(days_data)} calendar days for user {self.user_id} from {start_date}")
         except Exception as e:
             logger.error(f"Failed to regenerate calendar: {e}")
 
