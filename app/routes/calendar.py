@@ -57,13 +57,69 @@ async def get_year(
     year: int,
     user: dict = Depends(get_current_user)
 ):
-    """Get all calendar days for a specific year"""
+    """Get all calendar days for a specific year. Auto-generates if empty."""
     db = Database(use_admin=True)
     
     start_date = f"{year}-01-01"
     end_date = f"{year}-12-31"
     
     days = await db.get_calendar_days(user["id"], start_date, end_date)
+    
+    # If no data for this year, try to auto-generate
+    if not days:
+        cycle = await db.get_active_cycle(user["id"])
+        if cycle:
+            logger.info(f"Auto-generating calendar for year {year}, user {user['id']}")
+            
+            # Normalize cycle for engine
+            raw_pattern = cycle.get("pattern", [])
+            engine_pattern = []
+            for block in raw_pattern:
+                if "label" in block:
+                    engine_pattern.append({"label": block["label"], "duration": block["duration"]})
+                elif "type" in block:
+                    engine_pattern.append({"label": block["type"], "duration": block.get("days", block.get("duration", 5))})
+                else:
+                    engine_pattern.append(block)
+            
+            anchor_date_str = cycle.get("anchor_date")
+            anchor_cycle_day = cycle.get("anchor_cycle_day", 1)
+            
+            cycle_for_engine = {
+                "id": cycle.get("id"),
+                "anchor_date": anchor_date_str,
+                "anchor_cycle_day": anchor_cycle_day,
+                "cycle_length": cycle.get("cycle_length") or cycle.get("total_days") or sum(b.get("duration", 0) for b in raw_pattern),
+                "pattern": engine_pattern
+            }
+            
+            if anchor_date_str:
+                try:
+                    engine = create_calendar_engine(user["id"])
+                    gen_days = engine.generate_range(
+                        date(year, 1, 1),
+                        date(year, 12, 31),
+                        cycle_for_engine,
+                        []
+                    )
+                    
+                    days_data = [
+                        {
+                            "user_id": user["id"],
+                            "date": d.date.isoformat(),
+                            "cycle_id": cycle["id"],
+                            "cycle_day": d.cycle_day,
+                            "work_type": d.work_type.value,
+                            "state_json": d.state_json
+                        }
+                        for d in gen_days
+                    ]
+                    
+                    await db.upsert_calendar_days(days_data)
+                    days = await db.get_calendar_days(user["id"], start_date, end_date)
+                    logger.info(f"Auto-generated {len(days)} days for year {year}")
+                except Exception as e:
+                    logger.error(f"Failed to auto-generate calendar for {year}: {e}")
     
     return {
         "success": True,
