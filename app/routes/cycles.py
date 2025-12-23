@@ -77,10 +77,9 @@ async def create_cycle(
     data: CreateCycleRequest,
     user: dict = Depends(get_current_user)
 ):
-    """Create a new cycle"""
+    """Create a new cycle and auto-generate calendar"""
     db = Database(use_admin=True)
-    # Engine reserved for future calendar auto-generation
-    _engine = create_calendar_engine(user["id"])  # noqa: F841
+    engine = create_calendar_engine(user["id"])
     
     logger.info(f"User {user['id']} creating cycle: {data.name}")
     
@@ -127,9 +126,38 @@ async def create_cycle(
     # Create the new cycle
     cycle = await db.create_cycle(cycle_data)
     
+    # AUTO-GENERATE CALENDAR for anchor year
+    anchor_year = data.anchor_date.year
+    logger.info(f"Auto-generating calendar for year {anchor_year}")
+    
+    try:
+        leave_blocks = await db.get_leave_blocks(user["id"])
+        days = engine.generate_year(anchor_year, cycle, leave_blocks)
+        
+        days_data = [
+            {
+                "user_id": user["id"],
+                "date": d.date.isoformat(),
+                "cycle_id": cycle["id"],
+                "cycle_day": d.cycle_day,
+                "work_type": d.work_type.value,
+                "state_json": d.state_json
+            }
+            for d in days
+        ]
+        
+        # Clear existing days for this year and insert new
+        await db.delete_calendar_days(user["id"], f"{anchor_year}-01-01", f"{anchor_year}-12-31")
+        await db.upsert_calendar_days(days_data)
+        
+        logger.info(f"Generated {len(days_data)} calendar days for {anchor_year}")
+    except Exception as e:
+        logger.error(f"Failed to auto-generate calendar: {e}")
+        # Don't fail the cycle creation, just log the error
+    
     return {
         "success": True,
-        "message": "Cycle created successfully",
+        "message": f"Cycle created and calendar generated for {anchor_year}",
         "data": cycle
     }
 
@@ -140,8 +168,12 @@ async def update_cycle(
     data: UpdateCycleRequest,
     user: dict = Depends(get_current_user)
 ):
-    """Update an existing cycle"""
+    """Update an existing cycle and regenerate calendar if needed"""
     db = Database(use_admin=True)
+    engine = create_calendar_engine(user["id"])
+    
+    # Track if we need to regenerate calendar
+    needs_regeneration = False
     
     # Build update data
     update_data = {}
@@ -152,12 +184,15 @@ async def update_cycle(
     if data.pattern is not None:
         update_data["pattern"] = [{"label": b.label, "duration": b.duration} for b in data.pattern]
         update_data["cycle_length"] = sum(b.duration for b in data.pattern)
+        needs_regeneration = True
     
     if data.anchor_date is not None:
         update_data["anchor_date"] = data.anchor_date.isoformat()
+        needs_regeneration = True
     
     if data.anchor_cycle_day is not None:
         update_data["anchor_cycle_day"] = data.anchor_cycle_day
+        needs_regeneration = True
     
     if data.is_active is not None:
         update_data["is_active"] = data.is_active
@@ -168,6 +203,7 @@ async def update_cycle(
             for existing in existing_cycles:
                 if existing.get("id") != cycle_id and existing.get("is_active"):
                     await db.update_cycle(existing["id"], {"is_active": False})
+            needs_regeneration = True
     
     if data.crew is not None:
         update_data["crew"] = data.crew
@@ -180,9 +216,41 @@ async def update_cycle(
     
     cycle = await db.update_cycle(cycle_id, update_data)
     
+    # AUTO-REGENERATE CALENDAR if pattern/anchor changed
+    if needs_regeneration and cycle:
+        anchor_date_str = cycle.get("anchor_date")
+        if anchor_date_str:
+            from datetime import date as date_module
+            anchor_year = date_module.fromisoformat(anchor_date_str).year if isinstance(anchor_date_str, str) else anchor_date_str.year
+            
+            logger.info(f"Regenerating calendar for year {anchor_year} after cycle update")
+            
+            try:
+                leave_blocks = await db.get_leave_blocks(user["id"])
+                days = engine.generate_year(anchor_year, cycle, leave_blocks)
+                
+                days_data = [
+                    {
+                        "user_id": user["id"],
+                        "date": d.date.isoformat(),
+                        "cycle_id": cycle["id"],
+                        "cycle_day": d.cycle_day,
+                        "work_type": d.work_type.value,
+                        "state_json": d.state_json
+                    }
+                    for d in days
+                ]
+                
+                await db.delete_calendar_days(user["id"], f"{anchor_year}-01-01", f"{anchor_year}-12-31")
+                await db.upsert_calendar_days(days_data)
+                
+                logger.info(f"Regenerated {len(days_data)} calendar days for {anchor_year}")
+            except Exception as e:
+                logger.error(f"Failed to regenerate calendar: {e}")
+    
     return {
         "success": True,
-        "message": "Cycle updated",
+        "message": "Cycle updated" + (" and calendar regenerated" if needs_regeneration else ""),
         "data": cycle
     }
 
