@@ -76,7 +76,7 @@ class ChatService:
         
         self.client = genai.Client(api_key=api_key)
         # Use the latest Gemini 2.0 Flash for speed, or 1.5 Pro for quality
-        self.model = "gemini-2.0-flash-exp"
+        self.model = "gemini-2.0-pro"
     
     async def send_message(
         self, 
