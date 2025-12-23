@@ -31,9 +31,9 @@ If the user has a cycle defined above, USE IT. Don't ask them to repeat it.
 If they say "fill my calendar" and a cycle exists, just generate the update_cycle command with the existing pattern.
 
 CORRECTIONS:
-- If user says "X date is my day Y" → update the anchor: {"action": "update_cycle", "payload": {"anchor": {"date": "X", "cycle_day": Y}}, "explanation": "Adjusting anchor"}
+- If user says "X date is my day Y" → update the anchor: {{"action": "update_cycle", "payload": {{"anchor": {{"date": "X", "cycle_day": Y}}}}, "explanation": "Adjusting anchor"}}
 - If user says "that's wrong" or "you made a mistake" → ask what needs fixing
-- If user says "I started on X date" → update anchor date to X
+- If user says "I started on X date" → update anchor date to X with cycle_day 1
 
 AVAILABLE COMMANDS:
 1. update_cycle - Change work rotation pattern
