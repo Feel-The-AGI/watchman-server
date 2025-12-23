@@ -218,25 +218,55 @@ class CommandExecutor:
         current = await self.settings_service.get(self.user_id)
         existing_cycle = current.get("settings", {}).get("cycle", {}) or {}
         
-        # If only anchor is provided (correction), preserve existing pattern
-        if "anchor" in payload and "pattern" not in payload:
-            # Anchor-only update
-            cycle_data = {
-                "id": existing_cycle.get("id", str(uuid4())),
-                "name": existing_cycle.get("name", "My Rotation"),
-                "pattern": existing_cycle.get("pattern", []),
-                "anchor": payload.get("anchor", existing_cycle.get("anchor", {})),
-                "total_days": existing_cycle.get("total_days", 15)
-            }
+        # Normalize incoming anchor format - support both nested and flat
+        anchor_date = None
+        anchor_cycle_day = None
+        
+        if "anchor" in payload and isinstance(payload["anchor"], dict):
+            # New nested format from chat: {anchor: {date: "...", cycle_day: N}}
+            anchor_date = payload["anchor"].get("date")
+            anchor_cycle_day = payload["anchor"].get("cycle_day")
+        if "anchor_date" in payload:
+            # Flat format: {anchor_date: "...", anchor_cycle_day: N}
+            anchor_date = payload.get("anchor_date") or anchor_date
+            anchor_cycle_day = payload.get("anchor_cycle_day") or anchor_cycle_day
+        
+        # Normalize existing anchor format
+        existing_anchor_date = None
+        existing_anchor_cycle_day = 1
+        if isinstance(existing_cycle.get("anchor"), dict):
+            existing_anchor_date = existing_cycle["anchor"].get("date")
+            existing_anchor_cycle_day = existing_cycle["anchor"].get("cycle_day", 1)
         else:
-            # Full cycle update
-            cycle_data = {
-                "id": payload.get("id", existing_cycle.get("id", str(uuid4()))),
-                "name": payload.get("name", existing_cycle.get("name", "My Rotation")),
-                "pattern": payload.get("pattern", existing_cycle.get("pattern", [])),
-                "anchor": payload.get("anchor", existing_cycle.get("anchor", {})),
-                "total_days": sum(block.get("days", 0) for block in payload.get("pattern", [])) or existing_cycle.get("total_days", 15)
-            }
+            existing_anchor_date = existing_cycle.get("anchor_date")
+            existing_anchor_cycle_day = existing_cycle.get("anchor_cycle_day", 1)
+        
+        # Normalize pattern format - ensure {label, duration}
+        raw_pattern = payload.get("pattern", existing_cycle.get("pattern", []))
+        normalized_pattern = []
+        for block in raw_pattern:
+            if "label" in block:
+                normalized_pattern.append({"label": block["label"], "duration": block["duration"]})
+            elif "type" in block:
+                # Convert {type, days} to {label, duration}
+                label = block["type"]
+                if label == "day_shift":
+                    label = "work_day"
+                elif label == "night_shift":
+                    label = "work_night"
+                normalized_pattern.append({"label": label, "duration": block.get("days", block.get("duration", 5))})
+            else:
+                normalized_pattern.append(block)
+        
+        # Build normalized cycle data with flat anchor format
+        cycle_data = {
+            "id": payload.get("id", existing_cycle.get("id", str(uuid4()))),
+            "name": payload.get("name", existing_cycle.get("name", "My Rotation")),
+            "pattern": normalized_pattern,
+            "anchor_date": anchor_date or existing_anchor_date,
+            "anchor_cycle_day": anchor_cycle_day or existing_anchor_cycle_day,
+            "total_days": sum(block.get("duration", 0) for block in normalized_pattern) or existing_cycle.get("total_days", 15)
+        }
         
         await self.settings_service.update_section(self.user_id, "cycle", cycle_data)
         
@@ -518,33 +548,51 @@ class CommandExecutor:
         settings = await self.settings_service.get_snapshot(self.user_id)
         cycle = settings.get("cycle")
         
-        if not cycle or not cycle.get("anchor"):
+        if not cycle:
             return  # No cycle defined yet
         
-        engine = create_calendar_engine(self.user_id)
+        # Handle both formats: {anchor: {date, cycle_day}} or {anchor_date, anchor_cycle_day}
+        anchor_date_str = None
+        anchor_cycle_day = 1
         
-        # Get anchor date - this is when the user started, don't fill before this
-        anchor_date_str = cycle["anchor"].get("date")
+        if isinstance(cycle.get("anchor"), dict):
+            # New format: {anchor: {date: "...", cycle_day: 1}}
+            anchor_date_str = cycle["anchor"].get("date")
+            anchor_cycle_day = cycle["anchor"].get("cycle_day", 1)
+        else:
+            # Old format: {anchor_date: "...", anchor_cycle_day: 1}
+            anchor_date_str = cycle.get("anchor_date")
+            anchor_cycle_day = cycle.get("anchor_cycle_day", 1)
+        
         if not anchor_date_str:
+            logger.warning(f"No anchor date for user {self.user_id}, skipping calendar regeneration")
             return
         
         anchor_date = date.fromisoformat(anchor_date_str)
         
-        # Generate from anchor date to end of that year + next year
-        # Don't fill days BEFORE the anchor - user didn't work then
-        start_date = anchor_date
-        end_date = date(anchor_date.year + 1, 12, 31)  # Through next year
+        engine = create_calendar_engine(self.user_id)
         
-        # Convert settings cycle to engine format
+        # Generate from anchor date to end of that year + next year
+        start_date = anchor_date
+        end_date = date(anchor_date.year + 1, 12, 31)
+        
+        # Convert pattern to engine format - handle both {label, duration} and {type, days}
+        raw_pattern = cycle.get("pattern", [])
+        engine_pattern = []
+        for block in raw_pattern:
+            if "label" in block:
+                engine_pattern.append({"label": block["label"], "duration": block["duration"]})
+            elif "type" in block:
+                engine_pattern.append({"label": block["type"], "duration": block.get("days", block.get("duration", 5))})
+            else:
+                engine_pattern.append(block)
+        
         cycle_for_engine = {
             "id": cycle.get("id"),
             "anchor_date": anchor_date_str,
-            "anchor_cycle_day": cycle["anchor"].get("cycle_day", 1),
-            "cycle_length": cycle.get("total_days", 15),
-            "pattern": [
-                {"label": block["type"], "duration": block["days"]}
-                for block in cycle.get("pattern", [])
-            ]
+            "anchor_cycle_day": anchor_cycle_day,
+            "cycle_length": cycle.get("total_days") or sum(b.get("duration", b.get("days", 0)) for b in raw_pattern),
+            "pattern": engine_pattern
         }
         
         # Get leave blocks
@@ -570,12 +618,12 @@ class CommandExecutor:
                 for d in days
             ]
             
-            # Delete ALL existing days for this user first
+            # Delete from anchor forward only
             self.db.client.table("calendar_days").delete().eq(
                 "user_id", self.user_id
-            ).execute()
+            ).gte("date", start_date.isoformat()).execute()
             
-            # Insert new days (only from anchor onward)
+            # Insert new days
             if days_data:
                 self.db.client.table("calendar_days").upsert(days_data).execute()
             
