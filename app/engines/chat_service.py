@@ -86,8 +86,7 @@ class ChatService:
             raise ValueError("GEMINI_API_KEY not set")
         
         self.client = genai.Client(api_key=api_key)
-        # gemini-2.0-flash-exp is stable, gemini-2.5-pro may not exist
-        self.model = "gemini-2.0-flash-exp"
+        self.model = "gemini-2.5-pro"
     
     async def send_message(
         self, 
@@ -141,12 +140,21 @@ class ChatService:
                 )
             )
             
-            # Handle None response
-            if response.text:
-                response_text = response.text.strip()
+            # Handle response properly - check candidates first
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                if candidate.content and candidate.content.parts:
+                    response_text = candidate.content.parts[0].text.strip()
+                else:
+                    # Check if blocked by safety
+                    if hasattr(candidate, 'finish_reason'):
+                        logger.warning(f"Response blocked. Finish reason: {candidate.finish_reason}")
+                    response_text = "I couldn't process that request. Please rephrase."
             else:
-                logger.warning(f"Gemini returned empty response. Candidates: {response.candidates}")
-                response_text = "I understood your request but couldn't generate a response. Please try again."
+                # No candidates - check prompt feedback
+                if hasattr(response, 'prompt_feedback'):
+                    logger.warning(f"Prompt blocked: {response.prompt_feedback}")
+                response_text = "I couldn't understand that. Could you rephrase?"
             
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
