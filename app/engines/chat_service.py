@@ -86,7 +86,8 @@ class ChatService:
             raise ValueError("GEMINI_API_KEY not set")
         
         self.client = genai.Client(api_key=api_key)
-        self.model = "gemini-2.5-pro"
+        # gemini-2.0-flash-exp is stable, gemini-2.5-pro may not exist
+        self.model = "gemini-2.0-flash-exp"
     
     async def send_message(
         self, 
@@ -140,7 +141,12 @@ class ChatService:
                 )
             )
             
-            response_text = response.text.strip()
+            # Handle None response
+            if response.text:
+                response_text = response.text.strip()
+            else:
+                logger.warning(f"Gemini returned empty response. Candidates: {response.candidates}")
+                response_text = "I understood your request but couldn't generate a response. Please try again."
             
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
