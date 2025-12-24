@@ -451,9 +451,12 @@ class CommandExecutor:
             updated_days.append(day_data)
             current += timedelta(days=1)
 
-        # Upsert all updated days
+        # Upsert all updated days (specify conflict columns for unique constraint)
         if updated_days:
-            self.db.client.table("calendar_days").upsert(updated_days).execute()
+            self.db.client.table("calendar_days").upsert(
+                updated_days,
+                on_conflict="user_id,date"
+            ).execute()
 
         logger.info(f"Override {len(updated_days)} days from {start_date_str} to {end_date_str} to {work_type} for user {self.user_id}")
 
