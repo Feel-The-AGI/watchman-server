@@ -14,6 +14,10 @@ from app.models import (
     WorkType, CalendarDayCreate
 )
 
+# CALENDAR ENGINE VERSION - Increment this when calendar generation logic changes
+# This forces regeneration for all users on next fetch
+CALENDAR_ENGINE_VERSION = 2
+
 
 class CalendarEngine:
     """
@@ -134,14 +138,15 @@ class CalendarEngine:
             # Check if this day is a leave day
             is_leave = current_date in leave_dates
             
-            # Build initial state
+            # Build initial state with engine version for staleness detection
             state = {
                 "commitments": [],
                 "available_hours": self._get_available_hours(work_type, is_leave),
                 "used_hours": 0,
                 "is_overloaded": False,
                 "is_leave": is_leave,
-                "tags": []
+                "tags": [],
+                "engine_version": CALENDAR_ENGINE_VERSION
             }
             
             if is_leave:

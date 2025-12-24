@@ -10,7 +10,7 @@ from datetime import date
 
 from app.database import Database
 from app.middleware.auth import get_current_user
-from app.engines.calendar_engine import create_calendar_engine
+from app.engines.calendar_engine import create_calendar_engine, CALENDAR_ENGINE_VERSION
 
 
 from loguru import logger
@@ -52,21 +52,38 @@ async def get_calendar_days(
     }
 
 
+def _is_calendar_stale(days: list) -> bool:
+    """Check if calendar data was generated with an older engine version."""
+    if not days:
+        return True
+    # Check the first day's engine version
+    first_day = days[0]
+    state_json = first_day.get("state_json", {})
+    stored_version = state_json.get("engine_version", 0)
+    return stored_version < CALENDAR_ENGINE_VERSION
+
+
 @router.get("/year/{year}")
 async def get_year(
     year: int,
     user: dict = Depends(get_current_user)
 ):
-    """Get all calendar days for a specific year. Auto-generates if empty."""
+    """Get all calendar days for a specific year. Auto-generates if empty or stale."""
     db = Database(use_admin=True)
-    
+
     start_date = f"{year}-01-01"
     end_date = f"{year}-12-31"
-    
+
     days = await db.get_calendar_days(user["id"], start_date, end_date)
-    
-    # If no data for this year, try to auto-generate
-    if not days:
+
+    # Check if data is missing OR stale (generated with older engine version)
+    needs_regeneration = _is_calendar_stale(days)
+
+    if needs_regeneration:
+        if days:
+            logger.info(f"Calendar data for user {user['id']} year {year} is stale (old engine version), regenerating...")
+        else:
+            logger.info(f"No calendar data for user {user['id']} year {year}, auto-generating...")
         cycle = await db.get_active_cycle(user["id"])
         if cycle:
             logger.info(f"Auto-generating calendar for year {year}, user {user['id']}")
@@ -101,12 +118,15 @@ async def get_year(
                     start_gen = max(date_module(year, 1, 1), anchor_date)
                     end_gen = date_module(year, 12, 31)
                     
+                    # Fetch leave blocks for proper regeneration
+                    leave_blocks = await db.get_leave_blocks(user["id"])
+
                     engine = create_calendar_engine(user["id"])
                     gen_days = engine.generate_range(
                         start_gen,
                         end_gen,
                         cycle_for_engine,
-                        []
+                        leave_blocks
                     )
                     
                     days_data = [
