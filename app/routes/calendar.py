@@ -95,10 +95,16 @@ async def get_year(
             
             if anchor_date_str:
                 try:
+                    from datetime import date as date_module
+                    anchor_date = date_module.fromisoformat(anchor_date_str) if isinstance(anchor_date_str, str) else anchor_date_str
+                    # Start from anchor date if it's in the requested year, otherwise start of year
+                    start_gen = max(date_module(year, 1, 1), anchor_date)
+                    end_gen = date_module(year, 12, 31)
+                    
                     engine = create_calendar_engine(user["id"])
                     gen_days = engine.generate_range(
-                        date(year, 1, 1),
-                        date(year, 12, 31),
+                        start_gen,
+                        end_gen,
                         cycle_for_engine,
                         []
                     )
