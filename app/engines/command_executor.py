@@ -4,7 +4,7 @@ Validates commands, routes through Constraint Engine, creates proposals, execute
 """
 
 from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from uuid import uuid4
 from loguru import logger
 
@@ -16,12 +16,13 @@ from app.engines.calendar_engine import create_calendar_engine
 # Command action types
 VALID_ACTIONS = {
     "update_cycle",
-    "add_commitment", 
+    "add_commitment",
     "remove_commitment",
     "add_leave",
     "remove_leave",
     "update_constraint",
     "remove_constraint",
+    "override_days",  # Bulk update past/future calendar days to a specific work type
     "undo",
     "redo"
 }
@@ -204,6 +205,8 @@ class CommandExecutor:
             return await self._action_update_constraint(payload)
         elif action == "remove_constraint":
             return await self._action_remove_constraint(payload)
+        elif action == "override_days":
+            return await self._action_override_days(payload)
         elif action == "undo":
             return await self._action_undo(payload)
         elif action == "redo":
@@ -364,10 +367,103 @@ class CommandExecutor:
         constraint_id = payload.get("id")
         if not constraint_id:
             raise ValueError("Constraint ID required")
-        
+
         await self.settings_service.remove_from_list(self.user_id, "constraints", constraint_id)
         return {"removed_id": constraint_id}
-    
+
+    async def _action_override_days(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Bulk override calendar days to a specific work type.
+        Useful for correcting past entries or setting manual overrides.
+
+        Payload:
+            start_date: str - Start of date range (YYYY-MM-DD)
+            end_date: str - End of date range (YYYY-MM-DD)
+            work_type: str - "work_day", "work_night", or "off"
+        """
+        from app.engines.calendar_engine import CALENDAR_ENGINE_VERSION
+        from app.models import WorkType
+
+        start_date_str = payload.get("start_date")
+        end_date_str = payload.get("end_date")
+        work_type_str = payload.get("work_type")
+
+        if not start_date_str or not end_date_str:
+            raise ValueError("start_date and end_date are required")
+        if not work_type_str:
+            raise ValueError("work_type is required (work_day, work_night, or off)")
+
+        # Normalize work_type aliases
+        work_type_map = {
+            "day_shift": "work_day",
+            "day": "work_day",
+            "work_day": "work_day",
+            "night_shift": "work_night",
+            "night": "work_night",
+            "work_night": "work_night",
+            "off": "off",
+            "rest": "off",
+        }
+        work_type = work_type_map.get(work_type_str.lower(), work_type_str)
+
+        if work_type not in ["work_day", "work_night", "off"]:
+            raise ValueError(f"Invalid work_type: {work_type_str}. Must be work_day, work_night, or off")
+
+        # Calculate available hours based on work type
+        available_hours_map = {
+            "work_day": 4.0,
+            "work_night": 2.0,
+            "off": 12.0
+        }
+        available_hours = available_hours_map[work_type]
+
+        # Fetch existing calendar days in range
+        result = self.db.client.table("calendar_days").select("*").eq(
+            "user_id", self.user_id
+        ).gte("date", start_date_str).lte("date", end_date_str).execute()
+
+        existing_days = {d["date"]: d for d in (result.data or [])}
+
+        # Generate all dates in range
+        start_date = date.fromisoformat(start_date_str)
+        end_date = date.fromisoformat(end_date_str)
+
+        updated_days = []
+        current = start_date
+        while current <= end_date:
+            date_str = current.isoformat()
+            existing = existing_days.get(date_str)
+
+            # Build updated day data
+            state_json = existing.get("state_json", {}) if existing else {}
+            state_json["available_hours"] = available_hours
+            state_json["engine_version"] = CALENDAR_ENGINE_VERSION
+            state_json["manual_override"] = True  # Flag that this was manually set
+
+            day_data = {
+                "user_id": self.user_id,
+                "date": date_str,
+                "cycle_id": existing.get("cycle_id") if existing else None,
+                "cycle_day": existing.get("cycle_day", 1) if existing else 1,
+                "work_type": work_type,
+                "state_json": state_json
+            }
+            updated_days.append(day_data)
+            current += timedelta(days=1)
+
+        # Upsert all updated days
+        if updated_days:
+            self.db.client.table("calendar_days").upsert(updated_days).execute()
+
+        logger.info(f"Override {len(updated_days)} days from {start_date_str} to {end_date_str} to {work_type} for user {self.user_id}")
+
+        return {
+            "updated_count": len(updated_days),
+            "start_date": start_date_str,
+            "end_date": end_date_str,
+            "work_type": work_type
+        }
+
     async def _action_undo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Undo the last command"""
         # Find last applied command

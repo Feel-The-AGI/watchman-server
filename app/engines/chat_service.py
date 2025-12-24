@@ -52,6 +52,11 @@ AVAILABLE COMMANDS:
 5. undo - Revert last change
    Example: {{"action": "undo", "payload": {{}}, "explanation": "Undoing last change"}}
 
+6. override_days - Bulk update past or future calendar days to a specific work type
+   Use this when user wants to correct past entries or manually set work types for a date range
+   Example: {{"action": "override_days", "payload": {{"start_date": "2025-10-16", "end_date": "2025-12-14", "work_type": "work_day"}}, "explanation": "Setting Oct 16 - Dec 14 to day shifts"}}
+   Valid work_type values: "work_day" (or "day_shift"), "work_night" (or "night_shift"), "off"
+
 RESPONSE FORMAT:
 - When user requests a change, output ONLY valid JSON with the command structure above
 - When clarification is needed or just chatting, respond conversationally (no JSON)
@@ -67,6 +72,8 @@ RULES:
 6. For "add my diploma/course/class" → create add_commitment command
 7. For "block out/take leave" → create add_leave command
 8. For "undo that/go back/revert" → create undo command
+9. For "change past days to X" or "from date A to date B was all day/night shifts" → create override_days command
+10. For correcting historical calendar entries → use override_days (NOT update_cycle)
 
 Current date: {current_date}
 """
