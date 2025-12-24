@@ -136,8 +136,8 @@ class ChatService:
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
-                    temperature=0.7,
-                    max_output_tokens=2048
+                    temperature=0.2,
+                    max_output_tokens=32000
                 )
             )
             
