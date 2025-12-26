@@ -45,9 +45,11 @@ class UpdateCycleRequest(BaseModel):
 @router.get("")
 async def list_cycles(user: dict = Depends(get_current_user)):
     """Get all cycles for the current user"""
+    logger.info(f"[CYCLES] GET /cycles - user_id: {user['id']}")
     db = Database(use_admin=True)
     cycles = await db.get_cycles(user["id"])
-    
+    logger.info(f"[CYCLES] Found {len(cycles)} cycles for user {user['id']}")
+
     return {
         "success": True,
         "data": cycles
@@ -57,16 +59,19 @@ async def list_cycles(user: dict = Depends(get_current_user)):
 @router.get("/active")
 async def get_active_cycle(user: dict = Depends(get_current_user)):
     """Get the currently active cycle"""
+    logger.info(f"[CYCLES] GET /cycles/active - user_id: {user['id']}")
     db = Database(use_admin=True)
     cycle = await db.get_active_cycle(user["id"])
-    
+
     if not cycle:
+        logger.info(f"[CYCLES] No active cycle found for user {user['id']}")
         return {
             "success": True,
             "data": None,
             "message": "No active cycle found"
         }
-    
+
+    logger.info(f"[CYCLES] Active cycle found: {cycle.get('id')} - {cycle.get('name')}")
     return {
         "success": True,
         "data": cycle

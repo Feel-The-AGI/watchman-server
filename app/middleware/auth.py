@@ -53,47 +53,57 @@ async def get_current_user(
     Dependency to get the current authenticated user.
     Auto-creates user in database if they exist in Supabase Auth but not in users table.
     """
+    logger.info(f"[AUTH] get_current_user called - Path: {request.url.path}, Method: {request.method}")
+
     if credentials is None:
+        logger.warning(f"[AUTH] No credentials provided for {request.url.path}")
         raise HTTPException(
             status_code=401,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"}
         )
-    
+
     token = credentials.credentials
-    
+    logger.debug(f"[AUTH] Token received (first 20 chars): {token[:20]}...")
+
     # Verify the token
     payload = auth_middleware.verify_token(token)
-    
+
     if payload is None:
+        logger.warning(f"[AUTH] Token verification failed for {request.url.path}")
         raise HTTPException(
             status_code=401,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"}
         )
-    
+
     # Get the user ID from token
     auth_id = auth_middleware.extract_user_id(payload)
-    
+    logger.info(f"[AUTH] Token verified - auth_id: {auth_id}")
+
     if not auth_id:
+        logger.error(f"[AUTH] No auth_id in token payload")
         raise HTTPException(
             status_code=401,
             detail="Invalid token payload"
         )
-    
+
     # Fetch the user from database
+    logger.debug(f"[AUTH] Fetching user from database - auth_id: {auth_id}")
     db = Database(use_admin=True)
     user = await db.get_user_by_auth_id(auth_id)
-    
+
     if not user:
         # Auto-create user from Supabase Auth data
-        logger.info(f"Auto-creating user for auth_id: {auth_id}")
-        
+        logger.info(f"[AUTH] User not found, auto-creating for auth_id: {auth_id}")
+
         # Extract user info from JWT payload
         user_metadata = payload.get("user_metadata", {})
         email = payload.get("email") or user_metadata.get("email", "")
         name = user_metadata.get("full_name") or user_metadata.get("name") or email.split("@")[0]
-        
+
+        logger.info(f"[AUTH] Creating new user - email: {email}, name: {name}")
+
         # Create user in database
         user = await db.create_user({
             "auth_id": auth_id,
@@ -104,18 +114,18 @@ async def get_current_user(
             "onboarding_completed": False,
             "settings": {"max_concurrent_commitments": 2}
         })
-        
+
         if not user:
-            logger.error(f"Failed to create user for auth_id: {auth_id}")
+            logger.error(f"[AUTH] Failed to create user for auth_id: {auth_id}")
             raise HTTPException(
                 status_code=500,
                 detail="Failed to create user account"
             )
-        
-        logger.info(f"User created: {user.get('id')} ({email})")
-    
-    logger.debug(f"Authenticated user: {user.get('id')} (tier: {user.get('tier', 'free')})")
-    
+
+        logger.info(f"[AUTH] User created successfully: {user.get('id')} ({email})")
+    else:
+        logger.info(f"[AUTH] User found: {user.get('id')} ({user.get('email')}) - tier: {user.get('tier', 'free')}")
+
     return user
 
 

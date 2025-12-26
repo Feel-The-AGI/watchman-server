@@ -60,6 +60,36 @@ async def get_command(
     return result.data[0]
 
 
+class ExecuteCommandRequest(BaseModel):
+    action: str
+    payload: dict = {}
+    explanation: Optional[str] = None
+
+
+@router.post("/execute")
+async def execute_command(
+    request: ExecuteCommandRequest,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Execute a command directly (for approved proposals).
+    """
+    db = Database(use_admin=True)
+    executor = create_command_executor(db, user["id"])
+
+    command = {
+        "action": request.action,
+        "payload": request.payload,
+        "explanation": request.explanation or f"Executing {request.action}"
+    }
+
+    try:
+        result = await executor.execute(command, source="api")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class UndoRequest(BaseModel):
     command_id: Optional[str] = None  # If not provided, undo last command
 

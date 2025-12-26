@@ -178,10 +178,13 @@ class CommandExecutor:
             message_id=message_id,
             explanation=explanation
         )
-        
-        # Regenerate calendar
-        await self._regenerate_calendar()
-        
+
+        # Regenerate calendar (but NOT for override_days - those are manual overrides that should persist)
+        if action != "override_days":
+            await self._regenerate_calendar()
+        else:
+            logger.info(f"Skipping calendar regeneration for override_days (manual override should persist)")
+
         return {
             "success": True,
             "command_id": command_log["id"],
@@ -384,6 +387,9 @@ class CommandExecutor:
         from app.engines.calendar_engine import CALENDAR_ENGINE_VERSION
         from app.models import WorkType
 
+        logger.info(f"=== OVERRIDE_DAYS EXECUTING for user {self.user_id} ===")
+        logger.info(f"Payload: {payload}")
+
         start_date_str = payload.get("start_date")
         end_date_str = payload.get("end_date")
         work_type_str = payload.get("work_type")
@@ -453,12 +459,13 @@ class CommandExecutor:
 
         # Upsert all updated days (specify conflict columns for unique constraint)
         if updated_days:
-            self.db.client.table("calendar_days").upsert(
+            result = self.db.client.table("calendar_days").upsert(
                 updated_days,
                 on_conflict="user_id,date"
             ).execute()
+            logger.info(f"Upsert result: {len(result.data) if result.data else 0} rows affected")
 
-        logger.info(f"Override {len(updated_days)} days from {start_date_str} to {end_date_str} to {work_type} for user {self.user_id}")
+        logger.info(f"=== OVERRIDE_DAYS COMPLETE: {len(updated_days)} days from {start_date_str} to {end_date_str} set to {work_type} for user {self.user_id} ===")
 
         return {
             "updated_count": len(updated_days),
@@ -643,17 +650,17 @@ class CommandExecutor:
         raise Exception("Failed to log command")
     
     async def _regenerate_calendar(self):
-        """Regenerate calendar days from current settings"""
+        """Regenerate calendar days from current settings, preserving manual overrides"""
         settings = await self.settings_service.get_snapshot(self.user_id)
         cycle = settings.get("cycle")
-        
+
         if not cycle:
             return  # No cycle defined yet
-        
+
         # Handle both formats: {anchor: {date, cycle_day}} or {anchor_date, anchor_cycle_day}
         anchor_date_str = None
         anchor_cycle_day = 1
-        
+
         if isinstance(cycle.get("anchor"), dict):
             # New format: {anchor: {date: "...", cycle_day: 1}}
             anchor_date_str = cycle["anchor"].get("date")
@@ -662,19 +669,19 @@ class CommandExecutor:
             # Old format: {anchor_date: "...", anchor_cycle_day: 1}
             anchor_date_str = cycle.get("anchor_date")
             anchor_cycle_day = cycle.get("anchor_cycle_day", 1)
-        
+
         if not anchor_date_str:
             logger.warning(f"No anchor date for user {self.user_id}, skipping calendar regeneration")
             return
-        
+
         anchor_date = date.fromisoformat(anchor_date_str)
-        
+
         engine = create_calendar_engine(self.user_id)
-        
+
         # Generate from anchor date to end of that year + next year
         start_date = anchor_date
         end_date = date(anchor_date.year + 1, 12, 31)
-        
+
         # Convert pattern to engine format - handle both {label, duration} and {type, days}
         raw_pattern = cycle.get("pattern", [])
         engine_pattern = []
@@ -685,7 +692,7 @@ class CommandExecutor:
                 engine_pattern.append({"label": block["type"], "duration": block.get("days", block.get("duration", 5))})
             else:
                 engine_pattern.append(block)
-        
+
         cycle_for_engine = {
             "id": cycle.get("id"),
             "anchor_date": anchor_date_str,
@@ -693,40 +700,71 @@ class CommandExecutor:
             "cycle_length": cycle.get("total_days") or sum(b.get("duration", b.get("days", 0)) for b in raw_pattern),
             "pattern": engine_pattern
         }
-        
+
         # Get leave blocks
         leave_blocks = [
             {"start_date": lb["start_date"], "end_date": lb["end_date"]}
             for lb in settings.get("leave_blocks", [])
         ]
-        
+
         # Generate calendar from anchor date onward
         try:
             days = engine.generate_range(start_date, end_date, cycle_for_engine, leave_blocks)
-            
-            # Convert to dict for upsert
-            days_data = [
-                {
-                    "user_id": self.user_id,
-                    "date": d.date.isoformat(),
-                    "cycle_id": d.cycle_id,
-                    "cycle_day": d.cycle_day,
-                    "work_type": d.work_type.value,
-                    "state_json": d.state_json
-                }
-                for d in days
-            ]
-            
+
+            # IMPORTANT: Fetch existing days that have manual_override flag to preserve them
+            existing_result = self.db.client.table("calendar_days").select("date, state_json, work_type").eq(
+                "user_id", self.user_id
+            ).gte("date", start_date.isoformat()).execute()
+
+            # Build map of manually overridden days to preserve
+            manual_override_days = {}
+            for existing_day in (existing_result.data or []):
+                state = existing_day.get("state_json", {})
+                if state.get("manual_override"):
+                    manual_override_days[existing_day["date"]] = existing_day
+                    logger.debug(f"Preserving manual override for date {existing_day['date']}")
+
+            if manual_override_days:
+                logger.info(f"Preserving {len(manual_override_days)} manually overridden days during regeneration")
+
+            # Convert to dict for upsert, but preserve manual overrides
+            days_data = []
+            for d in days:
+                date_str = d.date.isoformat()
+
+                # Check if this day has a manual override
+                if date_str in manual_override_days:
+                    # Keep the manually overridden version
+                    override = manual_override_days[date_str]
+                    days_data.append({
+                        "user_id": self.user_id,
+                        "date": date_str,
+                        "cycle_id": d.cycle_id,
+                        "cycle_day": d.cycle_day,  # Update cycle_day for reference
+                        "work_type": override["work_type"],  # Keep overridden work_type
+                        "state_json": override["state_json"]  # Keep overridden state
+                    })
+                else:
+                    # Use freshly generated day
+                    days_data.append({
+                        "user_id": self.user_id,
+                        "date": date_str,
+                        "cycle_id": d.cycle_id,
+                        "cycle_day": d.cycle_day,
+                        "work_type": d.work_type.value,
+                        "state_json": d.state_json
+                    })
+
             # Delete from anchor forward only
             self.db.client.table("calendar_days").delete().eq(
                 "user_id", self.user_id
             ).gte("date", start_date.isoformat()).execute()
-            
-            # Insert new days
+
+            # Insert new days (including preserved manual overrides)
             if days_data:
                 self.db.client.table("calendar_days").upsert(days_data).execute()
-            
-            logger.info(f"Regenerated {len(days_data)} calendar days for user {self.user_id} from {start_date}")
+
+            logger.info(f"Regenerated {len(days_data)} calendar days for user {self.user_id} from {start_date} (preserved {len(manual_override_days)} manual overrides)")
         except Exception as e:
             logger.error(f"Failed to regenerate calendar: {e}")
 

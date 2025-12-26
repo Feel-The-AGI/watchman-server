@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Application
     app_env: str = "development"
     debug: bool = True
-    cors_origins: str = "https://trywatchman.vercel.app,https://watchman-client.vercel.app"
+    cors_origins: str = "https://trywatchman.app,https://www.trywatchman.app,https://trywatchman.vercel.app,https://watchman-client.vercel.app"
     
     # Server
     host: str = "0.0.0.0"

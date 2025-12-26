@@ -37,14 +37,16 @@ async def get_calendar_days(
     user: dict = Depends(get_current_user)
 ):
     """Get calendar days for a date range"""
+    logger.info(f"[CALENDAR] GET /calendar - user_id: {user['id']}, range: {start_date} to {end_date}")
     db = Database(use_admin=True)
-    
+
     days = await db.get_calendar_days(
         user["id"],
         start_date.isoformat(),
         end_date.isoformat()
     )
-    
+    logger.info(f"[CALENDAR] Returning {len(days)} days for user {user['id']}")
+
     return {
         "success": True,
         "data": days,
@@ -69,15 +71,19 @@ async def get_year(
     user: dict = Depends(get_current_user)
 ):
     """Get all calendar days for a specific year. Auto-generates if empty or stale."""
+    logger.info(f"[CALENDAR] GET /calendar/year/{year} - user_id: {user['id']}")
     db = Database(use_admin=True)
 
     start_date = f"{year}-01-01"
     end_date = f"{year}-12-31"
 
     days = await db.get_calendar_days(user["id"], start_date, end_date)
+    logger.debug(f"[CALENDAR] Found {len(days)} existing days for year {year}")
 
     # Check if data is missing OR stale (generated with older engine version)
     needs_regeneration = _is_calendar_stale(days)
+    if needs_regeneration:
+        logger.info(f"[CALENDAR] Calendar needs regeneration (stale or empty) for user {user['id']}, year {year}")
 
     if needs_regeneration:
         if days:
@@ -128,19 +134,46 @@ async def get_year(
                         cycle_for_engine,
                         leave_blocks
                     )
-                    
-                    days_data = [
-                        {
-                            "user_id": user["id"],
-                            "date": d.date.isoformat(),
-                            "cycle_id": cycle["id"],
-                            "cycle_day": d.cycle_day,
-                            "work_type": d.work_type.value,
-                            "state_json": d.state_json
-                        }
-                        for d in gen_days
-                    ]
-                    
+
+                    # Fetch existing days that have manual_override flag to preserve them
+                    existing_days_result = await db.get_calendar_days(
+                        user["id"],
+                        start_gen.isoformat(),
+                        end_gen.isoformat()
+                    )
+                    manual_override_days = {}
+                    for existing_day in (existing_days_result or []):
+                        state = existing_day.get("state_json", {})
+                        if state.get("manual_override"):
+                            manual_override_days[existing_day["date"]] = existing_day
+
+                    if manual_override_days:
+                        logger.info(f"Preserving {len(manual_override_days)} manually overridden days during auto-regeneration")
+
+                    days_data = []
+                    for d in gen_days:
+                        date_str = d.date.isoformat()
+                        if date_str in manual_override_days:
+                            # Preserve manual override
+                            override = manual_override_days[date_str]
+                            days_data.append({
+                                "user_id": user["id"],
+                                "date": date_str,
+                                "cycle_id": cycle["id"],
+                                "cycle_day": d.cycle_day,
+                                "work_type": override["work_type"],
+                                "state_json": override["state_json"]
+                            })
+                        else:
+                            days_data.append({
+                                "user_id": user["id"],
+                                "date": date_str,
+                                "cycle_id": cycle["id"],
+                                "cycle_day": d.cycle_day,
+                                "work_type": d.work_type.value,
+                                "state_json": d.state_json
+                            })
+
                     await db.upsert_calendar_days(days_data)
                     days = await db.get_calendar_days(user["id"], start_date, end_date)
                     logger.info(f"Auto-generated {len(days)} days for year {year}")
@@ -305,25 +338,52 @@ async def generate_calendar(
         # No anchor - generate full year
         engine = create_calendar_engine(user["id"])
         days = engine.generate_year(data.year, cycle_for_engine, leave_blocks)
-    
-    # Convert to dictionaries for database
-    days_data = [
-        {
-            "user_id": user["id"],
-            "date": d.date.isoformat(),
-            "cycle_id": cycle["id"],
-            "cycle_day": d.cycle_day,
-            "work_type": d.work_type.value,
-            "state_json": d.state_json
-        }
-        for d in days
-    ]
-    
+
+    # Fetch existing days that have manual_override flag to preserve them
+    existing_days = await db.get_calendar_days(
+        user["id"],
+        f"{data.year}-01-01",
+        f"{data.year}-12-31"
+    )
+    manual_override_days = {}
+    for existing_day in (existing_days or []):
+        state = existing_day.get("state_json", {})
+        if state.get("manual_override"):
+            manual_override_days[existing_day["date"]] = existing_day
+
+    if manual_override_days:
+        logger.info(f"Preserving {len(manual_override_days)} manually overridden days during calendar generation")
+
+    # Convert to dictionaries for database, preserving manual overrides
+    days_data = []
+    for d in days:
+        date_str = d.date.isoformat()
+        if date_str in manual_override_days:
+            # Preserve manual override
+            override = manual_override_days[date_str]
+            days_data.append({
+                "user_id": user["id"],
+                "date": date_str,
+                "cycle_id": cycle["id"],
+                "cycle_day": d.cycle_day,
+                "work_type": override["work_type"],
+                "state_json": override["state_json"]
+            })
+        else:
+            days_data.append({
+                "user_id": user["id"],
+                "date": date_str,
+                "cycle_id": cycle["id"],
+                "cycle_day": d.cycle_day,
+                "work_type": d.work_type.value,
+                "state_json": d.state_json
+            })
+
     # Delete existing from the start date forward, then insert new
     if days_data:
         first_date = days_data[0]["date"]
         await db.delete_calendar_days(user["id"], first_date, f"{data.year}-12-31")
-    
+
     # Upsert all days
     await db.upsert_calendar_days(days_data)
     
