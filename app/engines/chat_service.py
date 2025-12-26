@@ -24,9 +24,10 @@ WATCHMAN_TOOLS = [
         "name": "override_days",
         "description": """Bulk update calendar days to a specific work type. Use this to:
 - Correct past calendar entries that are wrong
+- Convert night shifts to day shifts (or vice versa) while keeping off days unchanged
 - Set a range of dates to day shifts, night shifts, or off
-- Fix historical data before the anchor date
-ALWAYS use this when user says 'set X dates to Y shifts' or 'change dates to...'""",
+IMPORTANT: When user says 'set working days to X' or 'change shifts to X', set preserve_off_days=true to keep off days unchanged.
+Only set preserve_off_days=false when user explicitly wants ALL days changed (including off days).""",
         "parameters": {
             "type": "object",
             "properties": {
@@ -42,6 +43,10 @@ ALWAYS use this when user says 'set X dates to Y shifts' or 'change dates to...'
                     "type": "string",
                     "enum": ["work_day", "work_night", "off"],
                     "description": "The work type to set. work_day=day shift, work_night=night shift, off=rest day"
+                },
+                "preserve_off_days": {
+                    "type": "boolean",
+                    "description": "If true, keeps existing off/rest days unchanged. Default true for 'working days' requests."
                 }
             },
             "required": ["start_date", "end_date", "work_type"]

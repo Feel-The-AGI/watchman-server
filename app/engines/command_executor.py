@@ -383,6 +383,7 @@ class CommandExecutor:
             start_date: str - Start of date range (YYYY-MM-DD)
             end_date: str - End of date range (YYYY-MM-DD)
             work_type: str - "work_day", "work_night", or "off"
+            preserve_off_days: bool - If true, skip days that are currently "off" (default: True)
         """
         from app.engines.calendar_engine import CALENDAR_ENGINE_VERSION
         from app.models import WorkType
@@ -393,6 +394,7 @@ class CommandExecutor:
         start_date_str = payload.get("start_date")
         end_date_str = payload.get("end_date")
         work_type_str = payload.get("work_type")
+        preserve_off_days = payload.get("preserve_off_days", True)  # Default to preserving off days
 
         if not start_date_str or not end_date_str:
             raise ValueError("start_date and end_date are required")
@@ -435,10 +437,18 @@ class CommandExecutor:
         end_date = date.fromisoformat(end_date_str)
 
         updated_days = []
+        skipped_off_days = 0
         current = start_date
         while current <= end_date:
             date_str = current.isoformat()
             existing = existing_days.get(date_str)
+
+            # If preserve_off_days is True and this day is currently "off", skip it
+            if preserve_off_days and existing and existing.get("work_type") == "off":
+                logger.debug(f"Preserving off day: {date_str}")
+                skipped_off_days += 1
+                current += timedelta(days=1)
+                continue
 
             # Build updated day data
             state_json = existing.get("state_json", {}) if existing else {}
@@ -465,13 +475,15 @@ class CommandExecutor:
             ).execute()
             logger.info(f"Upsert result: {len(result.data) if result.data else 0} rows affected")
 
-        logger.info(f"=== OVERRIDE_DAYS COMPLETE: {len(updated_days)} days from {start_date_str} to {end_date_str} set to {work_type} for user {self.user_id} ===")
+        logger.info(f"=== OVERRIDE_DAYS COMPLETE: {len(updated_days)} days updated, {skipped_off_days} off days preserved, from {start_date_str} to {end_date_str} set to {work_type} for user {self.user_id} ===")
 
         return {
             "updated_count": len(updated_days),
+            "skipped_off_days": skipped_off_days,
             "start_date": start_date_str,
             "end_date": end_date_str,
-            "work_type": work_type
+            "work_type": work_type,
+            "preserve_off_days": preserve_off_days
         }
 
     async def _action_undo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
