@@ -530,6 +530,14 @@ class IncidentType(str, Enum):
     HARASSMENT = "harassment"
     INJURY = "injury"
     POLICY_VIOLATION = "policy_violation"
+    HEALTH = "health"  # Sick, medical issues, health-related absences
+    DISCRIMINATION = "discrimination"  # Unfair treatment based on protected characteristics
+    WORKLOAD = "workload"  # Excessive workload, unreasonable demands
+    COMPENSATION = "compensation"  # Pay issues, unpaid work, wage theft
+    SCHEDULING = "scheduling"  # Shift conflicts, unfair scheduling, roster issues
+    COMMUNICATION = "communication"  # Lack of info, miscommunication, withheld information
+    RETALIATION = "retaliation"  # Punishment for reporting issues
+    ENVIRONMENT = "environment"  # Hostile environment, poor working conditions
     OTHER = "other"
 
 

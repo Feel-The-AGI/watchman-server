@@ -23,6 +23,8 @@ VALID_ACTIONS = {
     "update_constraint",
     "remove_constraint",
     "override_days",  # Bulk update past/future calendar days to a specific work type
+    "create_daily_log",  # Create daily notes and log hours worked
+    "create_incident",  # Log workplace incidents
     "undo",
     "redo"
 }
@@ -210,6 +212,10 @@ class CommandExecutor:
             return await self._action_remove_constraint(payload)
         elif action == "override_days":
             return await self._action_override_days(payload)
+        elif action == "create_daily_log":
+            return await self._action_create_daily_log(payload)
+        elif action == "create_incident":
+            return await self._action_create_incident(payload)
         elif action == "undo":
             return await self._action_undo(payload)
         elif action == "redo":
@@ -485,6 +491,119 @@ class CommandExecutor:
             "work_type": work_type,
             "preserve_off_days": preserve_off_days
         }
+
+    async def _action_create_daily_log(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create a daily log/note entry.
+
+        Payload:
+            date: str - Date in YYYY-MM-DD format
+            note: str - The note content
+            actual_hours: float (optional) - Actual hours worked
+            overtime_hours: float (optional) - Overtime hours
+        """
+        logger.info(f"=== CREATE_DAILY_LOG for user {self.user_id} ===")
+        logger.info(f"Payload: {payload}")
+
+        date_str = payload.get("date")
+        note = payload.get("note", "")
+        actual_hours = payload.get("actual_hours")
+        overtime_hours = payload.get("overtime_hours", 0)
+
+        if not date_str:
+            date_str = date.today().isoformat()
+
+        if not note:
+            raise ValueError("Note content is required")
+
+        # Create the daily log
+        log_data = {
+            "id": str(uuid4()),
+            "user_id": self.user_id,
+            "date": date_str,
+            "note": note,
+            "actual_hours": actual_hours,
+            "overtime_hours": overtime_hours
+        }
+
+        result = self.db.client.table("daily_logs").insert(log_data).execute()
+
+        if result.data and len(result.data) > 0:
+            log = result.data[0]
+            logger.info(f"=== DAILY_LOG CREATED: id={log['id']}, date={date_str} ===")
+            return {"daily_log": log}
+
+        raise Exception("Failed to create daily log")
+
+    async def _action_create_incident(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create an incident report.
+
+        Payload:
+            date: str - Date in YYYY-MM-DD format
+            type: str - Incident type (overtime, safety, equipment, harassment, injury, policy_violation, health, etc.)
+            severity: str - low, medium, high, critical
+            title: str - Brief title
+            description: str - Detailed description
+            reported_to: str (optional) - Who was this reported to
+            witnesses: str (optional) - Names of witnesses
+        """
+        logger.info(f"=== CREATE_INCIDENT for user {self.user_id} ===")
+        logger.info(f"Payload: {payload}")
+
+        date_str = payload.get("date")
+        incident_type = payload.get("type", "other")
+        severity = payload.get("severity", "medium")
+        title = payload.get("title", "")
+        description = payload.get("description", "")
+        reported_to = payload.get("reported_to")
+        witnesses = payload.get("witnesses")
+
+        if not date_str:
+            date_str = date.today().isoformat()
+
+        if not title:
+            raise ValueError("Incident title is required")
+        if not description:
+            raise ValueError("Incident description is required")
+
+        # Validate incident type
+        valid_types = [
+            "overtime", "safety", "equipment", "harassment", "injury", "policy_violation",
+            "health", "discrimination", "workload", "compensation", "scheduling",
+            "communication", "retaliation", "environment", "other"
+        ]
+        if incident_type not in valid_types:
+            logger.warning(f"Invalid incident type '{incident_type}', defaulting to 'other'")
+            incident_type = "other"
+
+        # Validate severity
+        valid_severities = ["low", "medium", "high", "critical"]
+        if severity not in valid_severities:
+            logger.warning(f"Invalid severity '{severity}', defaulting to 'medium'")
+            severity = "medium"
+
+        # Create the incident
+        incident_data = {
+            "id": str(uuid4()),
+            "user_id": self.user_id,
+            "date": date_str,
+            "type": incident_type,
+            "severity": severity,
+            "title": title,
+            "description": description,
+            "reported_to": reported_to,
+            "witnesses": witnesses
+        }
+
+        result = self.db.client.table("incidents").insert(incident_data).execute()
+
+        if result.data and len(result.data) > 0:
+            incident = result.data[0]
+            logger.info(f"=== INCIDENT CREATED: id={incident['id']}, type={incident_type}, severity={severity} ===")
+            return {"incident": incident}
+
+        raise Exception("Failed to create incident")
 
     async def _action_undo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Undo the last command"""

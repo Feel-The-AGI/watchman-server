@@ -42,7 +42,11 @@ class IncidentUpdateRequest(BaseModel):
     outcome: Optional[str] = None
 
 
-VALID_TYPES = ["overtime", "safety", "equipment", "harassment", "injury", "policy_violation", "other"]
+VALID_TYPES = [
+    "overtime", "safety", "equipment", "harassment", "injury", "policy_violation",
+    "health", "discrimination", "workload", "compensation", "scheduling",
+    "communication", "retaliation", "environment", "other"
+]
 VALID_SEVERITIES = ["low", "medium", "high", "critical"]
 
 

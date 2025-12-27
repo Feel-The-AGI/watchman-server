@@ -163,6 +163,114 @@ Only set preserve_off_days=false when user explicitly wants ALL days changed (in
         }
     },
     {
+        "name": "create_daily_log",
+        "description": """Create a daily note/log entry for a specific date. Use this when:
+- User wants to document something that happened at work
+- User wants to add notes about their day
+- User mentions they want to log or record something
+- User talks about their actual hours worked
+
+Examples:
+- "Log that I worked 10 hours today with 2 hours overtime"
+- "Note: Had a good training session with new team member"
+- "Record that I did extra safety checks this morning"
+""",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Date for the log in YYYY-MM-DD format. Use today's date if not specified."
+                },
+                "note": {
+                    "type": "string",
+                    "description": "The note/log content. Write this as a clear, professional note."
+                },
+                "actual_hours": {
+                    "type": "number",
+                    "description": "Actual hours worked (optional, e.g., 8, 10, 12)"
+                },
+                "overtime_hours": {
+                    "type": "number",
+                    "description": "Overtime hours worked (optional, e.g., 2, 4)"
+                }
+            },
+            "required": ["date", "note"]
+        }
+    },
+    {
+        "name": "create_incident",
+        "description": """Log a workplace incident or issue. Use this when:
+- User reports a safety issue, injury, or hazard
+- User mentions harassment, discrimination, or hostile behavior
+- User had a health issue, got sick, or had medical problems at work
+- User reports overtime violations or being forced to work extra
+- User mentions equipment failures or broken tools
+- User describes policy violations or unfair treatment
+- User talks about pay issues, scheduling problems, or workload concerns
+- User wants to formally document any workplace problem
+
+INCIDENT TYPES (choose the most appropriate):
+- overtime: Forced overtime, unpaid overtime, excessive hours
+- safety: Safety hazards, unsafe conditions, safety violations
+- equipment: Equipment failure, broken tools, malfunctioning machinery
+- harassment: Verbal abuse, bullying, inappropriate behavior
+- injury: Physical injury, accident, hurt at work
+- policy_violation: Rules broken, unfair practices, procedural issues
+- health: Got sick, medical issue, illness, feeling unwell, health problem
+- discrimination: Unfair treatment based on race, gender, age, etc.
+- workload: Excessive workload, unreasonable demands, understaffing
+- compensation: Pay issues, unpaid work, wage theft, denied benefits
+- scheduling: Shift conflicts, unfair scheduling, roster problems
+- communication: Lack of information, miscommunication, withheld info
+- retaliation: Punishment for reporting issues, whistleblower retaliation
+- environment: Hostile work environment, poor conditions, cleanliness
+- other: Anything else not covered above
+
+SEVERITY LEVELS:
+- low: Minor issue, inconvenience, no immediate harm
+- medium: Moderate concern, needs attention soon
+- high: Serious issue, needs urgent attention
+- critical: Emergency, immediate danger, requires instant action
+""",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Date of the incident in YYYY-MM-DD format. Use today if not specified."
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["overtime", "safety", "equipment", "harassment", "injury", "policy_violation", "health", "discrimination", "workload", "compensation", "scheduling", "communication", "retaliation", "environment", "other"],
+                    "description": "Type of incident - choose the most appropriate category"
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "critical"],
+                    "description": "Severity level of the incident"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Brief title summarizing the incident (e.g., 'Forced to work 4 hours overtime')"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description of what happened. Be specific and factual."
+                },
+                "reported_to": {
+                    "type": "string",
+                    "description": "Who was this reported to (optional, e.g., 'Supervisor John', 'HR', 'Safety Officer')"
+                },
+                "witnesses": {
+                    "type": "string",
+                    "description": "Names of any witnesses (optional)"
+                }
+            },
+            "required": ["date", "type", "severity", "title", "description"]
+        }
+    },
+    {
         "name": "undo",
         "description": "Undo the last change made to the calendar or settings",
         "parameters": {
@@ -187,34 +295,54 @@ SYSTEM_PROMPT = """You are Watchman, an intelligent calendar assistant for shift
 {calendar_snapshot}
 
 === YOUR CAPABILITIES ===
-You have access to tools that DIRECTLY modify the user's calendar:
+You have access to tools that DIRECTLY modify the user's calendar and logs:
+
+CALENDAR TOOLS:
 - override_days: Change any date range to day shifts, night shifts, or off days
 - update_cycle: Set or change the rotation pattern
 - add_leave: Block out vacation/leave dates
 - add_commitment: Add recurring events like classes
 - undo: Revert the last change
 
-IMPORTANT BEHAVIOR:
-1. When user asks to change dates → USE the override_days tool immediately
-2. When user asks about their calendar → Look at the CALENDAR snapshot above and respond
-3. When user wants to set up rotation → USE update_cycle tool
-4. NEVER just say "Done" without calling a tool - your words don't change anything!
-5. If you see the calendar data above, you CAN tell the user what their current schedule looks like
+LOGGING TOOLS:
+- create_daily_log: Add daily notes, record hours worked, document events
+- create_incident: Log workplace incidents (safety, harassment, overtime, health/sick, equipment, etc.)
 
-CONTEXT AWARENESS:
-- Look at the calendar snapshot to see what days are currently set to
-- Acknowledge what you see: "I see October shows as [X], I'll change that to [Y]"
-- You have FULL visibility into the user's calendar data
+IMPORTANT BEHAVIOR:
+1. When user asks to change dates → USE override_days immediately
+2. When user mentions an incident, problem, or issue → USE create_incident
+3. When user wants to log/note something about their day → USE create_daily_log
+4. When user asks about their calendar → Look at the CALENDAR snapshot above
+5. NEVER just say "Done" without calling a tool - your words don't change anything!
+
+LOGGING GUIDELINES:
+When creating logs or incidents from natural language:
+- Extract the key facts and write them clearly
+- For incidents: Choose the most appropriate type and severity
+- If user says "I was sick" or "I had a health issue" → type: "health"
+- If user says "I had to work extra hours" → type: "overtime"
+- If no date is specified, use today's date: {current_date}
+- Write professional, factual descriptions
 
 EXAMPLES:
+
+Calendar changes:
 User: "Set Oct 16 through Dec 14 as day shifts"
 → Call override_days(start_date="2025-10-16", end_date="2025-12-14", work_type="work_day")
 
-User: "What does my November look like?"
-→ Look at calendar_snapshot and describe it
+Daily logging:
+User: "Log that I worked 10 hours today, 2 hours overtime. Had to stay late for equipment issues."
+→ Call create_daily_log(date="{current_date}", note="Worked extended shift due to equipment issues. Total 10 hours with 2 hours overtime.", actual_hours=10, overtime_hours=2)
 
-User: "I work 5 days, 5 nights, 5 off starting Jan 1"
-→ Call update_cycle with pattern and anchor_date
+Incident reporting:
+User: "I was really sick yesterday and had to leave early, felt terrible all day"
+→ Call create_incident(date="yesterday's date", type="health", severity="medium", title="Left work early due to illness", description="Experienced severe illness symptoms during shift and had to leave work early. Felt unwell throughout the day.")
+
+User: "My supervisor made me work 4 extra hours yesterday even though I said I couldn't"
+→ Call create_incident(date="yesterday's date", type="overtime", severity="high", title="Forced to work 4 hours overtime", description="Supervisor required additional 4 hours of work despite declining. Overtime was mandatory and not voluntary.")
+
+User: "The forklift broke down again today, third time this week"
+→ Call create_incident(date="{current_date}", type="equipment", severity="medium", title="Recurring forklift breakdown", description="Forklift experienced mechanical failure. This is the third breakdown this week, indicating a persistent maintenance issue.")
 """
 
 
