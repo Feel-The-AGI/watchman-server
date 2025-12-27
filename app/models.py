@@ -485,6 +485,109 @@ class MutationReview(BaseModel):
 
 
 # ==========================================
+# DAILY LOG MODELS
+# ==========================================
+
+class DailyLogBase(BaseModel):
+    """Base daily log model"""
+    date: date
+    note: str
+    actual_hours: Optional[float] = None
+    overtime_hours: Optional[float] = None
+
+
+class DailyLogCreate(DailyLogBase):
+    """Daily log creation model"""
+    user_id: str
+
+
+class DailyLog(DailyLogBase):
+    """Full daily log model"""
+    id: str
+    user_id: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DailyLogUpdate(BaseModel):
+    """Daily log update model"""
+    note: Optional[str] = None
+    actual_hours: Optional[float] = None
+    overtime_hours: Optional[float] = None
+
+
+# ==========================================
+# INCIDENT MODELS
+# ==========================================
+
+class IncidentType(str, Enum):
+    OVERTIME = "overtime"
+    SAFETY = "safety"
+    EQUIPMENT = "equipment"
+    HARASSMENT = "harassment"
+    INJURY = "injury"
+    POLICY_VIOLATION = "policy_violation"
+    OTHER = "other"
+
+
+class IncidentSeverity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class IncidentBase(BaseModel):
+    """Base incident model"""
+    date: date
+    type: IncidentType
+    severity: IncidentSeverity = IncidentSeverity.MEDIUM
+    title: str
+    description: str
+    reported_to: Optional[str] = None
+    witnesses: Optional[str] = None
+    outcome: Optional[str] = None
+
+
+class IncidentCreate(IncidentBase):
+    """Incident creation model"""
+    user_id: str
+
+
+class Incident(IncidentBase):
+    """Full incident model"""
+    id: str
+    user_id: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class IncidentUpdate(BaseModel):
+    """Incident update model"""
+    type: Optional[IncidentType] = None
+    severity: Optional[IncidentSeverity] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    reported_to: Optional[str] = None
+    witnesses: Optional[str] = None
+    outcome: Optional[str] = None
+
+
+class IncidentStats(BaseModel):
+    """Statistics for incidents"""
+    total_count: int = 0
+    by_type: Dict[str, int] = {}
+    by_severity: Dict[str, int] = {}
+    by_month: Dict[str, int] = {}
+
+
+# ==========================================
 # STATISTICS MODELS
 # ==========================================
 

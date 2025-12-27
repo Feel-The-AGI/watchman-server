@@ -15,7 +15,7 @@ import time
 
 from app.config import get_settings
 from app.routes import auth, cycles, commitments, calendar, stats, settings as settings_routes
-from app.routes import chat, commands, master_settings
+from app.routes import chat, commands, master_settings, daily_logs, incidents
 from app.database import init_supabase
 
 
@@ -151,6 +151,10 @@ def create_app() -> FastAPI:
     app.include_router(chat.router, prefix="/api", tags=["Chat"])
     app.include_router(commands.router, prefix="/api", tags=["Commands"])
     app.include_router(master_settings.router, prefix="/api", tags=["Master Settings"])
+
+    # Daily logs and incidents routes
+    app.include_router(daily_logs.router, prefix="/api", tags=["Daily Logs"])
+    app.include_router(incidents.router, prefix="/api", tags=["Incidents"])
     logger.info("[ROUTES] All routes registered")
 
     @app.get("/", tags=["Health"])

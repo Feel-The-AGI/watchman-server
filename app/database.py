@@ -649,3 +649,206 @@ class Database:
         except Exception as e:
             logger.error(f"[DB] Failed to delete auth user {auth_id}: {e}")
             return False
+
+    # ==========================================
+    # Daily Logs
+    # ==========================================
+
+    async def get_daily_logs(self, user_id: str, start_date: str = None, end_date: str = None) -> list:
+        """Get daily logs for a user, optionally filtered by date range"""
+        logger.debug(f"[DB] get_daily_logs: user_id={user_id}, {start_date} to {end_date}")
+        try:
+            query = self.client.table("daily_logs").select("*").eq("user_id", user_id)
+            if start_date:
+                query = query.gte("date", start_date)
+            if end_date:
+                query = query.lte("date", end_date)
+            result = query.order("date", desc=True).execute()
+            logger.debug(f"[DB] Found {len(result.data or [])} daily logs")
+            return result.data or []
+        except Exception as e:
+            logger.error(f"[DB] Error getting daily logs: {e}")
+            return []
+
+    async def get_daily_log_by_date(self, user_id: str, date: str) -> Optional[dict]:
+        """Get daily log for a specific date"""
+        logger.debug(f"[DB] get_daily_log_by_date: user_id={user_id}, date={date}")
+        try:
+            result = self.client.table("daily_logs").select("*").eq("user_id", user_id).eq("date", date).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error getting daily log by date: {e}")
+            return None
+
+    async def get_daily_log(self, log_id: str) -> Optional[dict]:
+        """Get a specific daily log by ID"""
+        logger.debug(f"[DB] get_daily_log: {log_id}")
+        try:
+            result = self.client.table("daily_logs").select("*").eq("id", log_id).single().execute()
+            return result.data if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error getting daily log: {e}")
+            return None
+
+    async def create_daily_log(self, data: dict) -> dict:
+        """Create a new daily log"""
+        logger.info(f"[DB] create_daily_log: date={data.get('date')}")
+        try:
+            result = self.client.table("daily_logs").insert(data).execute()
+            if result.data:
+                logger.info(f"[DB] Daily log created: {result.data[0].get('id')}")
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error creating daily log: {e}")
+            return None
+
+    async def update_daily_log(self, log_id: str, data: dict) -> dict:
+        """Update a daily log"""
+        logger.info(f"[DB] update_daily_log: {log_id}")
+        try:
+            result = self.client.table("daily_logs").update(data).eq("id", log_id).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error updating daily log: {e}")
+            return None
+
+    async def update_daily_hours(self, user_id: str, date: str, data: dict) -> dict:
+        """Update or create hours for a specific date"""
+        logger.info(f"[DB] update_daily_hours: user_id={user_id}, date={date}")
+        try:
+            # Check if log exists for this date
+            existing = await self.get_daily_log_by_date(user_id, date)
+            if existing:
+                result = self.client.table("daily_logs").update(data).eq("id", existing["id"]).execute()
+            else:
+                # Create a new log entry with just hours
+                new_data = {
+                    "user_id": user_id,
+                    "date": date,
+                    "note": "",
+                    **data
+                }
+                result = self.client.table("daily_logs").insert(new_data).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error updating daily hours: {e}")
+            return None
+
+    async def delete_daily_log(self, log_id: str) -> bool:
+        """Delete a daily log"""
+        logger.info(f"[DB] delete_daily_log: {log_id}")
+        try:
+            self.client.table("daily_logs").delete().eq("id", log_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"[DB] Error deleting daily log: {e}")
+            return False
+
+    # ==========================================
+    # Incidents
+    # ==========================================
+
+    async def get_incidents(self, user_id: str, start_date: str = None, end_date: str = None) -> list:
+        """Get incidents for a user, optionally filtered by date range"""
+        logger.debug(f"[DB] get_incidents: user_id={user_id}, {start_date} to {end_date}")
+        try:
+            query = self.client.table("incidents").select("*").eq("user_id", user_id)
+            if start_date:
+                query = query.gte("date", start_date)
+            if end_date:
+                query = query.lte("date", end_date)
+            result = query.order("date", desc=True).execute()
+            logger.debug(f"[DB] Found {len(result.data or [])} incidents")
+            return result.data or []
+        except Exception as e:
+            logger.error(f"[DB] Error getting incidents: {e}")
+            return []
+
+    async def get_incidents_by_date(self, user_id: str, date: str) -> list:
+        """Get all incidents for a specific date"""
+        logger.debug(f"[DB] get_incidents_by_date: user_id={user_id}, date={date}")
+        try:
+            result = self.client.table("incidents").select("*").eq("user_id", user_id).eq("date", date).execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"[DB] Error getting incidents by date: {e}")
+            return []
+
+    async def get_incident(self, incident_id: str) -> Optional[dict]:
+        """Get a specific incident by ID"""
+        logger.debug(f"[DB] get_incident: {incident_id}")
+        try:
+            result = self.client.table("incidents").select("*").eq("id", incident_id).single().execute()
+            return result.data if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error getting incident: {e}")
+            return None
+
+    async def create_incident(self, data: dict) -> dict:
+        """Create a new incident"""
+        logger.info(f"[DB] create_incident: date={data.get('date')}, type={data.get('type')}")
+        try:
+            result = self.client.table("incidents").insert(data).execute()
+            if result.data:
+                logger.info(f"[DB] Incident created: {result.data[0].get('id')}")
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error creating incident: {e}")
+            return None
+
+    async def update_incident(self, incident_id: str, data: dict) -> dict:
+        """Update an incident"""
+        logger.info(f"[DB] update_incident: {incident_id}")
+        try:
+            result = self.client.table("incidents").update(data).eq("id", incident_id).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error updating incident: {e}")
+            return None
+
+    async def delete_incident(self, incident_id: str) -> bool:
+        """Delete an incident"""
+        logger.info(f"[DB] delete_incident: {incident_id}")
+        try:
+            self.client.table("incidents").delete().eq("id", incident_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"[DB] Error deleting incident: {e}")
+            return False
+
+    async def get_incident_stats(self, user_id: str, year: int = None) -> dict:
+        """Get incident statistics for a user"""
+        logger.debug(f"[DB] get_incident_stats: user_id={user_id}, year={year}")
+        try:
+            query = self.client.table("incidents").select("*").eq("user_id", user_id)
+            if year:
+                query = query.gte("date", f"{year}-01-01").lte("date", f"{year}-12-31")
+            result = query.execute()
+
+            incidents = result.data or []
+            stats = {
+                "total_count": len(incidents),
+                "by_type": {},
+                "by_severity": {},
+                "by_month": {}
+            }
+
+            for incident in incidents:
+                # Count by type
+                itype = incident.get("type", "other")
+                stats["by_type"][itype] = stats["by_type"].get(itype, 0) + 1
+
+                # Count by severity
+                severity = incident.get("severity", "medium")
+                stats["by_severity"][severity] = stats["by_severity"].get(severity, 0) + 1
+
+                # Count by month
+                date_str = incident.get("date", "")
+                if date_str and len(date_str) >= 7:
+                    month = date_str[:7]  # "2026-01"
+                    stats["by_month"][month] = stats["by_month"].get(month, 0) + 1
+
+            return stats
+        except Exception as e:
+            logger.error(f"[DB] Error getting incident stats: {e}")
+            return {"total_count": 0, "by_type": {}, "by_severity": {}, "by_month": {}}
