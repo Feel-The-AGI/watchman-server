@@ -852,3 +852,62 @@ class Database:
         except Exception as e:
             logger.error(f"[DB] Error getting incident stats: {e}")
             return {"total_count": 0, "by_type": {}, "by_severity": {}, "by_month": {}}
+
+    # ==================== CALENDAR SHARING ====================
+
+    async def create_calendar_share(self, data: dict) -> dict:
+        """Create a new calendar share link"""
+        logger.info(f"[DB] create_calendar_share: user_id={data.get('user_id')}")
+        try:
+            result = self.client.table("calendar_shares").insert(data).execute()
+            if result.data:
+                logger.info(f"[DB] Calendar share created: {result.data[0].get('id')}")
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error creating calendar share: {e}")
+            return None
+
+    async def get_calendar_shares(self, user_id: str) -> list:
+        """Get all calendar shares for a user"""
+        logger.debug(f"[DB] get_calendar_shares: user_id={user_id}")
+        try:
+            result = self.client.table("calendar_shares").select("*").eq(
+                "user_id", user_id
+            ).order("created_at", desc=True).execute()
+            return result.data or []
+        except Exception as e:
+            logger.error(f"[DB] Error getting calendar shares: {e}")
+            return []
+
+    async def get_calendar_share_by_code(self, share_code: str) -> Optional[dict]:
+        """Get a calendar share by its unique code"""
+        logger.debug(f"[DB] get_calendar_share_by_code: {share_code}")
+        try:
+            result = self.client.table("calendar_shares").select("*").eq(
+                "share_code", share_code
+            ).eq("is_active", True).single().execute()
+            return result.data if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error getting calendar share by code: {e}")
+            return None
+
+    async def revoke_calendar_share(self, share_id: str, user_id: str) -> bool:
+        """Revoke a calendar share (set is_active to False)"""
+        logger.info(f"[DB] revoke_calendar_share: {share_id}")
+        try:
+            self.client.table("calendar_shares").update({
+                "is_active": False
+            }).eq("id", share_id).eq("user_id", user_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"[DB] Error revoking calendar share: {e}")
+            return False
+
+    async def get_user_name_by_id(self, user_id: str) -> Optional[str]:
+        """Get a user's display name by their ID"""
+        try:
+            result = self.client.table("users").select("name").eq("id", user_id).single().execute()
+            return result.data.get("name") if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error getting user name: {e}")
+            return None

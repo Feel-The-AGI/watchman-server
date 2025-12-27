@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.database import Database
-from app.middleware.auth import get_current_user, require_admin
+from app.middleware.auth import get_current_user, require_admin, get_effective_tier, is_in_trial, TRIAL_DURATION_DAYS
 
 
 router = APIRouter()
@@ -34,12 +34,35 @@ class ConstraintRequest(BaseModel):
 @router.get("")
 async def get_settings(user: dict = Depends(get_current_user)):
     """Get all user settings"""
+    from datetime import datetime, timedelta, timezone
+
+    actual_tier = user.get("tier", "free")
+    effective_tier = get_effective_tier(user)
+    in_trial = is_in_trial(user)
+
+    # Calculate trial end date if in trial
+    trial_ends_at = None
+    if in_trial and user.get("created_at"):
+        created_at = user.get("created_at")
+        if isinstance(created_at, str):
+            created_at = created_at.replace('Z', '+00:00')
+            created_date = datetime.fromisoformat(created_at)
+        else:
+            created_date = created_at
+        trial_ends_at = (created_date + timedelta(days=TRIAL_DURATION_DAYS)).isoformat()
+
     return {
         "success": True,
         "data": {
             "settings": user.get("settings", {}),
-            "tier": user.get("tier", "free"),
-            "role": user.get("role", "user")
+            "tier": actual_tier,
+            "effective_tier": effective_tier,
+            "role": user.get("role", "user"),
+            "trial": {
+                "active": in_trial,
+                "ends_at": trial_ends_at,
+                "duration_days": TRIAL_DURATION_DAYS
+            } if in_trial else None
         }
     }
 
@@ -60,9 +83,23 @@ async def update_settings(
                 status_code=400,
                 detail="constraint_mode must be 'binary' or 'weighted'"
             )
+        # Check tier for weighted mode (trial users get access)
+        effective_tier = get_effective_tier(user)
+        if data.constraint_mode == "weighted" and effective_tier not in ["pro", "admin", "trial"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Weighted constraints are a Pro feature. Upgrade to unlock advanced scheduling with priorities!"
+            )
         current_settings["constraint_mode"] = data.constraint_mode
-    
+
     if data.weighted_mode_enabled is not None:
+        # Check tier for weighted mode (trial users get access)
+        effective_tier = get_effective_tier(user)
+        if data.weighted_mode_enabled and effective_tier not in ["pro", "admin", "trial"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Weighted constraints are a Pro feature. Upgrade to unlock!"
+            )
         current_settings["weighted_mode_enabled"] = data.weighted_mode_enabled
     
     if data.max_concurrent_commitments is not None:
@@ -192,19 +229,30 @@ async def toggle_weighted_mode(
     enabled: bool,
     user: dict = Depends(get_current_user)
 ):
-    """Toggle weighted constraints mode"""
+    """
+    Toggle weighted constraints mode.
+    PRO FEATURE: Only Pro or trial users can enable weighted constraints.
+    """
     db = Database(use_admin=True)
-    
+
+    # Check tier for enabling weighted mode (trial users get access)
+    effective_tier = get_effective_tier(user)
+    if enabled and effective_tier not in ["pro", "admin", "trial"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Weighted constraints are a Pro feature. Upgrade to Pro to unlock advanced constraint rules with priorities and weights!"
+        )
+
     settings = user.get("settings", {})
     settings["weighted_mode_enabled"] = enabled
-    
+
     if enabled:
         settings["constraint_mode"] = "weighted"
     else:
         settings["constraint_mode"] = "binary"
-    
+
     await db.update_user(user["id"], {"settings": settings})
-    
+
     return {
         "success": True,
         "message": f"Weighted mode {'enabled' if enabled else 'disabled'}",

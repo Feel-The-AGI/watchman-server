@@ -9,7 +9,7 @@ from typing import Optional
 from datetime import date
 
 from app.database import Database
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, get_effective_tier
 from app.engines.calendar_engine import create_calendar_engine, CALENDAR_ENGINE_VERSION
 
 
@@ -399,9 +399,20 @@ async def add_leave_block(
     data: LeaveBlockRequest,
     user: dict = Depends(get_current_user)
 ):
-    """Add a leave block"""
+    """
+    Add a leave block.
+    PRO FEATURE: Leave planning is only available for Pro or trial users.
+    """
+    # Check tier - leave planning is Pro only (trial users get access)
+    effective_tier = get_effective_tier(user)
+    if effective_tier not in ["pro", "admin", "trial"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Leave planning is a Pro feature. Upgrade to Pro to block out vacation days, sick leave, and plan time off on your calendar!"
+        )
+
     db = Database(use_admin=True)
-    
+
     if data.end_date < data.start_date:
         raise HTTPException(
             status_code=400,

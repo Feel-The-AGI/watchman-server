@@ -4,6 +4,7 @@ Validates Supabase JWT tokens and extracts user information
 """
 
 from typing import Optional
+from datetime import datetime, timedelta, timezone
 from fastapi import Request, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
@@ -11,6 +12,10 @@ from loguru import logger
 
 from app.config import get_settings
 from app.database import Database
+
+
+# Trial period configuration
+TRIAL_DURATION_DAYS = 3
 
 
 security = HTTPBearer(auto_error=False)
@@ -168,11 +173,83 @@ async def require_admin(
     """Dependency to require admin role"""
     role = user.get("role", "user")
     tier = user.get("tier", "free")
-    
+
     if role != "admin" and tier != "admin":
         raise HTTPException(
             status_code=403,
             detail="Admin access required"
         )
-    
+
+    return user
+
+
+def is_in_trial(user: dict) -> bool:
+    """Check if user is within their 3-day trial period"""
+    # Only free tier users can be in trial
+    if user.get("tier") not in ["free", None]:
+        return False
+
+    created_at = user.get("created_at")
+    if not created_at:
+        return False
+
+    try:
+        # Parse the created_at timestamp
+        if isinstance(created_at, str):
+            # Handle ISO format with timezone
+            created_at = created_at.replace('Z', '+00:00')
+            created_date = datetime.fromisoformat(created_at)
+        else:
+            created_date = created_at
+
+        # Ensure timezone awareness
+        if created_date.tzinfo is None:
+            created_date = created_date.replace(tzinfo=timezone.utc)
+
+        trial_end = created_date + timedelta(days=TRIAL_DURATION_DAYS)
+        now = datetime.now(timezone.utc)
+
+        is_trial = now < trial_end
+        if is_trial:
+            logger.info(f"[AUTH] User {user.get('id')} is in trial (ends: {trial_end.isoformat()})")
+
+        return is_trial
+    except Exception as e:
+        logger.warning(f"[AUTH] Error checking trial status: {e}")
+        return False
+
+
+def get_effective_tier(user: dict) -> str:
+    """
+    Get the effective tier for a user, considering trial status.
+    Returns 'trial' if user is in trial period, otherwise their actual tier.
+    """
+    actual_tier = user.get("tier", "free")
+
+    if actual_tier in ["pro", "admin"]:
+        return actual_tier
+
+    if is_in_trial(user):
+        return "trial"
+
+    return actual_tier
+
+
+async def require_pro_or_trial(
+    user: dict = Depends(get_current_user)
+) -> dict:
+    """
+    Dependency to require Pro tier OR trial period.
+    Use this for features that should be available during trial.
+    For exports (no trial access), use require_pro_tier instead.
+    """
+    effective_tier = get_effective_tier(user)
+
+    if effective_tier not in ["pro", "admin", "trial"]:
+        logger.info(f"Pro feature blocked for user {user.get('id')} (tier: {user.get('tier')})")
+        raise HTTPException(
+            status_code=403,
+            detail="This feature is part of the Pro plan. Upgrade to unlock intelligent parsing and full statistics."
+        )
+
     return user
