@@ -60,6 +60,80 @@ async def get_daily_logs(
     return logs
 
 
+# IMPORTANT: Export route must come BEFORE /{date_str} to avoid being caught by the parameter route
+@router.get("/daily-logs/export")
+async def export_daily_logs(
+    start_date: str = Query(...),
+    end_date: str = Query(...),
+    format: str = Query("csv"),
+    user: dict = Depends(get_current_user)
+):
+    """Export daily logs as CSV or PDF"""
+    start_time = time.time()
+    logger.info(f"[DAILY_LOGS] === EXPORT DAILY LOGS ===")
+    logger.info(f"[DAILY_LOGS] User: {user['id']}")
+    logger.info(f"[DAILY_LOGS] Date range: {start_date} to {end_date}")
+    logger.info(f"[DAILY_LOGS] Format: {format}")
+
+    db = Database(use_admin=True)
+    logs = await db.get_daily_logs(user["id"], start_date, end_date)
+    logger.info(f"[DAILY_LOGS] Found {len(logs)} logs to export")
+
+    if format == "csv":
+        # Generate CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Header
+        writer.writerow(["Date", "Note", "Actual Hours", "Overtime Hours", "Created At"])
+
+        # Data
+        for log in logs:
+            writer.writerow([
+                log.get("date", ""),
+                log.get("note", ""),
+                log.get("actual_hours", ""),
+                log.get("overtime_hours", ""),
+                log.get("created_at", "")
+            ])
+
+        output.seek(0)
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[DAILY_LOGS] CSV export complete: {len(logs)} rows ({elapsed:.2f}ms)")
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=daily-logs-{start_date}-to-{end_date}.csv"}
+        )
+
+    elif format == "pdf":
+        # For PDF, we'll return a simple text format that can be converted client-side
+        content = f"Daily Logs Export\n"
+        content += f"Period: {start_date} to {end_date}\n"
+        content += "=" * 50 + "\n\n"
+
+        for log in logs:
+            content += f"Date: {log.get('date', 'N/A')}\n"
+            content += f"Note: {log.get('note', 'N/A')}\n"
+            content += f"Hours: {log.get('actual_hours', 'N/A')} (Overtime: {log.get('overtime_hours', 0)})\n"
+            content += "-" * 30 + "\n"
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[DAILY_LOGS] Text export complete: {len(logs)} entries ({elapsed:.2f}ms)")
+
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/plain",
+            headers={"Content-Disposition": f"attachment; filename=daily-logs-{start_date}-to-{end_date}.txt"}
+        )
+
+    else:
+        logger.warning(f"[DAILY_LOGS] Invalid export format requested: {format}")
+        raise HTTPException(status_code=400, detail="Invalid format. Use 'csv' or 'pdf'")
+
+
 @router.get("/daily-logs/{date_str}")
 async def get_daily_log_by_date(
     date_str: str,
@@ -233,76 +307,3 @@ async def delete_daily_log(
 
     logger.info(f"[DAILY_LOGS] Log deleted successfully ({elapsed:.2f}ms)")
     return {"success": True}
-
-
-@router.get("/daily-logs/export")
-async def export_daily_logs(
-    start_date: str = Query(...),
-    end_date: str = Query(...),
-    format: str = Query("csv"),
-    user: dict = Depends(get_current_user)
-):
-    """Export daily logs as CSV or PDF"""
-    start_time = time.time()
-    logger.info(f"[DAILY_LOGS] === EXPORT DAILY LOGS ===")
-    logger.info(f"[DAILY_LOGS] User: {user['id']}")
-    logger.info(f"[DAILY_LOGS] Date range: {start_date} to {end_date}")
-    logger.info(f"[DAILY_LOGS] Format: {format}")
-
-    db = Database(use_admin=True)
-    logs = await db.get_daily_logs(user["id"], start_date, end_date)
-    logger.info(f"[DAILY_LOGS] Found {len(logs)} logs to export")
-
-    if format == "csv":
-        # Generate CSV
-        output = io.StringIO()
-        writer = csv.writer(output)
-
-        # Header
-        writer.writerow(["Date", "Note", "Actual Hours", "Overtime Hours", "Created At"])
-
-        # Data
-        for log in logs:
-            writer.writerow([
-                log.get("date", ""),
-                log.get("note", ""),
-                log.get("actual_hours", ""),
-                log.get("overtime_hours", ""),
-                log.get("created_at", "")
-            ])
-
-        output.seek(0)
-
-        elapsed = (time.time() - start_time) * 1000
-        logger.info(f"[DAILY_LOGS] CSV export complete: {len(logs)} rows ({elapsed:.2f}ms)")
-
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=daily-logs-{start_date}-to-{end_date}.csv"}
-        )
-
-    elif format == "pdf":
-        # For PDF, we'll return a simple text format that can be converted client-side
-        content = f"Daily Logs Export\n"
-        content += f"Period: {start_date} to {end_date}\n"
-        content += "=" * 50 + "\n\n"
-
-        for log in logs:
-            content += f"Date: {log.get('date', 'N/A')}\n"
-            content += f"Note: {log.get('note', 'N/A')}\n"
-            content += f"Hours: {log.get('actual_hours', 'N/A')} (Overtime: {log.get('overtime_hours', 0)})\n"
-            content += "-" * 30 + "\n"
-
-        elapsed = (time.time() - start_time) * 1000
-        logger.info(f"[DAILY_LOGS] Text export complete: {len(logs)} entries ({elapsed:.2f}ms)")
-
-        return StreamingResponse(
-            iter([content]),
-            media_type="text/plain",
-            headers={"Content-Disposition": f"attachment; filename=daily-logs-{start_date}-to-{end_date}.txt"}
-        )
-
-    else:
-        logger.warning(f"[DAILY_LOGS] Invalid export format requested: {format}")
-        raise HTTPException(status_code=400, detail="Invalid format. Use 'csv' or 'pdf'")

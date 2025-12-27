@@ -110,6 +110,127 @@ async def get_incidents_by_date(
     return incidents
 
 
+# IMPORTANT: Export route must come BEFORE /{incident_id} to avoid being caught by the parameter route
+@router.get("/incidents/export")
+async def export_incidents(
+    start_date: str = Query(...),
+    end_date: str = Query(...),
+    format: str = Query("csv"),
+    user: dict = Depends(get_current_user)
+):
+    """Export incidents as CSV or PDF"""
+    start_time = time.time()
+    logger.info(f"[INCIDENTS] === EXPORT INCIDENTS ===")
+    logger.info(f"[INCIDENTS] User: {user['id']}")
+    logger.info(f"[INCIDENTS] Date range: {start_date} to {end_date}")
+    logger.info(f"[INCIDENTS] Format: {format}")
+
+    db = Database(use_admin=True)
+    incidents = await db.get_incidents(user["id"], start_date, end_date)
+    logger.info(f"[INCIDENTS] Found {len(incidents)} incidents to export")
+
+    if format == "csv":
+        # Generate CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Header
+        writer.writerow([
+            "Date", "Type", "Severity", "Title", "Description",
+            "Reported To", "Witnesses", "Outcome", "Created At"
+        ])
+
+        # Data
+        for incident in incidents:
+            writer.writerow([
+                incident.get("date", ""),
+                incident.get("type", ""),
+                incident.get("severity", ""),
+                incident.get("title", ""),
+                incident.get("description", ""),
+                incident.get("reported_to", ""),
+                incident.get("witnesses", ""),
+                incident.get("outcome", ""),
+                incident.get("created_at", "")
+            ])
+
+        output.seek(0)
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[INCIDENTS] CSV export complete: {len(incidents)} rows ({elapsed:.2f}ms)")
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=incidents-{start_date}-to-{end_date}.csv"}
+        )
+
+    elif format == "pdf":
+        # Generate detailed text report
+        content = "=" * 60 + "\n"
+        content += "INCIDENT REPORT\n"
+        content += "=" * 60 + "\n\n"
+        content += f"Period: {start_date} to {end_date}\n"
+        content += f"Total Incidents: {len(incidents)}\n\n"
+
+        # Summary by type
+        type_counts = {}
+        severity_counts = {}
+        for incident in incidents:
+            t = incident.get("type", "other")
+            s = incident.get("severity", "medium")
+            type_counts[t] = type_counts.get(t, 0) + 1
+            severity_counts[s] = severity_counts.get(s, 0) + 1
+
+        content += "SUMMARY BY TYPE:\n"
+        for t, count in sorted(type_counts.items()):
+            content += f"  - {t.replace('_', ' ').title()}: {count}\n"
+
+        content += "\nSUMMARY BY SEVERITY:\n"
+        for s, count in sorted(severity_counts.items()):
+            content += f"  - {s.title()}: {count}\n"
+
+        content += "\n" + "=" * 60 + "\n"
+        content += "DETAILED RECORDS\n"
+        content += "=" * 60 + "\n\n"
+
+        for i, incident in enumerate(incidents, 1):
+            content += f"INCIDENT #{i}\n"
+            content += "-" * 40 + "\n"
+            content += f"Date: {incident.get('date', 'N/A')}\n"
+            content += f"Type: {incident.get('type', 'N/A').replace('_', ' ').title()}\n"
+            content += f"Severity: {incident.get('severity', 'N/A').title()}\n"
+            content += f"Title: {incident.get('title', 'N/A')}\n"
+            content += f"Description:\n  {incident.get('description', 'N/A')}\n"
+
+            if incident.get("reported_to"):
+                content += f"Reported To: {incident.get('reported_to')}\n"
+            if incident.get("witnesses"):
+                content += f"Witnesses: {incident.get('witnesses')}\n"
+            if incident.get("outcome"):
+                content += f"Outcome: {incident.get('outcome')}\n"
+
+            content += f"Logged: {incident.get('created_at', 'N/A')}\n"
+            content += "\n"
+
+        content += "=" * 60 + "\n"
+        content += "END OF REPORT\n"
+        content += "=" * 60 + "\n"
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[INCIDENTS] Text export complete: {len(incidents)} entries ({elapsed:.2f}ms)")
+
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/plain",
+            headers={"Content-Disposition": f"attachment; filename=incident-report-{start_date}-to-{end_date}.txt"}
+        )
+
+    else:
+        logger.warning(f"[INCIDENTS] Invalid export format requested: {format}")
+        raise HTTPException(status_code=400, detail="Invalid format. Use 'csv' or 'pdf'")
+
+
 @router.get("/incidents/{incident_id}")
 async def get_incident(
     incident_id: str,
@@ -295,123 +416,3 @@ async def delete_incident(
 
     logger.info(f"[INCIDENTS] Incident deleted successfully ({elapsed:.2f}ms)")
     return {"success": True}
-
-
-@router.get("/incidents/export")
-async def export_incidents(
-    start_date: str = Query(...),
-    end_date: str = Query(...),
-    format: str = Query("csv"),
-    user: dict = Depends(get_current_user)
-):
-    """Export incidents as CSV or PDF"""
-    start_time = time.time()
-    logger.info(f"[INCIDENTS] === EXPORT INCIDENTS ===")
-    logger.info(f"[INCIDENTS] User: {user['id']}")
-    logger.info(f"[INCIDENTS] Date range: {start_date} to {end_date}")
-    logger.info(f"[INCIDENTS] Format: {format}")
-
-    db = Database(use_admin=True)
-    incidents = await db.get_incidents(user["id"], start_date, end_date)
-    logger.info(f"[INCIDENTS] Found {len(incidents)} incidents to export")
-
-    if format == "csv":
-        # Generate CSV
-        output = io.StringIO()
-        writer = csv.writer(output)
-
-        # Header
-        writer.writerow([
-            "Date", "Type", "Severity", "Title", "Description",
-            "Reported To", "Witnesses", "Outcome", "Created At"
-        ])
-
-        # Data
-        for incident in incidents:
-            writer.writerow([
-                incident.get("date", ""),
-                incident.get("type", ""),
-                incident.get("severity", ""),
-                incident.get("title", ""),
-                incident.get("description", ""),
-                incident.get("reported_to", ""),
-                incident.get("witnesses", ""),
-                incident.get("outcome", ""),
-                incident.get("created_at", "")
-            ])
-
-        output.seek(0)
-
-        elapsed = (time.time() - start_time) * 1000
-        logger.info(f"[INCIDENTS] CSV export complete: {len(incidents)} rows ({elapsed:.2f}ms)")
-
-        return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=incidents-{start_date}-to-{end_date}.csv"}
-        )
-
-    elif format == "pdf":
-        # Generate detailed text report
-        content = "=" * 60 + "\n"
-        content += "INCIDENT REPORT\n"
-        content += "=" * 60 + "\n\n"
-        content += f"Period: {start_date} to {end_date}\n"
-        content += f"Total Incidents: {len(incidents)}\n\n"
-
-        # Summary by type
-        type_counts = {}
-        severity_counts = {}
-        for incident in incidents:
-            t = incident.get("type", "other")
-            s = incident.get("severity", "medium")
-            type_counts[t] = type_counts.get(t, 0) + 1
-            severity_counts[s] = severity_counts.get(s, 0) + 1
-
-        content += "SUMMARY BY TYPE:\n"
-        for t, count in sorted(type_counts.items()):
-            content += f"  - {t.replace('_', ' ').title()}: {count}\n"
-
-        content += "\nSUMMARY BY SEVERITY:\n"
-        for s, count in sorted(severity_counts.items()):
-            content += f"  - {s.title()}: {count}\n"
-
-        content += "\n" + "=" * 60 + "\n"
-        content += "DETAILED RECORDS\n"
-        content += "=" * 60 + "\n\n"
-
-        for i, incident in enumerate(incidents, 1):
-            content += f"INCIDENT #{i}\n"
-            content += "-" * 40 + "\n"
-            content += f"Date: {incident.get('date', 'N/A')}\n"
-            content += f"Type: {incident.get('type', 'N/A').replace('_', ' ').title()}\n"
-            content += f"Severity: {incident.get('severity', 'N/A').title()}\n"
-            content += f"Title: {incident.get('title', 'N/A')}\n"
-            content += f"Description:\n  {incident.get('description', 'N/A')}\n"
-
-            if incident.get("reported_to"):
-                content += f"Reported To: {incident.get('reported_to')}\n"
-            if incident.get("witnesses"):
-                content += f"Witnesses: {incident.get('witnesses')}\n"
-            if incident.get("outcome"):
-                content += f"Outcome: {incident.get('outcome')}\n"
-
-            content += f"Logged: {incident.get('created_at', 'N/A')}\n"
-            content += "\n"
-
-        content += "=" * 60 + "\n"
-        content += "END OF REPORT\n"
-        content += "=" * 60 + "\n"
-
-        elapsed = (time.time() - start_time) * 1000
-        logger.info(f"[INCIDENTS] Text export complete: {len(incidents)} entries ({elapsed:.2f}ms)")
-
-        return StreamingResponse(
-            iter([content]),
-            media_type="text/plain",
-            headers={"Content-Disposition": f"attachment; filename=incident-report-{start_date}-to-{end_date}.txt"}
-        )
-
-    else:
-        logger.warning(f"[INCIDENTS] Invalid export format requested: {format}")
-        raise HTTPException(status_code=400, detail="Invalid format. Use 'csv' or 'pdf'")
