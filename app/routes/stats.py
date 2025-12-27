@@ -4,7 +4,13 @@ Endpoints for statistics and analytics
 """
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from datetime import date
+from loguru import logger
+import csv
+import io
+import time
+import json
 
 from app.database import Database
 from app.middleware.auth import get_current_user, require_pro_tier
@@ -168,47 +174,133 @@ async def get_load_distribution(
 @router.get("/export")
 async def export_stats(
     year: int,
-    format: str = "json",
+    format: str = Query("csv"),
     user: dict = Depends(require_pro_tier)
 ):
-    """Export statistics data (Pro tier required)"""
+    """Export statistics data as CSV or PDF (Pro tier required)"""
+    start_time = time.time()
+    logger.info(f"[STATS] === EXPORT STATS ===")
+    logger.info(f"[STATS] User: {user['id']}")
+    logger.info(f"[STATS] Year: {year}")
+    logger.info(f"[STATS] Format requested: {format}")
+
     db = Database(use_admin=True)
     stats_engine = create_stats_engine(user["id"])
-    
+
     calendar_days = await db.get_calendar_days(
         user["id"],
         f"{year}-01-01",
         f"{year}-12-31"
     )
-    
+    logger.info(f"[STATS] Found {len(calendar_days)} calendar days")
+
     commitments = await db.get_commitments(user["id"])
-    
-    yearly_stats = stats_engine.compute_yearly_stats(calendar_days, year)
-    commitment_stats = stats_engine.compute_commitment_stats(commitments, calendar_days)
-    distribution = stats_engine.compute_load_distribution(calendar_days)
-    
-    export_data = {
-        "year": year,
-        "generated_at": date.today().isoformat(),
-        "yearly_summary": yearly_stats,
-        "commitment_breakdown": commitment_stats,
-        "load_distribution": distribution,
-        "calendar_days": calendar_days
-    }
-    
-    if format == "json":
-        return {
-            "success": True,
-            "data": export_data
-        }
+    logger.info(f"[STATS] Found {len(commitments)} commitments")
+
+    yearly_stats = stats_engine.compute_yearly_stats(calendar_days, year) or {}
+    commitment_stats = stats_engine.compute_commitment_stats(commitments, calendar_days) or []
+    distribution = stats_engine.compute_load_distribution(calendar_days) or {}
+
+    logger.info(f"[STATS] Computed yearly_stats: {bool(yearly_stats)}")
+    logger.info(f"[STATS] Computed commitment_stats: {len(commitment_stats)} items")
+    logger.info(f"[STATS] Computed distribution: {bool(distribution)}")
+
+    if format == "csv":
+        logger.info(f"[STATS] Generating CSV export...")
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Header row
+        writer.writerow([
+            "Date", "Work Type", "Day of Week", "Study Hours", "Commitments"
+        ])
+
+        # Data rows
+        for day in calendar_days:
+            state = day.get("state_json", {}) or {}
+            commitments_list = state.get("commitments", []) or []
+            total_hours = sum(c.get("hours", 0) for c in commitments_list)
+            commitment_names = ", ".join(c.get("name", "Unknown") for c in commitments_list)
+
+            writer.writerow([
+                day.get("date", ""),
+                day.get("work_type", ""),
+                day.get("day_of_week", ""),
+                total_hours,
+                commitment_names or "None"
+            ])
+
+        output.seek(0)
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[STATS] CSV export complete: {len(calendar_days)} rows ({elapsed:.2f}ms)")
+        logger.info(f"[STATS] Returning StreamingResponse with Content-Disposition: attachment")
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=watchman-stats-{year}.csv"}
+        )
+
+    elif format == "pdf":
+        logger.info(f"[STATS] Generating PDF/text export...")
+        content = "=" * 60 + "\n"
+        content += f"WATCHMAN STATISTICS REPORT - {year}\n"
+        content += "=" * 60 + "\n\n"
+        content += f"Generated: {date.today().isoformat()}\n\n"
+
+        # Summary section
+        content += "YEARLY SUMMARY\n"
+        content += "-" * 40 + "\n"
+        if yearly_stats:
+            content += f"Total Days Planned: {yearly_stats.get('total_days', 0)}\n"
+            content += f"Work Days: {yearly_stats.get('work_days', 0)}\n"
+            content += f"Work Nights: {yearly_stats.get('work_nights', 0)}\n"
+            content += f"Off Days: {yearly_stats.get('off_days', 0)}\n"
+            content += f"Leave Days: {yearly_stats.get('leave_days', 0)}\n"
+            content += f"Total Study Hours: {yearly_stats.get('total_study_hours', 0)}\n"
+        else:
+            content += "No statistics available\n"
+        content += "\n"
+
+        # Commitment breakdown
+        content += "COMMITMENT BREAKDOWN\n"
+        content += "-" * 40 + "\n"
+        if commitment_stats:
+            for cs in commitment_stats:
+                content += f"  - {cs.get('name', 'Unknown')}: {cs.get('total_hours', 0)} hours\n"
+        else:
+            content += "No commitment data\n"
+        content += "\n"
+
+        # Load distribution
+        content += "LOAD DISTRIBUTION BY DAY TYPE\n"
+        content += "-" * 40 + "\n"
+        if distribution:
+            for day_type, data in distribution.items():
+                if isinstance(data, dict):
+                    content += f"  {day_type}: {data.get('total_hours', 0)} hours across {data.get('count', 0)} days\n"
+        else:
+            content += "No distribution data\n"
+
+        content += "\n" + "=" * 60 + "\n"
+        content += "END OF REPORT\n"
+        content += "=" * 60 + "\n"
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[STATS] Text export complete ({elapsed:.2f}ms)")
+        logger.info(f"[STATS] Returning StreamingResponse with Content-Disposition: attachment")
+
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/plain",
+            headers={"Content-Disposition": f"attachment; filename=watchman-stats-{year}.txt"}
+        )
+
     else:
-        # For CSV, we'd convert to CSV format
-        # For now, return JSON with a note
-        return {
-            "success": True,
-            "data": export_data,
-            "note": "CSV export coming soon"
-        }
+        logger.warning(f"[STATS] Invalid export format requested: {format}")
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Invalid format. Use 'csv' or 'pdf'")
 
 
 @router.get("/summary")
