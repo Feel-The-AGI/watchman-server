@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from loguru import logger
 import csv
 import io
+import time
 
 from app.database import Database
 from app.middleware.auth import get_current_user
@@ -46,11 +47,16 @@ async def get_daily_logs(
     user: dict = Depends(get_current_user)
 ):
     """Get all daily logs for the current user, optionally filtered by date range"""
-    logger.info(f"[DAILY_LOGS] Getting logs for user {user['id']}")
+    start_time = time.time()
+    logger.info(f"[DAILY_LOGS] === GET DAILY LOGS ===")
+    logger.info(f"[DAILY_LOGS] User: {user['id']}")
+    logger.info(f"[DAILY_LOGS] Date range: {start_date or 'all'} to {end_date or 'all'}")
 
     db = Database(use_admin=True)
     logs = await db.get_daily_logs(user["id"], start_date, end_date)
 
+    elapsed = (time.time() - start_time) * 1000
+    logger.info(f"[DAILY_LOGS] Found {len(logs)} logs in {elapsed:.2f}ms")
     return logs
 
 
@@ -60,13 +66,17 @@ async def get_daily_log_by_date(
     user: dict = Depends(get_current_user)
 ):
     """Get daily log for a specific date"""
-    logger.info(f"[DAILY_LOGS] Getting log for date {date_str}")
+    start_time = time.time()
+    logger.info(f"[DAILY_LOGS] === GET LOG BY DATE ===")
+    logger.info(f"[DAILY_LOGS] User: {user['id']}")
+    logger.info(f"[DAILY_LOGS] Date: {date_str}")
 
     db = Database(use_admin=True)
     log = await db.get_daily_log_by_date(user["id"], date_str)
 
+    elapsed = (time.time() - start_time) * 1000
     if not log:
-        # Return empty structure for dates without logs
+        logger.info(f"[DAILY_LOGS] No log found for {date_str}, returning empty structure ({elapsed:.2f}ms)")
         return {
             "date": date_str,
             "logs": [],
@@ -74,6 +84,7 @@ async def get_daily_log_by_date(
             "overtime_hours": None
         }
 
+    logger.info(f"[DAILY_LOGS] Log found: id={log.get('id')} ({elapsed:.2f}ms)")
     return log
 
 
@@ -83,7 +94,12 @@ async def create_daily_log(
     user: dict = Depends(get_current_user)
 ):
     """Create a new daily log"""
-    logger.info(f"[DAILY_LOGS] Creating log for date {request.date}")
+    start_time = time.time()
+    logger.info(f"[DAILY_LOGS] === CREATE DAILY LOG ===")
+    logger.info(f"[DAILY_LOGS] User: {user['id']}")
+    logger.info(f"[DAILY_LOGS] Date: {request.date}")
+    logger.info(f"[DAILY_LOGS] Note length: {len(request.note)} chars")
+    logger.info(f"[DAILY_LOGS] Hours: actual={request.actual_hours}, overtime={request.overtime_hours}")
 
     db = Database(use_admin=True)
 
@@ -97,9 +113,12 @@ async def create_daily_log(
 
     result = await db.create_daily_log(log_data)
 
+    elapsed = (time.time() - start_time) * 1000
     if not result:
+        logger.error(f"[DAILY_LOGS] Failed to create log ({elapsed:.2f}ms)")
         raise HTTPException(status_code=500, detail="Failed to create daily log")
 
+    logger.info(f"[DAILY_LOGS] Log created: id={result.get('id')} ({elapsed:.2f}ms)")
     return result
 
 
@@ -110,33 +129,45 @@ async def update_daily_log(
     user: dict = Depends(get_current_user)
 ):
     """Update a daily log"""
-    logger.info(f"[DAILY_LOGS] Updating log {log_id}")
+    start_time = time.time()
+    logger.info(f"[DAILY_LOGS] === UPDATE DAILY LOG ===")
+    logger.info(f"[DAILY_LOGS] User: {user['id']}")
+    logger.info(f"[DAILY_LOGS] Log ID: {log_id}")
 
     db = Database(use_admin=True)
 
     # Verify ownership
     existing = await db.get_daily_log(log_id)
     if not existing:
+        logger.warning(f"[DAILY_LOGS] Log not found: {log_id}")
         raise HTTPException(status_code=404, detail="Daily log not found")
     if existing["user_id"] != user["id"]:
+        logger.warning(f"[DAILY_LOGS] Unauthorized access attempt: user {user['id']} tried to update log owned by {existing['user_id']}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
     update_data = {}
     if request.note is not None:
         update_data["note"] = request.note
+        logger.debug(f"[DAILY_LOGS] Updating note: {len(request.note)} chars")
     if request.actual_hours is not None:
         update_data["actual_hours"] = request.actual_hours
+        logger.debug(f"[DAILY_LOGS] Updating actual_hours: {request.actual_hours}")
     if request.overtime_hours is not None:
         update_data["overtime_hours"] = request.overtime_hours
+        logger.debug(f"[DAILY_LOGS] Updating overtime_hours: {request.overtime_hours}")
 
     if not update_data:
+        logger.info(f"[DAILY_LOGS] No fields to update, returning existing")
         return existing
 
     result = await db.update_daily_log(log_id, update_data)
 
+    elapsed = (time.time() - start_time) * 1000
     if not result:
+        logger.error(f"[DAILY_LOGS] Failed to update log ({elapsed:.2f}ms)")
         raise HTTPException(status_code=500, detail="Failed to update daily log")
 
+    logger.info(f"[DAILY_LOGS] Log updated successfully ({elapsed:.2f}ms)")
     return result
 
 
@@ -147,7 +178,11 @@ async def update_daily_hours(
     user: dict = Depends(get_current_user)
 ):
     """Update or create hours for a specific date"""
-    logger.info(f"[DAILY_LOGS] Updating hours for date {date_str}")
+    start_time = time.time()
+    logger.info(f"[DAILY_LOGS] === UPDATE DAILY HOURS ===")
+    logger.info(f"[DAILY_LOGS] User: {user['id']}")
+    logger.info(f"[DAILY_LOGS] Date: {date_str}")
+    logger.info(f"[DAILY_LOGS] Hours: actual={request.actual_hours}, overtime={request.overtime_hours}")
 
     db = Database(use_admin=True)
 
@@ -158,9 +193,12 @@ async def update_daily_hours(
 
     result = await db.update_daily_hours(user["id"], date_str, hours_data)
 
+    elapsed = (time.time() - start_time) * 1000
     if not result:
+        logger.error(f"[DAILY_LOGS] Failed to update hours ({elapsed:.2f}ms)")
         raise HTTPException(status_code=500, detail="Failed to update hours")
 
+    logger.info(f"[DAILY_LOGS] Hours updated successfully ({elapsed:.2f}ms)")
     return result
 
 
@@ -170,22 +208,30 @@ async def delete_daily_log(
     user: dict = Depends(get_current_user)
 ):
     """Delete a daily log"""
-    logger.info(f"[DAILY_LOGS] Deleting log {log_id}")
+    start_time = time.time()
+    logger.info(f"[DAILY_LOGS] === DELETE DAILY LOG ===")
+    logger.info(f"[DAILY_LOGS] User: {user['id']}")
+    logger.info(f"[DAILY_LOGS] Log ID: {log_id}")
 
     db = Database(use_admin=True)
 
     # Verify ownership
     existing = await db.get_daily_log(log_id)
     if not existing:
+        logger.warning(f"[DAILY_LOGS] Log not found for deletion: {log_id}")
         raise HTTPException(status_code=404, detail="Daily log not found")
     if existing["user_id"] != user["id"]:
+        logger.warning(f"[DAILY_LOGS] Unauthorized delete attempt: user {user['id']} tried to delete log owned by {existing['user_id']}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
     success = await db.delete_daily_log(log_id)
 
+    elapsed = (time.time() - start_time) * 1000
     if not success:
+        logger.error(f"[DAILY_LOGS] Failed to delete log ({elapsed:.2f}ms)")
         raise HTTPException(status_code=500, detail="Failed to delete daily log")
 
+    logger.info(f"[DAILY_LOGS] Log deleted successfully ({elapsed:.2f}ms)")
     return {"success": True}
 
 
@@ -197,10 +243,15 @@ async def export_daily_logs(
     user: dict = Depends(get_current_user)
 ):
     """Export daily logs as CSV or PDF"""
-    logger.info(f"[DAILY_LOGS] Exporting logs from {start_date} to {end_date} as {format}")
+    start_time = time.time()
+    logger.info(f"[DAILY_LOGS] === EXPORT DAILY LOGS ===")
+    logger.info(f"[DAILY_LOGS] User: {user['id']}")
+    logger.info(f"[DAILY_LOGS] Date range: {start_date} to {end_date}")
+    logger.info(f"[DAILY_LOGS] Format: {format}")
 
     db = Database(use_admin=True)
     logs = await db.get_daily_logs(user["id"], start_date, end_date)
+    logger.info(f"[DAILY_LOGS] Found {len(logs)} logs to export")
 
     if format == "csv":
         # Generate CSV
@@ -222,6 +273,9 @@ async def export_daily_logs(
 
         output.seek(0)
 
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[DAILY_LOGS] CSV export complete: {len(logs)} rows ({elapsed:.2f}ms)")
+
         return StreamingResponse(
             iter([output.getvalue()]),
             media_type="text/csv",
@@ -230,7 +284,6 @@ async def export_daily_logs(
 
     elif format == "pdf":
         # For PDF, we'll return a simple text format that can be converted client-side
-        # or you can integrate a PDF library like reportlab
         content = f"Daily Logs Export\n"
         content += f"Period: {start_date} to {end_date}\n"
         content += "=" * 50 + "\n\n"
@@ -241,6 +294,9 @@ async def export_daily_logs(
             content += f"Hours: {log.get('actual_hours', 'N/A')} (Overtime: {log.get('overtime_hours', 0)})\n"
             content += "-" * 30 + "\n"
 
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[DAILY_LOGS] Text export complete: {len(logs)} entries ({elapsed:.2f}ms)")
+
         return StreamingResponse(
             iter([content]),
             media_type="text/plain",
@@ -248,4 +304,5 @@ async def export_daily_logs(
         )
 
     else:
+        logger.warning(f"[DAILY_LOGS] Invalid export format requested: {format}")
         raise HTTPException(status_code=400, detail="Invalid format. Use 'csv' or 'pdf'")

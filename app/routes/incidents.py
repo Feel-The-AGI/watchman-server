@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from loguru import logger
 import csv
 import io
+import time
 
 from app.database import Database
 from app.middleware.auth import get_current_user
@@ -41,6 +42,10 @@ class IncidentUpdateRequest(BaseModel):
     outcome: Optional[str] = None
 
 
+VALID_TYPES = ["overtime", "safety", "equipment", "harassment", "injury", "policy_violation", "other"]
+VALID_SEVERITIES = ["low", "medium", "high", "critical"]
+
+
 @router.get("/incidents")
 async def get_incidents(
     start_date: Optional[str] = Query(None),
@@ -48,11 +53,16 @@ async def get_incidents(
     user: dict = Depends(get_current_user)
 ):
     """Get all incidents for the current user, optionally filtered by date range"""
-    logger.info(f"[INCIDENTS] Getting incidents for user {user['id']}")
+    start_time = time.time()
+    logger.info(f"[INCIDENTS] === GET INCIDENTS ===")
+    logger.info(f"[INCIDENTS] User: {user['id']}")
+    logger.info(f"[INCIDENTS] Date range: {start_date or 'all'} to {end_date or 'all'}")
 
     db = Database(use_admin=True)
     incidents = await db.get_incidents(user["id"], start_date, end_date)
 
+    elapsed = (time.time() - start_time) * 1000
+    logger.info(f"[INCIDENTS] Found {len(incidents)} incidents in {elapsed:.2f}ms")
     return incidents
 
 
@@ -62,11 +72,18 @@ async def get_incident_stats(
     user: dict = Depends(get_current_user)
 ):
     """Get incident statistics for the current user"""
-    logger.info(f"[INCIDENTS] Getting stats for user {user['id']}, year={year}")
+    start_time = time.time()
+    logger.info(f"[INCIDENTS] === GET INCIDENT STATS ===")
+    logger.info(f"[INCIDENTS] User: {user['id']}")
+    logger.info(f"[INCIDENTS] Year: {year or 'all time'}")
 
     db = Database(use_admin=True)
     stats = await db.get_incident_stats(user["id"], year)
 
+    elapsed = (time.time() - start_time) * 1000
+    logger.info(f"[INCIDENTS] Stats retrieved: total={stats.get('total_count', 0)} ({elapsed:.2f}ms)")
+    logger.debug(f"[INCIDENTS] By type: {stats.get('by_type', {})}")
+    logger.debug(f"[INCIDENTS] By severity: {stats.get('by_severity', {})}")
     return stats
 
 
@@ -76,11 +93,16 @@ async def get_incidents_by_date(
     user: dict = Depends(get_current_user)
 ):
     """Get all incidents for a specific date"""
-    logger.info(f"[INCIDENTS] Getting incidents for date {date_str}")
+    start_time = time.time()
+    logger.info(f"[INCIDENTS] === GET INCIDENTS BY DATE ===")
+    logger.info(f"[INCIDENTS] User: {user['id']}")
+    logger.info(f"[INCIDENTS] Date: {date_str}")
 
     db = Database(use_admin=True)
     incidents = await db.get_incidents_by_date(user["id"], date_str)
 
+    elapsed = (time.time() - start_time) * 1000
+    logger.info(f"[INCIDENTS] Found {len(incidents)} incidents for {date_str} ({elapsed:.2f}ms)")
     return incidents
 
 
@@ -90,17 +112,24 @@ async def get_incident(
     user: dict = Depends(get_current_user)
 ):
     """Get a specific incident by ID"""
-    logger.info(f"[INCIDENTS] Getting incident {incident_id}")
+    start_time = time.time()
+    logger.info(f"[INCIDENTS] === GET INCIDENT ===")
+    logger.info(f"[INCIDENTS] User: {user['id']}")
+    logger.info(f"[INCIDENTS] Incident ID: {incident_id}")
 
     db = Database(use_admin=True)
     incident = await db.get_incident(incident_id)
 
+    elapsed = (time.time() - start_time) * 1000
     if not incident:
+        logger.warning(f"[INCIDENTS] Incident not found: {incident_id} ({elapsed:.2f}ms)")
         raise HTTPException(status_code=404, detail="Incident not found")
 
     if incident["user_id"] != user["id"]:
+        logger.warning(f"[INCIDENTS] Unauthorized access: user {user['id']} tried to view incident owned by {incident['user_id']}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    logger.info(f"[INCIDENTS] Incident found: type={incident.get('type')}, severity={incident.get('severity')} ({elapsed:.2f}ms)")
     return incident
 
 
@@ -110,17 +139,23 @@ async def create_incident(
     user: dict = Depends(get_current_user)
 ):
     """Create a new incident"""
-    logger.info(f"[INCIDENTS] Creating incident for date {request.date}, type={request.type}")
+    start_time = time.time()
+    logger.info(f"[INCIDENTS] === CREATE INCIDENT ===")
+    logger.info(f"[INCIDENTS] User: {user['id']}")
+    logger.info(f"[INCIDENTS] Date: {request.date}")
+    logger.info(f"[INCIDENTS] Type: {request.type}")
+    logger.info(f"[INCIDENTS] Severity: {request.severity}")
+    logger.info(f"[INCIDENTS] Title: {request.title[:50]}...")
 
     # Validate type
-    valid_types = ["overtime", "safety", "equipment", "harassment", "injury", "policy_violation", "other"]
-    if request.type not in valid_types:
-        raise HTTPException(status_code=400, detail=f"Invalid type. Must be one of: {valid_types}")
+    if request.type not in VALID_TYPES:
+        logger.warning(f"[INCIDENTS] Invalid type: {request.type}")
+        raise HTTPException(status_code=400, detail=f"Invalid type. Must be one of: {VALID_TYPES}")
 
     # Validate severity
-    valid_severities = ["low", "medium", "high", "critical"]
-    if request.severity not in valid_severities:
-        raise HTTPException(status_code=400, detail=f"Invalid severity. Must be one of: {valid_severities}")
+    if request.severity not in VALID_SEVERITIES:
+        logger.warning(f"[INCIDENTS] Invalid severity: {request.severity}")
+        raise HTTPException(status_code=400, detail=f"Invalid severity. Must be one of: {VALID_SEVERITIES}")
 
     db = Database(use_admin=True)
 
@@ -138,9 +173,12 @@ async def create_incident(
 
     result = await db.create_incident(incident_data)
 
+    elapsed = (time.time() - start_time) * 1000
     if not result:
+        logger.error(f"[INCIDENTS] Failed to create incident ({elapsed:.2f}ms)")
         raise HTTPException(status_code=500, detail="Failed to create incident")
 
+    logger.info(f"[INCIDENTS] Incident created: id={result.get('id')}, type={request.type}, severity={request.severity} ({elapsed:.2f}ms)")
     return result
 
 
@@ -151,53 +189,72 @@ async def update_incident(
     user: dict = Depends(get_current_user)
 ):
     """Update an incident"""
-    logger.info(f"[INCIDENTS] Updating incident {incident_id}")
+    start_time = time.time()
+    logger.info(f"[INCIDENTS] === UPDATE INCIDENT ===")
+    logger.info(f"[INCIDENTS] User: {user['id']}")
+    logger.info(f"[INCIDENTS] Incident ID: {incident_id}")
 
     db = Database(use_admin=True)
 
     # Verify ownership
     existing = await db.get_incident(incident_id)
     if not existing:
+        logger.warning(f"[INCIDENTS] Incident not found: {incident_id}")
         raise HTTPException(status_code=404, detail="Incident not found")
     if existing["user_id"] != user["id"]:
+        logger.warning(f"[INCIDENTS] Unauthorized update: user {user['id']} tried to update incident owned by {existing['user_id']}")
         raise HTTPException(status_code=403, detail="Not authorized")
 
     # Validate type if provided
     if request.type:
-        valid_types = ["overtime", "safety", "equipment", "harassment", "injury", "policy_violation", "other"]
-        if request.type not in valid_types:
-            raise HTTPException(status_code=400, detail=f"Invalid type. Must be one of: {valid_types}")
+        if request.type not in VALID_TYPES:
+            logger.warning(f"[INCIDENTS] Invalid type in update: {request.type}")
+            raise HTTPException(status_code=400, detail=f"Invalid type. Must be one of: {VALID_TYPES}")
 
     # Validate severity if provided
     if request.severity:
-        valid_severities = ["low", "medium", "high", "critical"]
-        if request.severity not in valid_severities:
-            raise HTTPException(status_code=400, detail=f"Invalid severity. Must be one of: {valid_severities}")
+        if request.severity not in VALID_SEVERITIES:
+            logger.warning(f"[INCIDENTS] Invalid severity in update: {request.severity}")
+            raise HTTPException(status_code=400, detail=f"Invalid severity. Must be one of: {VALID_SEVERITIES}")
 
     update_data = {}
+    update_fields = []
     if request.type is not None:
         update_data["type"] = request.type
+        update_fields.append(f"type={request.type}")
     if request.severity is not None:
         update_data["severity"] = request.severity
+        update_fields.append(f"severity={request.severity}")
     if request.title is not None:
         update_data["title"] = request.title
+        update_fields.append("title")
     if request.description is not None:
         update_data["description"] = request.description
+        update_fields.append("description")
     if request.reported_to is not None:
         update_data["reported_to"] = request.reported_to
+        update_fields.append("reported_to")
     if request.witnesses is not None:
         update_data["witnesses"] = request.witnesses
+        update_fields.append("witnesses")
     if request.outcome is not None:
         update_data["outcome"] = request.outcome
+        update_fields.append("outcome")
 
     if not update_data:
+        logger.info(f"[INCIDENTS] No fields to update, returning existing")
         return existing
+
+    logger.debug(f"[INCIDENTS] Updating fields: {', '.join(update_fields)}")
 
     result = await db.update_incident(incident_id, update_data)
 
+    elapsed = (time.time() - start_time) * 1000
     if not result:
+        logger.error(f"[INCIDENTS] Failed to update incident ({elapsed:.2f}ms)")
         raise HTTPException(status_code=500, detail="Failed to update incident")
 
+    logger.info(f"[INCIDENTS] Incident updated: {len(update_fields)} fields ({elapsed:.2f}ms)")
     return result
 
 
@@ -207,22 +264,32 @@ async def delete_incident(
     user: dict = Depends(get_current_user)
 ):
     """Delete an incident"""
-    logger.info(f"[INCIDENTS] Deleting incident {incident_id}")
+    start_time = time.time()
+    logger.info(f"[INCIDENTS] === DELETE INCIDENT ===")
+    logger.info(f"[INCIDENTS] User: {user['id']}")
+    logger.info(f"[INCIDENTS] Incident ID: {incident_id}")
 
     db = Database(use_admin=True)
 
     # Verify ownership
     existing = await db.get_incident(incident_id)
     if not existing:
+        logger.warning(f"[INCIDENTS] Incident not found for deletion: {incident_id}")
         raise HTTPException(status_code=404, detail="Incident not found")
     if existing["user_id"] != user["id"]:
+        logger.warning(f"[INCIDENTS] Unauthorized delete: user {user['id']} tried to delete incident owned by {existing['user_id']}")
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    logger.info(f"[INCIDENTS] Deleting incident: type={existing.get('type')}, severity={existing.get('severity')}, date={existing.get('date')}")
 
     success = await db.delete_incident(incident_id)
 
+    elapsed = (time.time() - start_time) * 1000
     if not success:
+        logger.error(f"[INCIDENTS] Failed to delete incident ({elapsed:.2f}ms)")
         raise HTTPException(status_code=500, detail="Failed to delete incident")
 
+    logger.info(f"[INCIDENTS] Incident deleted successfully ({elapsed:.2f}ms)")
     return {"success": True}
 
 
@@ -234,10 +301,15 @@ async def export_incidents(
     user: dict = Depends(get_current_user)
 ):
     """Export incidents as CSV or PDF"""
-    logger.info(f"[INCIDENTS] Exporting incidents from {start_date} to {end_date} as {format}")
+    start_time = time.time()
+    logger.info(f"[INCIDENTS] === EXPORT INCIDENTS ===")
+    logger.info(f"[INCIDENTS] User: {user['id']}")
+    logger.info(f"[INCIDENTS] Date range: {start_date} to {end_date}")
+    logger.info(f"[INCIDENTS] Format: {format}")
 
     db = Database(use_admin=True)
     incidents = await db.get_incidents(user["id"], start_date, end_date)
+    logger.info(f"[INCIDENTS] Found {len(incidents)} incidents to export")
 
     if format == "csv":
         # Generate CSV
@@ -265,6 +337,9 @@ async def export_incidents(
             ])
 
         output.seek(0)
+
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[INCIDENTS] CSV export complete: {len(incidents)} rows ({elapsed:.2f}ms)")
 
         return StreamingResponse(
             iter([output.getvalue()]),
@@ -324,6 +399,9 @@ async def export_incidents(
         content += "END OF REPORT\n"
         content += "=" * 60 + "\n"
 
+        elapsed = (time.time() - start_time) * 1000
+        logger.info(f"[INCIDENTS] Text export complete: {len(incidents)} entries ({elapsed:.2f}ms)")
+
         return StreamingResponse(
             iter([content]),
             media_type="text/plain",
@@ -331,4 +409,5 @@ async def export_incidents(
         )
 
     else:
+        logger.warning(f"[INCIDENTS] Invalid export format requested: {format}")
         raise HTTPException(status_code=400, detail="Invalid format. Use 'csv' or 'pdf'")
