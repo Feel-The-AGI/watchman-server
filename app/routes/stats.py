@@ -350,60 +350,105 @@ async def export_stats(
         logger.info(f"[STATS] Generating PDF report...")
         try:
             from reportlab.lib import colors
-            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.pagesizes import A4, letter
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.lib.units import inch
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-            from reportlab.lib.enums import TA_CENTER, TA_LEFT
+            from reportlab.lib.units import inch, mm
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+            from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+            from reportlab.graphics.shapes import Drawing, Rect, String, Line
+            from reportlab.graphics import renderPDF
+
+            # Brand colors
+            PURPLE = colors.HexColor('#8B5CF6')
+            PURPLE_LIGHT = colors.HexColor('#A78BFA')
+            PURPLE_DARK = colors.HexColor('#7C3AED')
+            GREEN = colors.HexColor('#10B981')
+            GREEN_LIGHT = colors.HexColor('#34D399')
+            RED = colors.HexColor('#EF4444')
+            AMBER = colors.HexColor('#F59E0B')
+            GRAY = colors.HexColor('#6B7280')
+            GRAY_LIGHT = colors.HexColor('#F3F4F6')
+            DARK_BG = colors.HexColor('#1A1A2E')
 
             buffer = io.BytesIO()
-            doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=0.5*inch, bottomMargin=0.5*inch)
-            styles = getSampleStyleSheet()
+            doc = SimpleDocTemplate(
+                buffer,
+                pagesize=A4,
+                topMargin=0.4*inch,
+                bottomMargin=0.6*inch,
+                leftMargin=0.6*inch,
+                rightMargin=0.6*inch
+            )
             elements = []
+            page_width = A4[0] - 1.2*inch
 
-            # Custom styles
-            title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=24, alignment=TA_CENTER, spaceAfter=20)
-            subtitle_style = ParagraphStyle('Subtitle', parent=styles['Normal'], fontSize=12, alignment=TA_CENTER, textColor=colors.grey)
-            section_style = ParagraphStyle('Section', parent=styles['Heading2'], fontSize=14, spaceBefore=20, spaceAfter=10)
+            # ========== HEADER BANNER ==========
+            header = Drawing(page_width, 100)
+            # Gradient-like background
+            header.add(Rect(0, 0, page_width, 100, fillColor=PURPLE_DARK, strokeColor=None))
+            header.add(Rect(0, 0, page_width * 0.7, 100, fillColor=PURPLE, strokeColor=None))
+            # Decorative accent
+            header.add(Rect(page_width - 80, 0, 80, 100, fillColor=PURPLE_LIGHT, strokeColor=None))
+            # Title text
+            header.add(String(30, 65, "WATCHMAN", fontName="Helvetica-Bold", fontSize=28, fillColor=colors.white))
+            header.add(String(30, 40, f"Annual Report {year}", fontName="Helvetica", fontSize=16, fillColor=colors.white))
+            header.add(String(30, 18, f"Generated {date.today().strftime('%B %d, %Y')}", fontName="Helvetica", fontSize=10, fillColor=colors.HexColor('#E0E0E0')))
+            elements.append(header)
+            elements.append(Spacer(1, 25))
 
-            # Title
-            elements.append(Paragraph("Watchman Annual Report", title_style))
-            elements.append(Paragraph(f"{year}", title_style))
-            elements.append(Paragraph(f"Generated: {date.today().strftime('%B %d, %Y')}", subtitle_style))
-            elements.append(Spacer(1, 30))
-
-            # Summary Section
-            elements.append(Paragraph("Yearly Summary", section_style))
-            summary_data = [
-                ["Metric", "Value"],
-                ["Total Days Planned", str(len(calendar_days))],
-                ["Day Shifts", str(work_days)],
-                ["Night Shifts", str(work_nights)],
-                ["Off Days", str(off_days)],
-                ["Leave Days", str(leave_days)],
-                ["Total Commitment Hours", f"{round(total_commitment_hours, 1)}"],
-                ["Total Overtime Hours", f"{round(total_overtime, 1)}"],
-                ["Incidents Logged", str(len(incidents))],
+            # ========== KEY METRICS CARDS ==========
+            # Create a row of metric cards
+            total_shifts = work_days + work_nights
+            metrics = [
+                ("Total Days", str(len(calendar_days)), PURPLE),
+                ("Day Shifts", str(work_days), GREEN),
+                ("Night Shifts", str(work_nights), PURPLE_LIGHT),
+                ("Off Days", str(off_days), GRAY),
             ]
-            summary_table = Table(summary_data, colWidths=[3*inch, 2*inch])
-            summary_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8B5CF6')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-                ('TOPPADDING', (0, 0), (-1, -1), 8),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
-            ]))
-            elements.append(summary_table)
+
+            card_width = (page_width - 30) / 4
+            metrics_drawing = Drawing(page_width, 70)
+            for i, (label, value, color) in enumerate(metrics):
+                x = i * (card_width + 10)
+                # Card background with rounded effect (using rect)
+                metrics_drawing.add(Rect(x, 0, card_width, 65, fillColor=GRAY_LIGHT, strokeColor=colors.HexColor('#E5E7EB'), strokeWidth=1, rx=5, ry=5))
+                # Color accent bar at top
+                metrics_drawing.add(Rect(x, 55, card_width, 10, fillColor=color, strokeColor=None, rx=5, ry=5))
+                metrics_drawing.add(Rect(x, 55, card_width, 5, fillColor=color, strokeColor=None))
+                # Value
+                metrics_drawing.add(String(x + card_width/2 - 10, 28, value, fontName="Helvetica-Bold", fontSize=20, fillColor=DARK_BG))
+                # Label
+                metrics_drawing.add(String(x + card_width/2 - len(label)*2.5, 10, label, fontName="Helvetica", fontSize=9, fillColor=GRAY))
+            elements.append(metrics_drawing)
             elements.append(Spacer(1, 20))
 
-            # Monthly Breakdown
-            elements.append(Paragraph("Monthly Breakdown", section_style))
-            monthly_data = [["Month", "Days", "Nights", "Off", "Leave", "Commit Hrs", "OT Hrs"]]
+            # Second row of metrics
+            metrics2 = [
+                ("Leave Days", str(leave_days), AMBER),
+                ("Commitment Hrs", str(round(total_commitment_hours, 1)), GREEN),
+                ("Overtime Hrs", str(round(total_overtime, 1)), RED),
+                ("Incidents", str(len(incidents)), RED if incidents else GRAY),
+            ]
+            metrics_drawing2 = Drawing(page_width, 70)
+            for i, (label, value, color) in enumerate(metrics2):
+                x = i * (card_width + 10)
+                metrics_drawing2.add(Rect(x, 0, card_width, 65, fillColor=GRAY_LIGHT, strokeColor=colors.HexColor('#E5E7EB'), strokeWidth=1, rx=5, ry=5))
+                metrics_drawing2.add(Rect(x, 55, card_width, 10, fillColor=color, strokeColor=None, rx=5, ry=5))
+                metrics_drawing2.add(Rect(x, 55, card_width, 5, fillColor=color, strokeColor=None))
+                metrics_drawing2.add(String(x + card_width/2 - len(value)*5, 28, value, fontName="Helvetica-Bold", fontSize=20, fillColor=DARK_BG))
+                metrics_drawing2.add(String(x + card_width/2 - len(label)*2.5, 10, label, fontName="Helvetica", fontSize=9, fillColor=GRAY))
+            elements.append(metrics_drawing2)
+            elements.append(Spacer(1, 30))
+
+            # ========== MONTHLY BREAKDOWN TABLE ==========
+            # Section header with accent bar
+            section_header = Drawing(page_width, 30)
+            section_header.add(Rect(0, 0, 5, 25, fillColor=PURPLE, strokeColor=None))
+            section_header.add(String(15, 8, "Monthly Breakdown", fontName="Helvetica-Bold", fontSize=14, fillColor=DARK_BG))
+            elements.append(section_header)
+            elements.append(Spacer(1, 10))
+
+            monthly_data = [["Month", "Day", "Night", "Off", "Leave", "Commit", "OT"]]
             for m in range(1, 13):
                 ms = monthly_stats[m]
                 monthly_data.append([
@@ -415,63 +460,102 @@ async def export_stats(
                     str(round(ms["commitment_hours"], 1)),
                     str(round(ms["overtime_hours"], 1))
                 ])
-            monthly_table = Table(monthly_data, colWidths=[0.8*inch, 0.7*inch, 0.7*inch, 0.6*inch, 0.6*inch, 1*inch, 0.7*inch])
+
+            col_widths = [0.9*inch, 0.65*inch, 0.65*inch, 0.6*inch, 0.6*inch, 0.8*inch, 0.6*inch]
+            monthly_table = Table(monthly_data, colWidths=col_widths)
             monthly_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8B5CF6')),
+                # Header row
+                ('BACKGROUND', (0, 0), (-1, 0), PURPLE),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 9),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                ('TOPPADDING', (0, 0), (-1, -1), 6),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                # Body
+                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),  # Month names bold
+                ('TEXTCOLOR', (0, 1), (0, -1), PURPLE),  # Month names purple
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 8),
+                # Alternating rows
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, GRAY_LIGHT]),
+                # Borders
+                ('LINEBELOW', (0, 0), (-1, 0), 2, PURPLE),
+                ('LINEBELOW', (0, -1), (-1, -1), 1, colors.HexColor('#E5E7EB')),
+                ('LINEBEFORE', (0, 0), (0, -1), 0, colors.white),
             ]))
             elements.append(monthly_table)
-            elements.append(Spacer(1, 20))
+            elements.append(Spacer(1, 30))
 
-            # Commitment Breakdown
+            # ========== COMMITMENT BREAKDOWN ==========
             if commitment_hours:
-                elements.append(Paragraph("Commitment Breakdown", section_style))
+                section_header2 = Drawing(page_width, 30)
+                section_header2.add(Rect(0, 0, 5, 25, fillColor=GREEN, strokeColor=None))
+                section_header2.add(String(15, 8, "Commitment Breakdown", fontName="Helvetica-Bold", fontSize=14, fillColor=DARK_BG))
+                elements.append(section_header2)
+                elements.append(Spacer(1, 10))
+
                 commit_data = [["Commitment", "Total Hours", "Days Active", "Avg/Day"]]
                 for name in sorted(commitment_hours.keys()):
                     hours = commitment_hours[name]
                     days = commitment_days[name]
                     avg = round(hours / days, 1) if days > 0 else 0
                     commit_data.append([name, str(round(hours, 1)), str(days), str(avg)])
+
                 commit_table = Table(commit_data, colWidths=[2.5*inch, 1.2*inch, 1*inch, 1*inch])
                 commit_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10B981')),
+                    ('BACKGROUND', (0, 0), (-1, 0), GREEN),
                     ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
                     ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
                     ('FONTSIZE', (0, 0), (-1, -1), 10),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-                    ('TOPPADDING', (0, 0), (-1, -1), 8),
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
+                    ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                    ('TOPPADDING', (0, 0), (-1, -1), 10),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, GRAY_LIGHT]),
+                    ('LINEBELOW', (0, 0), (-1, 0), 2, GREEN),
                 ]))
                 elements.append(commit_table)
+                elements.append(Spacer(1, 30))
 
-            # Incidents
+            # ========== INCIDENTS ==========
             if incidents:
-                elements.append(Spacer(1, 20))
-                elements.append(Paragraph("Incident Summary", section_style))
-                inc_data = [["Type", "Count"]]
+                section_header3 = Drawing(page_width, 30)
+                section_header3.add(Rect(0, 0, 5, 25, fillColor=RED, strokeColor=None))
+                section_header3.add(String(15, 8, "Incident Summary", fontName="Helvetica-Bold", fontSize=14, fillColor=DARK_BG))
+                elements.append(section_header3)
+                elements.append(Spacer(1, 10))
+
+                inc_data = [["Type", "Count", "Severity Distribution"]]
                 for inc_type, count in sorted(incident_counts.items()):
-                    inc_data.append([inc_type.replace("_", " ").title(), str(count)])
-                inc_table = Table(inc_data, colWidths=[3*inch, 1.5*inch])
+                    # Simple severity indicator
+                    severity_text = "●" * min(count, 5) + ("+" if count > 5 else "")
+                    inc_data.append([inc_type.replace("_", " ").title(), str(count), severity_text])
+
+                inc_table = Table(inc_data, colWidths=[2.5*inch, 1*inch, 2*inch])
                 inc_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#EF4444')),
+                    ('BACKGROUND', (0, 0), (-1, 0), RED),
                     ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
                     ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('ALIGN', (1, 0), (1, -1), 'CENTER'),
                     ('FONTSIZE', (0, 0), (-1, -1), 10),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-                    ('TOPPADDING', (0, 0), (-1, -1), 8),
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                    ('TEXTCOLOR', (2, 1), (2, -1), RED),  # Severity dots in red
+                    ('ALIGN', (1, 0), (1, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                    ('TOPPADDING', (0, 0), (-1, -1), 10),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#FEF2F2')]),
+                    ('LINEBELOW', (0, 0), (-1, 0), 2, RED),
                 ]))
                 elements.append(inc_table)
+
+            # ========== FOOTER ==========
+            elements.append(Spacer(1, 40))
+            footer = Drawing(page_width, 40)
+            footer.add(Line(0, 35, page_width, 35, strokeColor=colors.HexColor('#E5E7EB'), strokeWidth=1))
+            footer.add(String(0, 15, "Watchman - Shift Worker Calendar & Analytics", fontName="Helvetica", fontSize=9, fillColor=GRAY))
+            footer.add(String(0, 3, "This report was automatically generated. Data is accurate as of the generation date.", fontName="Helvetica", fontSize=7, fillColor=colors.HexColor('#9CA3AF')))
+            footer.add(String(page_width - 80, 10, f"Page 1", fontName="Helvetica", fontSize=8, fillColor=GRAY))
+            elements.append(footer)
 
             # Build PDF
             doc.build(elements)
