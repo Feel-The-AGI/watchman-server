@@ -109,25 +109,139 @@ async def export_daily_logs(
         )
 
     elif format == "pdf":
-        # For PDF, we'll return a simple text format that can be converted client-side
-        content = f"Daily Logs Export\n"
-        content += f"Period: {start_date} to {end_date}\n"
-        content += "=" * 50 + "\n\n"
+        logger.info(f"[DAILY_LOGS] Generating PDF report...")
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.units import inch
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.graphics.shapes import Drawing, Rect, String, Line
 
-        for log in logs:
-            content += f"Date: {log.get('date', 'N/A')}\n"
-            content += f"Note: {log.get('note', 'N/A')}\n"
-            content += f"Hours: {log.get('actual_hours', 'N/A')} (Overtime: {log.get('overtime_hours', 0)})\n"
-            content += "-" * 30 + "\n"
+            # Brand colors
+            BLUE = colors.HexColor('#3B82F6')
+            BLUE_LIGHT = colors.HexColor('#93C5FD')
+            BLUE_DARK = colors.HexColor('#1D4ED8')
+            PURPLE = colors.HexColor('#8B5CF6')
+            GREEN = colors.HexColor('#10B981')
+            AMBER = colors.HexColor('#F59E0B')
+            GRAY = colors.HexColor('#6B7280')
+            GRAY_LIGHT = colors.HexColor('#F3F4F6')
+            DARK_BG = colors.HexColor('#1A1A2E')
 
-        elapsed = (time.time() - start_time) * 1000
-        logger.info(f"[DAILY_LOGS] Text export complete: {len(logs)} entries ({elapsed:.2f}ms)")
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(
+                buffer,
+                pagesize=A4,
+                topMargin=0.4*inch,
+                bottomMargin=0.6*inch,
+                leftMargin=0.6*inch,
+                rightMargin=0.6*inch
+            )
+            elements = []
+            page_width = A4[0] - 1.2*inch
 
-        return StreamingResponse(
-            iter([content]),
-            media_type="text/plain",
-            headers={"Content-Disposition": f"attachment; filename=daily-logs-{start_date}-to-{end_date}.txt"}
-        )
+            # Calculate summaries
+            total_actual = sum(log.get('actual_hours', 0) or 0 for log in logs)
+            total_overtime = sum(log.get('overtime_hours', 0) or 0 for log in logs)
+            days_with_notes = sum(1 for log in logs if log.get('note'))
+            days_with_overtime = sum(1 for log in logs if (log.get('overtime_hours', 0) or 0) > 0)
+
+            # ========== HEADER BANNER ==========
+            header = Drawing(page_width, 100)
+            header.add(Rect(0, 0, page_width, 100, fillColor=BLUE_DARK, strokeColor=None))
+            header.add(Rect(0, 0, page_width * 0.7, 100, fillColor=BLUE, strokeColor=None))
+            header.add(Rect(page_width - 80, 0, 80, 100, fillColor=BLUE_LIGHT, strokeColor=None))
+            header.add(String(30, 65, "DAILY LOGS REPORT", fontName="Helvetica-Bold", fontSize=24, fillColor=colors.white))
+            header.add(String(30, 40, f"Period: {start_date} to {end_date}", fontName="Helvetica", fontSize=14, fillColor=colors.white))
+            header.add(String(30, 18, f"Total Entries: {len(logs)}", fontName="Helvetica", fontSize=10, fillColor=colors.HexColor('#E0E0E0')))
+            elements.append(header)
+            elements.append(Spacer(1, 25))
+
+            # ========== SUMMARY CARDS ==========
+            card_width = (page_width - 30) / 4
+            summary_drawing = Drawing(page_width, 70)
+            summary_items = [
+                ('Total Entries', str(len(logs)), BLUE),
+                ('Actual Hours', str(round(total_actual, 1)), GREEN),
+                ('Overtime Hrs', str(round(total_overtime, 1)), AMBER),
+                ('Days w/ OT', str(days_with_overtime), PURPLE),
+            ]
+            for i, (label, value, color) in enumerate(summary_items):
+                x = i * (card_width + 10)
+                summary_drawing.add(Rect(x, 0, card_width, 65, fillColor=GRAY_LIGHT, strokeColor=colors.HexColor('#E5E7EB'), strokeWidth=1, rx=5, ry=5))
+                summary_drawing.add(Rect(x, 55, card_width, 10, fillColor=color, strokeColor=None, rx=5, ry=5))
+                summary_drawing.add(Rect(x, 55, card_width, 5, fillColor=color, strokeColor=None))
+                summary_drawing.add(String(x + card_width/2 - len(value)*5, 28, value, fontName="Helvetica-Bold", fontSize=20, fillColor=DARK_BG))
+                summary_drawing.add(String(x + card_width/2 - len(label)*2.5, 10, label, fontName="Helvetica", fontSize=9, fillColor=GRAY))
+            elements.append(summary_drawing)
+            elements.append(Spacer(1, 25))
+
+            # ========== DAILY ENTRIES TABLE ==========
+            if logs:
+                section_header = Drawing(page_width, 30)
+                section_header.add(Rect(0, 0, 5, 25, fillColor=BLUE, strokeColor=None))
+                section_header.add(String(15, 8, "Daily Entries", fontName="Helvetica-Bold", fontSize=14, fillColor=DARK_BG))
+                elements.append(section_header)
+                elements.append(Spacer(1, 10))
+
+                # Create styles for paragraphs
+                styles = getSampleStyleSheet()
+                note_style = ParagraphStyle('note', parent=styles['Normal'], fontSize=8, leading=10)
+
+                log_data = [["Date", "Hours", "OT", "Notes"]]
+                for log in logs:
+                    note = log.get('note', '') or ''
+                    # Truncate long notes
+                    if len(note) > 80:
+                        note = note[:80] + '...'
+                    log_data.append([
+                        log.get('date', 'N/A'),
+                        str(log.get('actual_hours', '-') or '-'),
+                        str(log.get('overtime_hours', '-') or '-'),
+                        Paragraph(note if note else '-', note_style)
+                    ])
+
+                log_table = Table(log_data, colWidths=[1.1*inch, 0.8*inch, 0.6*inch, 3.8*inch])
+                log_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), BLUE),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('FONTSIZE', (0, 1), (-1, -1), 9),
+                    ('ALIGN', (0, 0), (2, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                    ('TOPPADDING', (0, 0), (-1, -1), 8),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#EFF6FF')]),
+                    ('LINEBELOW', (0, 0), (-1, 0), 2, BLUE),
+                ]))
+                elements.append(log_table)
+
+            # ========== FOOTER ==========
+            elements.append(Spacer(1, 40))
+            footer = Drawing(page_width, 40)
+            footer.add(Line(0, 35, page_width, 35, strokeColor=colors.HexColor('#E5E7EB'), strokeWidth=1))
+            footer.add(String(0, 15, "Watchman - Daily Work Logs", fontName="Helvetica", fontSize=9, fillColor=GRAY))
+            footer.add(String(0, 3, "This report was automatically generated.", fontName="Helvetica", fontSize=7, fillColor=colors.HexColor('#9CA3AF')))
+            elements.append(footer)
+
+            # Build PDF
+            doc.build(elements)
+            buffer.seek(0)
+
+            elapsed = (time.time() - start_time) * 1000
+            logger.info(f"[DAILY_LOGS] PDF complete ({elapsed:.2f}ms)")
+
+            return StreamingResponse(
+                buffer,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=daily-logs-{start_date}-to-{end_date}.pdf"}
+            )
+
+        except ImportError as e:
+            logger.error(f"[DAILY_LOGS] reportlab not installed: {e}")
+            raise HTTPException(status_code=500, detail="PDF generation unavailable. Please use CSV export.")
 
     else:
         logger.warning(f"[DAILY_LOGS] Invalid export format requested: {format}")
