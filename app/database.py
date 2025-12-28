@@ -111,6 +111,36 @@ class Database:
         """Mark user onboarding as completed"""
         logger.info(f"[DB] complete_onboarding: {user_id}")
         return await self.update_user(user_id, {"onboarding_completed": True})
+
+    async def get_user_by_stripe_customer(self, stripe_customer_id: str) -> Optional[dict]:
+        """Get user by Stripe customer ID"""
+        logger.debug(f"[DB] get_user_by_stripe_customer: {stripe_customer_id}")
+        try:
+            result = self.client.table("users").select("*").eq("stripe_customer_id", stripe_customer_id).single().execute()
+            return result.data if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error getting user by stripe_customer_id {stripe_customer_id}: {e}")
+            return None
+
+    async def create_payment_record(self, data: dict) -> Optional[dict]:
+        """Create a payment record"""
+        logger.info(f"[DB] create_payment_record: user={data.get('user_id')}, amount={data.get('amount')}")
+        try:
+            result = self.client.table("payments").insert(data).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error creating payment record: {e}")
+            return None
+
+    async def get_payment_history(self, user_id: str) -> list:
+        """Get user's payment history"""
+        logger.debug(f"[DB] get_payment_history: {user_id}")
+        try:
+            result = self.client.table("payments").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+            return result.data if result.data else []
+        except Exception as e:
+            logger.error(f"[DB] Error getting payment history for {user_id}: {e}")
+            return []
     
     # ==========================================
     # Cycles

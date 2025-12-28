@@ -12,6 +12,7 @@ from loguru import logger
 
 from app.config import get_settings
 from app.database import Database
+from app.services.email_service import get_email_service
 
 
 # Trial period configuration
@@ -128,6 +129,18 @@ async def get_current_user(
             )
 
         logger.info(f"[AUTH] User created successfully: {user.get('id')} ({email})")
+
+        # Send welcome email to new user
+        try:
+            email_service = get_email_service()
+            await email_service.send_welcome_email(
+                to=email,
+                user_name=name,
+            )
+            logger.info(f"[AUTH] Welcome email sent to {email}")
+        except Exception as e:
+            # Don't fail user creation if email fails
+            logger.warning(f"[AUTH] Failed to send welcome email to {email}: {e}")
     else:
         logger.info(f"[AUTH] User found: {user.get('id')} ({user.get('email')}) - tier: {user.get('tier', 'free')}")
 

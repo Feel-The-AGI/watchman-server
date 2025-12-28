@@ -283,6 +283,161 @@ class EmailService:
             html=html,
         )
 
+    async def send_welcome_email(
+        self,
+        to: str,
+        user_name: str,
+    ) -> bool:
+        """Send welcome email from co-founders when user signs up"""
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #e5e5e5; padding: 20px; }}
+                .container {{ max-width: 600px; margin: 0 auto; background: #1a1a2e; border-radius: 16px; padding: 32px; }}
+                .header {{ text-align: center; margin-bottom: 24px; }}
+                .logo {{ font-size: 28px; font-weight: bold; color: #6366f1; }}
+                .content {{ line-height: 1.8; }}
+                .highlight {{ color: #6366f1; font-weight: 600; }}
+                .cta-button {{ display: inline-block; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 14px 28px; border-radius: 12px; text-decoration: none; font-weight: 600; margin: 24px 0; }}
+                .signature {{ margin-top: 32px; padding-top: 24px; border-top: 1px solid #ffffff10; }}
+                .founders {{ display: flex; gap: 8px; margin-top: 8px; }}
+                .footer {{ margin-top: 32px; text-align: center; color: #6b7280; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <div class="logo">Watchman</div>
+                </div>
+                <div class="content">
+                    <p>Hey {user_name},</p>
+
+                    <p>Welcome to Watchman! We're genuinely excited to have you here.</p>
+
+                    <p>We built Watchman because we know how chaotic shift work can be. Between rotating schedules, tracking overtime, and trying to maintain some work-life balance, it's a lot to manage. We wanted to create something that actually helps.</p>
+
+                    <p>Here's what you can do right now:</p>
+                    <ul>
+                        <li><strong>Set up your shift pattern</strong> - Tell us your rotation and we'll generate your calendar</li>
+                        <li><strong>Track your commitments</strong> - Study goals, side projects, whatever matters to you</li>
+                        <li><strong>Log incidents</strong> - Keep a record of workplace issues (trust us, it's important)</li>
+                    </ul>
+
+                    <p style="text-align: center;">
+                        <a href="https://trywatchman.app/dashboard" class="cta-button">Get Started →</a>
+                    </p>
+
+                    <p>If you have any questions or feedback, just reply to this email. We read everything.</p>
+
+                    <div class="signature">
+                        <p style="margin-bottom: 4px;">Cheers,</p>
+                        <p style="margin: 0;"><strong>Médina & Jason</strong></p>
+                        <p style="color: #6b7280; font-size: 14px; margin-top: 4px;">Co-founders, Watchman</p>
+                    </div>
+                </div>
+                <div class="footer">
+                    <p>You're receiving this because you signed up for Watchman.</p>
+                    <p><a href="https://trywatchman.app" style="color: #6366f1;">trywatchman.app</a></p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+
+        return await self.send_email(
+            to=to,
+            subject="Welcome to Watchman - Let's get you set up",
+            html=html,
+        )
+
+    async def send_pro_upgrade_email(
+        self,
+        to: str,
+        user_name: str,
+    ) -> bool:
+        """Send thank you email when user upgrades to Pro"""
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #e5e5e5; padding: 20px; }}
+                .container {{ max-width: 600px; margin: 0 auto; background: #1a1a2e; border-radius: 16px; padding: 32px; }}
+                .header {{ text-align: center; margin-bottom: 24px; }}
+                .logo {{ font-size: 28px; font-weight: bold; color: #6366f1; }}
+                .pro-badge {{ display: inline-block; background: linear-gradient(135deg, #f59e0b, #d97706); color: white; padding: 6px 16px; border-radius: 20px; font-size: 14px; font-weight: 600; margin: 8px 0; }}
+                .content {{ line-height: 1.8; }}
+                .feature-list {{ background: #0a0a0f; border-radius: 12px; padding: 20px; margin: 24px 0; }}
+                .feature-item {{ display: flex; align-items: center; gap: 12px; margin: 12px 0; }}
+                .check {{ color: #10b981; font-size: 18px; }}
+                .cta-button {{ display: inline-block; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 14px 28px; border-radius: 12px; text-decoration: none; font-weight: 600; margin: 24px 0; }}
+                .signature {{ margin-top: 32px; padding-top: 24px; border-top: 1px solid #ffffff10; }}
+                .footer {{ margin-top: 32px; text-align: center; color: #6b7280; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <div class="logo">Watchman</div>
+                    <span class="pro-badge">PRO</span>
+                </div>
+                <div class="content">
+                    <p>Hey {user_name},</p>
+
+                    <p><strong>Thank you so much for upgrading to Pro!</strong></p>
+
+                    <p>Your support means the world to us. Seriously. We're a small team, and every Pro member helps us keep building and improving Watchman.</p>
+
+                    <div class="feature-list">
+                        <p style="margin: 0 0 16px 0; font-weight: 600;">You now have access to:</p>
+                        <div class="feature-item">
+                            <span class="check">✓</span>
+                            <span><strong>Calendar Sharing</strong> - Share your schedule with anyone</span>
+                        </div>
+                        <div class="feature-item">
+                            <span class="check">✓</span>
+                            <span><strong>Weighted Constraints</strong> - Advanced scheduling with priorities</span>
+                        </div>
+                        <div class="feature-item">
+                            <span class="check">✓</span>
+                            <span><strong>PDF Exports</strong> - Beautiful reports for incidents & logs</span>
+                        </div>
+                        <div class="feature-item">
+                            <span class="check">✓</span>
+                            <span><strong>Priority Support</strong> - We've got your back</span>
+                        </div>
+                    </div>
+
+                    <p style="text-align: center;">
+                        <a href="https://trywatchman.app/dashboard" class="cta-button">Explore Pro Features →</a>
+                    </p>
+
+                    <p>Got ideas for new features? We're all ears. Just reply to this email.</p>
+
+                    <div class="signature">
+                        <p style="margin-bottom: 4px;">With gratitude,</p>
+                        <p style="margin: 0;"><strong>Médina & Jason</strong></p>
+                        <p style="color: #6b7280; font-size: 14px; margin-top: 4px;">Co-founders, Watchman</p>
+                    </div>
+                </div>
+                <div class="footer">
+                    <p>Manage your subscription at <a href="https://trywatchman.app/dashboard/settings" style="color: #6366f1;">trywatchman.app/settings</a></p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+
+        return await self.send_email(
+            to=to,
+            subject="You're now a Watchman Pro - Thank you!",
+            html=html,
+        )
+
 
 # Singleton instance
 _email_service: Optional[EmailService] = None
