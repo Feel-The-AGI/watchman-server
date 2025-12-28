@@ -15,6 +15,7 @@ import time
 
 from app.database import Database
 from app.middleware.auth import get_current_user
+from app.services.email_service import get_email_service
 
 router = APIRouter()
 
@@ -417,6 +418,29 @@ async def create_incident(
         raise HTTPException(status_code=500, detail="Failed to create incident")
 
     logger.info(f"[INCIDENTS] Incident created: id={result.get('id')}, type={request.type}, severity={request.severity} ({elapsed:.2f}ms)")
+
+    # Send email notification if enabled
+    user_settings = user.get("settings", {})
+    if user_settings.get("notifications_email", False):
+        try:
+            email_service = get_email_service()
+            user_email = user.get("email")
+            user_name = user.get("name") or user_email.split("@")[0] if user_email else "there"
+
+            if user_email:
+                await email_service.send_incident_alert(
+                    to=user_email,
+                    user_name=user_name,
+                    incident_title=request.title,
+                    incident_type=request.type,
+                    severity=request.severity,
+                    description=request.description or "",
+                )
+                logger.info(f"[INCIDENTS] Email notification sent to {user_email}")
+        except Exception as e:
+            # Don't fail the request if email fails
+            logger.warning(f"[INCIDENTS] Failed to send email notification: {e}")
+
     return result
 
 

@@ -9,6 +9,7 @@ from typing import Optional
 
 from app.database import Database
 from app.middleware.auth import get_current_user, require_admin, get_effective_tier, is_in_trial, TRIAL_DURATION_DAYS
+from app.services.email_service import get_email_service
 
 
 router = APIRouter()
@@ -351,3 +352,87 @@ async def delete_account(user: dict = Depends(get_current_user)):
         "deleted": deleted_summary,
         "auth_deleted": auth_deleted
     }
+
+
+@router.post("/test-email")
+async def send_test_email(user: dict = Depends(get_current_user)):
+    """
+    Send a test email to verify email notifications are working.
+    """
+    email_service = get_email_service()
+
+    if not email_service.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="Email service is not configured. Contact support."
+        )
+
+    user_email = user.get("email")
+    if not user_email:
+        raise HTTPException(
+            status_code=400,
+            detail="No email address found for your account."
+        )
+
+    user_name = user.get("name") or user_email.split("@")[0]
+
+    # Send a test email
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #e5e5e5; padding: 20px; }}
+            .container {{ max-width: 600px; margin: 0 auto; background: #1a1a2e; border-radius: 16px; padding: 32px; }}
+            .header {{ text-align: center; margin-bottom: 24px; }}
+            .logo {{ font-size: 24px; font-weight: bold; color: #6366f1; }}
+            .success {{ background: #10b98120; border: 1px solid #10b98140; padding: 16px; border-radius: 12px; margin: 24px 0; }}
+            .success-icon {{ font-size: 48px; text-align: center; }}
+            .content {{ line-height: 1.6; text-align: center; }}
+            .footer {{ margin-top: 32px; text-align: center; color: #6b7280; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <div class="logo">Watchman</div>
+            </div>
+            <div class="content">
+                <div class="success">
+                    <div class="success-icon">&#10003;</div>
+                    <p style="margin: 8px 0 0 0; font-weight: 600; color: #10b981;">Email notifications are working!</p>
+                </div>
+                <p>Hi {user_name},</p>
+                <p>This is a test email to confirm your email notifications are properly configured.</p>
+                <p>You'll receive emails for:</p>
+                <ul style="text-align: left; display: inline-block;">
+                    <li>Incident alerts</li>
+                    <li>Schedule reminders</li>
+                    <li>Weekly summaries</li>
+                </ul>
+            </div>
+            <div class="footer">
+                <p>Manage your preferences at <a href="https://trywatchman.app/dashboard/settings" style="color: #6366f1;">trywatchman.app</a></p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    success = await email_service.send_email(
+        to=user_email,
+        subject="Test Email - Watchman Notifications",
+        html=html,
+    )
+
+    if success:
+        return {
+            "success": True,
+            "message": f"Test email sent to {user_email}"
+        }
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to send test email. Please try again later."
+        )

@@ -24,7 +24,11 @@ class Settings(BaseSettings):
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_price_id_pro: str = ""
-    
+
+    # Email (Resend)
+    resend_api_key: str = ""
+    email_from: str = "Watchman <notifications@trywatchman.app>"
+
     # Application
     app_env: str = "development"
     debug: bool = True
