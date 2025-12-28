@@ -382,38 +382,28 @@ async def send_test_email(user: dict = Depends(get_current_user)):
     <html>
     <head>
         <meta charset="utf-8">
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #e5e5e5; padding: 20px; }}
-            .container {{ max-width: 600px; margin: 0 auto; background: #1a1a2e; border-radius: 16px; padding: 32px; }}
-            .header {{ text-align: center; margin-bottom: 24px; }}
-            .logo {{ font-size: 24px; font-weight: bold; color: #6366f1; }}
-            .success {{ background: #10b98120; border: 1px solid #10b98140; padding: 16px; border-radius: 12px; margin: 24px 0; }}
-            .success-icon {{ font-size: 48px; text-align: center; }}
-            .content {{ line-height: 1.6; text-align: center; }}
-            .footer {{ margin-top: 32px; text-align: center; color: #6b7280; font-size: 12px; }}
-        </style>
     </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <div class="logo">Watchman</div>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #0a0a0f; color: #e5e5e5; padding: 20px; margin: 0;">
+        <div style="max-width: 600px; margin: 0 auto; background-color: #1a1a2e; border-radius: 16px; padding: 32px;">
+            <div style="text-align: center; margin-bottom: 24px;">
+                <div style="font-size: 24px; font-weight: bold; color: #6366f1;">Watchman</div>
             </div>
-            <div class="content">
-                <div class="success">
-                    <div class="success-icon">&#10003;</div>
+            <div style="line-height: 1.6; text-align: center; color: #e5e5e5;">
+                <div style="background-color: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); padding: 16px; border-radius: 12px; margin: 24px 0;">
+                    <div style="font-size: 48px; text-align: center; color: #10b981;">&#10003;</div>
                     <p style="margin: 8px 0 0 0; font-weight: 600; color: #10b981;">Email notifications are working!</p>
                 </div>
-                <p>Hi {user_name},</p>
-                <p>This is a test email to confirm your email notifications are properly configured.</p>
-                <p>You'll receive emails for:</p>
-                <ul style="text-align: left; display: inline-block;">
-                    <li>Incident alerts</li>
-                    <li>Schedule reminders</li>
-                    <li>Weekly summaries</li>
+                <p style="color: #e5e5e5;">Hi {user_name},</p>
+                <p style="color: #e5e5e5;">This is a test email to confirm your email notifications are properly configured.</p>
+                <p style="color: #e5e5e5;">You'll receive emails for:</p>
+                <ul style="text-align: left; display: inline-block; color: #e5e5e5;">
+                    <li style="color: #e5e5e5;">Incident alerts</li>
+                    <li style="color: #e5e5e5;">Schedule reminders</li>
+                    <li style="color: #e5e5e5;">Weekly summaries</li>
                 </ul>
             </div>
-            <div class="footer">
-                <p>Manage your preferences at <a href="https://trywatchman.app/dashboard/settings" style="color: #6366f1;">trywatchman.app</a></p>
+            <div style="margin-top: 32px; text-align: center; color: #9ca3af; font-size: 12px;">
+                <p style="color: #9ca3af;">Manage your preferences at <a href="https://trywatchman.app/dashboard/settings" style="color: #6366f1;">trywatchman.app</a></p>
             </div>
         </div>
     </body>
