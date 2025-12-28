@@ -19,8 +19,10 @@ class UpdateSettingsRequest(BaseModel):
     weighted_mode_enabled: Optional[bool] = None
     max_concurrent_commitments: Optional[int] = None
     notifications_email: Optional[bool] = None
-    notifications_whatsapp: Optional[bool] = None
-    theme: Optional[str] = None  # dark, light
+    notifications_push: Optional[bool] = None  # Push notifications
+    notifications_whatsapp: Optional[bool] = None  # WhatsApp notifications (legacy)
+    theme: Optional[str] = None  # dark, light, system
+    timezone: Optional[str] = None  # User timezone
 
 
 class ConstraintRequest(BaseModel):
@@ -112,18 +114,24 @@ async def update_settings(
     
     if data.notifications_email is not None:
         current_settings["notifications_email"] = data.notifications_email
-    
+
+    if data.notifications_push is not None:
+        current_settings["notifications_push"] = data.notifications_push
+
     if data.notifications_whatsapp is not None:
         current_settings["notifications_whatsapp"] = data.notifications_whatsapp
-    
+
     if data.theme is not None:
-        if data.theme not in ["dark", "light"]:
+        if data.theme not in ["dark", "light", "system"]:
             raise HTTPException(
                 status_code=400,
-                detail="theme must be 'dark' or 'light'"
+                detail="theme must be 'dark', 'light', or 'system'"
             )
         current_settings["theme"] = data.theme
-    
+
+    if data.timezone is not None:
+        current_settings["timezone"] = data.timezone
+
     await db.update_user(user["id"], {"settings": current_settings})
     
     return {
