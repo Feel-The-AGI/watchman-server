@@ -25,9 +25,11 @@ WATCHMAN_TOOLS = [
         "description": """Bulk update calendar days to a specific work type. Use this to:
 - Correct past calendar entries that are wrong
 - Convert night shifts to day shifts (or vice versa) while keeping off days unchanged
-- Set a range of dates to day shifts, night shifts, or off
+- Set a range of dates to day shifts, night shifts, off, or blank (untracked)
+- Mark dates as 'blank' when the user's schedule was chaotic/unknown during that period
 IMPORTANT: When user says 'set working days to X' or 'change shifts to X', set preserve_off_days=true to keep off days unchanged.
-Only set preserve_off_days=false when user explicitly wants ALL days changed (including off days).""",
+Only set preserve_off_days=false when user explicitly wants ALL days changed (including off days).
+Use 'blank' for dates before the user's rotation became stable/consistent.""",
         "parameters": {
             "type": "object",
             "properties": {
@@ -41,8 +43,8 @@ Only set preserve_off_days=false when user explicitly wants ALL days changed (in
                 },
                 "work_type": {
                     "type": "string",
-                    "enum": ["work_day", "work_night", "off"],
-                    "description": "The work type to set. work_day=day shift, work_night=night shift, off=rest day"
+                    "enum": ["work_day", "work_night", "off", "blank"],
+                    "description": "The work type to set. work_day=day shift, work_night=night shift, off=rest day, blank=untracked/unknown"
                 },
                 "preserve_off_days": {
                     "type": "boolean",
@@ -57,7 +59,14 @@ Only set preserve_off_days=false when user explicitly wants ALL days changed (in
         "description": """Update the work rotation pattern or regenerate the calendar. Use this to:
 - Set up a new rotation pattern (e.g., 5 days, 5 nights, 5 off)
 - Change the anchor date (which date corresponds to which cycle day)
-- Regenerate calendar from the current pattern""",
+- Regenerate calendar from the current pattern
+- Handle "off by one day" scenarios by adjusting anchor_cycle_day
+
+IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
+- The anchor_date is when the user's STABLE ROTATION began, not their employment start date
+- Many workers have chaotic/random schedules during onboarding before getting a stable rotation
+- The anchor represents when the repeating pattern became consistent
+- Days BEFORE the anchor can be marked as 'blank' (untracked) if the schedule was unstable""",
         "parameters": {
             "type": "object",
             "properties": {
@@ -85,14 +94,36 @@ Only set preserve_off_days=false when user explicitly wants ALL days changed (in
                 },
                 "anchor_date": {
                     "type": "string",
-                    "description": "A known date in YYYY-MM-DD format"
+                    "description": "A known date in YYYY-MM-DD format - this is when the stable rotation started"
                 },
                 "anchor_cycle_day": {
                     "type": "integer",
-                    "description": "Which day of the cycle the anchor_date falls on (1-based)"
+                    "description": "Which day of the cycle the anchor_date falls on (1-based). Adjusting this shifts the entire calendar."
+                },
+                "shift_by_days": {
+                    "type": "integer",
+                    "description": "Alternative way to shift the rotation: positive = forward, negative = backward. Use this for 'off by one day' fixes."
                 }
             },
             "required": []
+        }
+    },
+    {
+        "name": "copy_incident",
+        "description": """Copy an incident report from one date to another. Use when user says things like 'copy the incident from the 23rd to the 22nd'.""",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source_date": {
+                    "type": "string",
+                    "description": "Date to copy FROM in YYYY-MM-DD format"
+                },
+                "target_date": {
+                    "type": "string",
+                    "description": "Date to copy TO in YYYY-MM-DD format"
+                }
+            },
+            "required": ["source_date", "target_date"]
         }
     },
     {
@@ -282,67 +313,148 @@ SEVERITY LEVELS:
 ]
 
 
-# System prompt - now focused on conversation, tools handle execution
-SYSTEM_PROMPT = """You are Watchman, an intelligent calendar assistant for shift workers.
+# System prompt - comprehensive, context-aware, with safety guardrails
+SYSTEM_PROMPT = """You are Watchman, an intelligent calendar assistant designed specifically for shift workers.
+You understand the unique challenges of rotating schedules, FIFO work, healthcare shifts, mining operations,
+and other industries where work patterns don't follow a standard 9-5 schedule.
 
-=== CURRENT DATE ===
-{current_date}
+=== CURRENT DATE & TIME ===
+Today: {current_date}
 
-=== USER'S SETTINGS ===
+=== USER'S MASTER SETTINGS ===
 {master_settings}
 
-=== USER'S CALENDAR (Recent/Relevant Days) ===
+=== USER'S CALENDAR (Recent & Upcoming Days) ===
+Legend: D=Day Shift, N=Night Shift, O=Off, B=Blank/Untracked
 {calendar_snapshot}
 
-=== YOUR CAPABILITIES ===
-You have access to tools that DIRECTLY modify the user's calendar and logs:
+=== USER'S RECENT LOGS & INCIDENTS ===
+{logs_and_incidents}
 
-CALENDAR TOOLS:
-- override_days: Change any date range to day shifts, night shifts, or off days
-- update_cycle: Set or change the rotation pattern
-- add_leave: Block out vacation/leave dates
-- add_commitment: Add recurring events like classes
-- undo: Revert the last change
+=== YOUR CAPABILITIES (TOOLS) ===
+You have direct access to modify the user's calendar and records. Use these tools - your words alone don't change anything!
 
-LOGGING TOOLS:
-- create_daily_log: Add daily notes, record hours worked, document events
-- create_incident: Log workplace incidents (safety, harassment, overtime, health/sick, equipment, etc.)
+CALENDAR MANAGEMENT:
+• override_days - Change date ranges to: day shifts, night shifts, off days, or blank (untracked)
+• update_cycle - Set/modify rotation pattern, change anchor date, or shift calendar by N days
+• add_leave - Block out vacation/leave dates
+• add_commitment - Add recurring events (classes, appointments)
+• copy_incident - Copy an incident report from one date to another
 
-IMPORTANT BEHAVIOR:
-1. When user asks to change dates → USE override_days immediately
-2. When user mentions an incident, problem, or issue → USE create_incident
-3. When user wants to log/note something about their day → USE create_daily_log
-4. When user asks about their calendar → Look at the CALENDAR snapshot above
-5. NEVER just say "Done" without calling a tool - your words don't change anything!
+DOCUMENTATION:
+• create_daily_log - Add notes, record actual hours worked, overtime
+• create_incident - Log workplace issues (safety, harassment, overtime, health, equipment, etc.)
 
-LOGGING GUIDELINES:
-When creating logs or incidents from natural language:
-- Extract the key facts and write them clearly
-- For incidents: Choose the most appropriate type and severity
-- If user says "I was sick" or "I had a health issue" → type: "health"
-- If user says "I had to work extra hours" → type: "overtime"
-- If no date is specified, use today's date: {current_date}
-- Write professional, factual descriptions
+HISTORY:
+• undo - Revert the last change
 
-EXAMPLES:
+=== CRITICAL CONCEPTS ===
 
-Calendar changes:
-User: "Set Oct 16 through Dec 14 as day shifts"
-→ Call override_days(start_date="2025-10-16", end_date="2025-12-14", work_type="work_day")
+1. ROTATION ANCHOR vs EMPLOYMENT START:
+   - The "anchor date" is when the user's STABLE, REPEATING rotation began
+   - This is NOT necessarily when they started employment
+   - Many workers have chaotic/random schedules during onboarding before getting assigned a stable shift
+   - If user says their schedule was messy before a certain date, mark those days as 'blank'
 
-Daily logging:
-User: "Log that I worked 10 hours today, 2 hours overtime. Had to stay late for equipment issues."
-→ Call create_daily_log(date="{current_date}", note="Worked extended shift due to equipment issues. Total 10 hours with 2 hours overtime.", actual_hours=10, overtime_hours=2)
+2. "OFF BY ONE DAY" FIXES:
+   - If user says "my calendar is one day off" or "shifted by a day"
+   - Use update_cycle with shift_by_days parameter (+1 or -1)
+   - This is a RE-ANCHOR operation, not editing history
 
-Incident reporting:
-User: "I was really sick yesterday and had to leave early, felt terrible all day"
-→ Call create_incident(date="yesterday's date", type="health", severity="medium", title="Left work early due to illness", description="Experienced severe illness symptoms during shift and had to leave work early. Felt unwell throughout the day.")
+3. UNDERSTANDING SHIFT PATTERNS:
+   - "5/5/5" typically means: 5 day shifts, 5 night shifts, 5 off days
+   - "10 on 5 off" means: 10 working days, 5 off days
+   - Users may say "I started Day 4" meaning their anchor date falls on cycle day 4
+   - Parse natural language descriptions carefully
 
-User: "My supervisor made me work 4 extra hours yesterday even though I said I couldn't"
-→ Call create_incident(date="yesterday's date", type="overtime", severity="high", title="Forced to work 4 hours overtime", description="Supervisor required additional 4 hours of work despite declining. Overtime was mandatory and not voluntary.")
+4. BLANK/UNTRACKED DAYS:
+   - Use work_type="blank" for days where the schedule was unknown or chaotic
+   - Perfect for: onboarding periods, transition periods, before rotation became stable
+   - Blank days show as untracked - no wrong data is better than wrong data
 
-User: "The forklift broke down again today, third time this week"
-→ Call create_incident(date="{current_date}", type="equipment", severity="medium", title="Recurring forklift breakdown", description="Forklift experienced mechanical failure. This is the third breakdown this week, indicating a persistent maintenance issue.")
+=== SAFETY & APPROVAL GUARDRAILS ===
+
+ALWAYS ASK FOR CONFIRMATION before:
+• Deleting or overwriting large date ranges (more than 30 days)
+• Changing the core rotation pattern
+• Operations that seem to conflict with what user previously set up
+
+NEVER:
+• Make assumptions about dates without confirming with user
+• Execute destructive operations without explanation
+• Ignore user's explicit constraints or preferences
+
+WHEN UNCERTAIN:
+• Ask clarifying questions
+• Explain what you're about to do and why
+• Offer alternatives when the request is ambiguous
+
+=== INCIDENT TYPES ===
+Choose the most appropriate type:
+• overtime: Forced/unpaid overtime, excessive hours
+• safety: Hazards, unsafe conditions, safety violations
+• equipment: Equipment failure, broken tools, machinery issues
+• harassment: Verbal abuse, bullying, inappropriate behavior
+• injury: Physical injury, accident at work
+• policy_violation: Rules broken, unfair practices
+• health: Illness, feeling unwell, medical issues at work
+• discrimination: Unfair treatment based on protected characteristics
+• workload: Excessive demands, understaffing
+• compensation: Pay issues, wage theft, denied benefits
+• scheduling: Shift conflicts, unfair scheduling
+• communication: Miscommunication, withheld information
+• retaliation: Punishment for reporting issues
+• environment: Hostile conditions, poor workplace environment
+• other: Anything else
+
+SEVERITY LEVELS:
+• low: Minor inconvenience, no immediate harm
+• medium: Moderate concern, needs attention soon
+• high: Serious issue, needs urgent attention
+• critical: Emergency, immediate danger
+
+=== INTERACTION STYLE ===
+
+1. Be conversational but efficient - shift workers are busy
+2. When user describes their schedule naturally, parse it and set it up
+3. Acknowledge what you understood before executing
+4. After making changes, briefly confirm what was done
+5. If user references past incidents/logs, you can see them in the context above
+6. Be empathetic about workplace issues - these are real problems affecting real people
+
+=== EXAMPLES ===
+
+UNDERSTANDING NATURAL LANGUAGE SCHEDULES:
+User: "I work 5 days, then 5 nights, then 5 off. Today is my second night shift."
+→ Pattern: [{{label: "work_day", duration: 5}}, {{label: "work_night", duration: 5}}, {{label: "off", duration: 5}}]
+→ Anchor: {current_date} is cycle day 7 (5 days + 2 nights = day 7 of 15-day cycle)
+→ Call update_cycle with this information
+
+FIXING "OFF BY ONE DAY":
+User: "My calendar is showing tomorrow as night shift but I'm actually on day shift"
+→ This means the cycle is shifted by 1 day
+→ Call update_cycle with shift_by_days=-1 (or +1 depending on direction)
+
+HANDLING MESSY HISTORY:
+User: "I started working August 1st but my actual rotation only began December 1st. Before that was random."
+→ Set anchor_date to December 1st
+→ Optionally mark Aug 1 - Nov 30 as 'blank' using override_days
+
+COPYING INCIDENTS:
+User: "Copy the incident from the 23rd to the 22nd"
+→ Call copy_incident(source_date="2025-12-23", target_date="2025-12-22")
+
+INCIDENT LOGGING:
+User: "My supervisor yelled at me in front of everyone today for being 2 minutes late"
+→ Call create_incident(
+    date="{current_date}",
+    type="harassment",
+    severity="medium",
+    title="Public verbal reprimand for minor lateness",
+    description="Supervisor publicly reprimanded employee in front of coworkers for being 2 minutes late. This constitutes inappropriate behavior and public humiliation."
+  )
+
+Remember: You're here to help shift workers take control of their chaotic schedules. Be their ally.
 """
 
 
@@ -391,7 +503,13 @@ class ChatService:
                 months[month_key] = []
 
             work_type = day["work_type"]
-            symbol = "D" if work_type == "work_day" else "N" if work_type == "work_night" else "O"
+            symbol_map = {
+                "work_day": "D",
+                "work_night": "N",
+                "off": "O",
+                "blank": "B"
+            }
+            symbol = symbol_map.get(work_type, "?")
             months[month_key].append(f"{d.day}:{symbol}")
 
         # Build readable summary
@@ -400,6 +518,59 @@ class ChatService:
             lines.append(f"{month}: {', '.join(days)}")
 
         return "\n".join(lines)
+
+    async def _get_logs_and_incidents(self, days_back: int = 30) -> str:
+        """Get recent logs and incidents for context"""
+        today = date.today()
+        start_date = today - timedelta(days=days_back)
+
+        # Fetch recent daily logs
+        logs_result = self.db.client.table("daily_logs").select(
+            "date, note, actual_hours, overtime_hours"
+        ).eq(
+            "user_id", self.user_id
+        ).gte(
+            "date", start_date.isoformat()
+        ).order("date", desc=True).limit(20).execute()
+
+        # Fetch recent incidents
+        incidents_result = self.db.client.table("incidents").select(
+            "date, type, severity, title, description"
+        ).eq(
+            "user_id", self.user_id
+        ).gte(
+            "date", start_date.isoformat()
+        ).order("date", desc=True).limit(20).execute()
+
+        lines = []
+
+        # Format logs
+        if logs_result.data:
+            lines.append("RECENT DAILY LOGS:")
+            for log in logs_result.data:
+                log_line = f"  [{log['date']}] {log['note']}"
+                if log.get('actual_hours'):
+                    log_line += f" (Hours: {log['actual_hours']}h"
+                    if log.get('overtime_hours'):
+                        log_line += f", OT: {log['overtime_hours']}h"
+                    log_line += ")"
+                lines.append(log_line)
+        else:
+            lines.append("RECENT DAILY LOGS: None")
+
+        lines.append("")
+
+        # Format incidents
+        if incidents_result.data:
+            lines.append("RECENT INCIDENTS:")
+            for incident in incidents_result.data:
+                severity_emoji = {"low": "🟡", "medium": "🟠", "high": "🔴", "critical": "⚫"}.get(incident['severity'], "⚪")
+                lines.append(f"  [{incident['date']}] {severity_emoji} [{incident['type'].upper()}] {incident['title']}")
+                lines.append(f"      {incident['description'][:150]}{'...' if len(incident['description']) > 150 else ''}")
+        else:
+            lines.append("RECENT INCIDENTS: None")
+
+        return "\n".join(lines) if lines else "No recent logs or incidents."
 
     async def send_message(
         self,
@@ -415,15 +586,18 @@ class ChatService:
         # Get full context
         master_settings = await self.settings_service.get_snapshot(self.user_id)
         calendar_snapshot = await self._get_calendar_snapshot()
+        logs_and_incidents = await self._get_logs_and_incidents()
         chat_history = await self.get_history(limit=10)
 
         logger.info(f"[CHAT] User {self.user_id} message: {content[:100]}")
         logger.info(f"[CHAT] Calendar snapshot length: {len(calendar_snapshot)} chars")
+        logger.info(f"[CHAT] Logs/incidents length: {len(logs_and_incidents)} chars")
 
         # Build system prompt with full context
         system_prompt = SYSTEM_PROMPT.format(
             master_settings=json.dumps(master_settings, indent=2, default=str),
             calendar_snapshot=calendar_snapshot,
+            logs_and_incidents=logs_and_incidents,
             current_date=datetime.now().strftime("%Y-%m-%d")
         )
 

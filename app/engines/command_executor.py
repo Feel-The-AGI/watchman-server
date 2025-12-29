@@ -25,6 +25,7 @@ VALID_ACTIONS = {
     "override_days",  # Bulk update past/future calendar days to a specific work type
     "create_daily_log",  # Create daily notes and log hours worked
     "create_incident",  # Log workplace incidents
+    "copy_incident",  # Copy an incident from one date to another
     "undo",
     "redo"
 }
@@ -216,6 +217,8 @@ class CommandExecutor:
             return await self._action_create_daily_log(payload)
         elif action == "create_incident":
             return await self._action_create_incident(payload)
+        elif action == "copy_incident":
+            return await self._action_copy_incident(payload)
         elif action == "undo":
             return await self._action_undo(payload)
         elif action == "redo":
@@ -417,17 +420,22 @@ class CommandExecutor:
             "work_night": "work_night",
             "off": "off",
             "rest": "off",
+            "blank": "blank",
+            "undefined": "blank",
+            "untracked": "blank",
+            "unknown": "blank",
         }
         work_type = work_type_map.get(work_type_str.lower(), work_type_str)
 
-        if work_type not in ["work_day", "work_night", "off"]:
-            raise ValueError(f"Invalid work_type: {work_type_str}. Must be work_day, work_night, or off")
+        if work_type not in ["work_day", "work_night", "off", "blank"]:
+            raise ValueError(f"Invalid work_type: {work_type_str}. Must be work_day, work_night, off, or blank")
 
         # Calculate available hours based on work type
         available_hours_map = {
             "work_day": 4.0,
             "work_night": 2.0,
-            "off": 12.0
+            "off": 12.0,
+            "blank": 0.0  # Blank/untracked days have no scheduled hours
         }
         available_hours = available_hours_map[work_type]
 
@@ -604,6 +612,60 @@ class CommandExecutor:
             return {"incident": incident}
 
         raise Exception("Failed to create incident")
+
+    async def _action_copy_incident(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Copy an incident from one date to another.
+
+        Payload:
+            source_date: str - Date to copy FROM in YYYY-MM-DD format
+            target_date: str - Date to copy TO in YYYY-MM-DD format
+        """
+        logger.info(f"=== COPY_INCIDENT for user {self.user_id} ===")
+        logger.info(f"Payload: {payload}")
+
+        source_date = payload.get("source_date")
+        target_date = payload.get("target_date")
+
+        if not source_date:
+            raise ValueError("source_date is required")
+        if not target_date:
+            raise ValueError("target_date is required")
+
+        # Find incidents on the source date
+        result = self.db.client.table("incidents").select("*").eq(
+            "user_id", self.user_id
+        ).eq("date", source_date).execute()
+
+        if not result.data or len(result.data) == 0:
+            raise ValueError(f"No incidents found on {source_date}")
+
+        copied_incidents = []
+        for incident in result.data:
+            # Create a copy with new date and new ID
+            new_incident = {
+                "id": str(uuid4()),
+                "user_id": self.user_id,
+                "date": target_date,
+                "type": incident["type"],
+                "severity": incident["severity"],
+                "title": incident["title"],
+                "description": incident["description"],
+                "reported_to": incident.get("reported_to"),
+                "witnesses": incident.get("witnesses")
+            }
+
+            copy_result = self.db.client.table("incidents").insert(new_incident).execute()
+            if copy_result.data and len(copy_result.data) > 0:
+                copied_incidents.append(copy_result.data[0])
+
+        logger.info(f"=== COPIED {len(copied_incidents)} incidents from {source_date} to {target_date} ===")
+        return {
+            "copied_count": len(copied_incidents),
+            "source_date": source_date,
+            "target_date": target_date,
+            "incidents": copied_incidents
+        }
 
     async def _action_undo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Undo the last command"""
