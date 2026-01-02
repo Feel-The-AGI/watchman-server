@@ -20,10 +20,16 @@ class Settings(BaseSettings):
     # Gemini AI
     gemini_api_key: str = ""
     
-    # Stripe
+    # Stripe (legacy - keeping for reference)
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_price_id_pro: str = ""
+    
+    # Paystack
+    paystack_secret_key: str = ""  # Set via PAYSTACK_SECRET_KEY env var
+    paystack_public_key: str = ""  # Set via PAYSTACK_PUBLIC_KEY env var
+    paystack_webhook_secret: str = ""  # Optional: for webhook signature verification
+    paystack_plan_code_pro: str = ""  # Set via PAYSTACK_PLAN_CODE_PRO env var
 
     # Email (Resend)
     resend_api_key: str = ""

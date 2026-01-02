@@ -1,9 +1,11 @@
 """
 Watchman Payments Routes
-Stripe integration for Pro subscriptions
+Paystack integration for Pro subscriptions ($12/month)
 """
 
-import stripe
+import hashlib
+import hmac
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 
@@ -16,190 +18,376 @@ from app.services.email_service import get_email_service
 router = APIRouter()
 settings = get_settings()
 
-# Initialize Stripe
-stripe.api_key = settings.stripe_secret_key
+# Paystack API configuration
+PAYSTACK_BASE_URL = "https://api.paystack.co"
+
+
+async def paystack_request(method: str, endpoint: str, data: dict = None) -> dict:
+    """Make a request to Paystack API"""
+    headers = {
+        "Authorization": f"Bearer {settings.paystack_secret_key}",
+        "Content-Type": "application/json",
+    }
+    
+    async with httpx.AsyncClient() as client:
+        url = f"{PAYSTACK_BASE_URL}{endpoint}"
+        
+        if method == "GET":
+            response = await client.get(url, headers=headers, timeout=30.0)
+        elif method == "POST":
+            response = await client.post(url, headers=headers, json=data, timeout=30.0)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+        
+        result = response.json()
+        
+        if not result.get("status"):
+            logger.error(f"[PAYSTACK] API error: {result.get('message')}")
+            raise HTTPException(status_code=400, detail=result.get("message", "Paystack error"))
+        
+        return result
 
 
 @router.post("/create-checkout-session")
 async def create_checkout_session(user: dict = Depends(get_current_user)):
-    """Create a Stripe checkout session for Pro subscription"""
-    if not settings.stripe_secret_key or not settings.stripe_price_id_pro:
+    """
+    Initialize a Paystack transaction for Pro subscription ($12/month).
+    Returns a checkout URL for the user to complete payment.
+    """
+    if not settings.paystack_secret_key:
         raise HTTPException(status_code=503, detail="Payment service not configured")
 
-    db = Database(use_admin=True)
     user_email = user.get("email")
     user_id = user.get("id")
 
+    if not user_email:
+        raise HTTPException(status_code=400, detail="User email required for payment")
+
     try:
-        # Check if user already has a Stripe customer ID
-        stripe_customer_id = user.get("stripe_customer_id")
+        # Initialize transaction
+        # Amount is in the smallest currency unit (kobo for NGN, cents for USD)
+        # $12 = 1200 cents
+        transaction_data = {
+            "email": user_email,
+            "amount": 1200,  # $12 in cents
+            "currency": "USD",
+            "callback_url": "https://trywatchman.app/dashboard/settings?success=true",
+            "metadata": {
+                "watchman_user_id": user_id,
+                "plan": "pro",
+                "custom_fields": [
+                    {
+                        "display_name": "Plan",
+                        "variable_name": "plan",
+                        "value": "Watchman Pro"
+                    }
+                ]
+            },
+            # If plan code is set, use subscription mode
+            "plan": settings.paystack_plan_code_pro if settings.paystack_plan_code_pro else None,
+            "channels": ["card", "bank", "ussd", "qr", "mobile_money", "bank_transfer", "apple_pay"],
+        }
+        
+        # Remove None values
+        transaction_data = {k: v for k, v in transaction_data.items() if v is not None}
 
-        if not stripe_customer_id:
-            # Create a new Stripe customer
-            customer = stripe.Customer.create(
-                email=user_email,
-                metadata={"watchman_user_id": user_id}
-            )
-            stripe_customer_id = customer.id
-            # Save customer ID to user
-            await db.update_user(user_id, {"stripe_customer_id": stripe_customer_id})
-            logger.info(f"[PAYMENTS] Created Stripe customer {stripe_customer_id} for user {user_id}")
+        result = await paystack_request("POST", "/transaction/initialize", transaction_data)
+        
+        data = result.get("data", {})
+        authorization_url = data.get("authorization_url")
+        access_code = data.get("access_code")
+        reference = data.get("reference")
 
-        # Create checkout session
-        session = stripe.checkout.Session.create(
-            customer=stripe_customer_id,
-            payment_method_types=["card"],
-            line_items=[{
-                "price": settings.stripe_price_id_pro,
-                "quantity": 1,
-            }],
-            mode="subscription",
-            success_url="https://trywatchman.app/dashboard/settings?success=true",
-            cancel_url="https://trywatchman.app/dashboard/settings?canceled=true",
-            metadata={"watchman_user_id": user_id},
-        )
+        logger.info(f"[PAYMENTS] Paystack transaction initialized for user {user_id}, ref: {reference}")
+        
+        return {
+            "checkout_url": authorization_url,
+            "access_code": access_code,
+            "reference": reference,
+        }
 
-        logger.info(f"[PAYMENTS] Created checkout session {session.id} for user {user_id}")
-        return {"checkout_url": session.url, "session_id": session.id}
-
-    except stripe.error.StripeError as e:
-        logger.error(f"[PAYMENTS] Stripe error: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[PAYMENTS] Error initializing Paystack transaction: {e}")
         raise HTTPException(status_code=500, detail="Failed to create checkout session")
 
 
 @router.post("/webhook")
-async def stripe_webhook(request: Request):
-    """Handle Stripe webhook events"""
+async def paystack_webhook(request: Request):
+    """
+    Handle Paystack webhook events.
+    Events include: charge.success, subscription.create, subscription.disable, invoice.update, etc.
+    """
     payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-
-    if not settings.stripe_webhook_secret:
-        logger.error("[PAYMENTS] Webhook secret not configured")
-        raise HTTPException(status_code=500, detail="Webhook not configured")
+    sig_header = request.headers.get("x-paystack-signature")
+    
+    # Verify webhook signature if secret is configured
+    if settings.paystack_webhook_secret:
+        computed_signature = hmac.new(
+            settings.paystack_webhook_secret.encode('utf-8'),
+            payload,
+            hashlib.sha512
+        ).hexdigest()
+        
+        if sig_header != computed_signature:
+            logger.error("[PAYMENTS] Invalid Paystack webhook signature")
+            raise HTTPException(status_code=400, detail="Invalid signature")
 
     try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, settings.stripe_webhook_secret
-        )
-    except ValueError:
+        event = await request.json()
+    except Exception:
         logger.error("[PAYMENTS] Invalid webhook payload")
         raise HTTPException(status_code=400, detail="Invalid payload")
-    except stripe.error.SignatureVerificationError:
-        logger.error("[PAYMENTS] Invalid webhook signature")
-        raise HTTPException(status_code=400, detail="Invalid signature")
 
-    logger.info(f"[PAYMENTS] Webhook event: {event['type']}")
+    event_type = event.get("event")
+    data = event.get("data", {})
+    
+    logger.info(f"[PAYMENTS] Paystack webhook event: {event_type}")
 
     db = Database(use_admin=True)
     email_service = get_email_service()
 
-    # Handle subscription events
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        customer_id = session.get("customer")
-        subscription_id = session.get("subscription")
-        user_id = session.get("metadata", {}).get("watchman_user_id")
-
-        logger.info(f"[PAYMENTS] Checkout completed - customer: {customer_id}, user: {user_id}")
-
+    # Handle different event types
+    if event_type == "charge.success":
+        # Payment was successful
+        customer = data.get("customer", {})
+        customer_email = customer.get("email")
+        customer_code = customer.get("customer_code")
+        amount = data.get("amount", 0) / 100  # Convert from kobo/cents
+        currency = data.get("currency", "USD")
+        reference = data.get("reference")
+        metadata = data.get("metadata", {})
+        user_id = metadata.get("watchman_user_id")
+        
+        logger.info(f"[PAYMENTS] Charge success - email: {customer_email}, amount: {amount} {currency}")
+        
+        # Find user by ID from metadata, or by email
+        user = None
         if user_id:
-            # Update user to Pro
-            await db.update_user(user_id, {
-                "tier": "pro",
-                "stripe_subscription_id": subscription_id,
-            })
-
-            # Get user details for email
             user = await db.get_user_by_id(user_id)
-            if user:
-                user_email = user.get("email")
-                user_name = user.get("name") or user_email.split("@")[0] if user_email else "there"
-
-                # Send Pro upgrade email
-                try:
-                    await email_service.send_pro_upgrade_email(
-                        to=user_email,
-                        user_name=user_name,
-                    )
-                    logger.info(f"[PAYMENTS] Pro upgrade email sent to {user_email}")
-                except Exception as e:
-                    logger.warning(f"[PAYMENTS] Failed to send Pro upgrade email: {e}")
-
-            logger.info(f"[PAYMENTS] User {user_id} upgraded to Pro")
-
-    elif event["type"] == "customer.subscription.updated":
-        subscription = event["data"]["object"]
-        customer_id = subscription.get("customer")
-        status = subscription.get("status")
-
-        logger.info(f"[PAYMENTS] Subscription updated - customer: {customer_id}, status: {status}")
-
-        # Find user by stripe customer ID and update subscription status
-        user = await db.get_user_by_stripe_customer(customer_id)
+        
+        if not user and customer_email:
+            user = await db.get_user_by_email(customer_email)
+        
         if user:
-            if status == "active":
-                await db.update_user(user["id"], {"tier": "pro"})
-            elif status in ["canceled", "unpaid", "past_due"]:
-                await db.update_user(user["id"], {"tier": "free"})
-            logger.info(f"[PAYMENTS] Updated user {user['id']} tier based on status: {status}")
+            # Update user to Pro and store Paystack customer code
+            await db.update_user(user["id"], {
+                "tier": "pro",
+                "paystack_customer_code": customer_code,
+                "paystack_subscription_code": data.get("subscription_code"),
+            })
+            
+            # Create payment record
+            await db.create_payment_record({
+                "user_id": user["id"],
+                "paystack_reference": reference,
+                "amount": amount,
+                "currency": currency.lower(),
+                "status": "paid",
+                "description": "Watchman Pro Subscription - $12/month",
+            })
+            
+            # Send Pro upgrade email
+            user_name = user.get("name") or customer_email.split("@")[0] if customer_email else "there"
+            try:
+                await email_service.send_pro_upgrade_email(
+                    to=customer_email,
+                    user_name=user_name,
+                )
+                logger.info(f"[PAYMENTS] Pro upgrade email sent to {customer_email}")
+            except Exception as e:
+                logger.warning(f"[PAYMENTS] Failed to send Pro upgrade email: {e}")
+            
+            logger.info(f"[PAYMENTS] User {user['id']} upgraded to Pro")
+        else:
+            logger.warning(f"[PAYMENTS] Could not find user for charge: {customer_email}")
 
-    elif event["type"] == "customer.subscription.deleted":
-        subscription = event["data"]["object"]
-        customer_id = subscription.get("customer")
+    elif event_type == "subscription.create":
+        # New subscription created
+        customer = data.get("customer", {})
+        customer_email = customer.get("email")
+        customer_code = customer.get("customer_code")
+        subscription_code = data.get("subscription_code")
+        plan = data.get("plan", {})
+        
+        logger.info(f"[PAYMENTS] Subscription created - email: {customer_email}, plan: {plan.get('name')}")
+        
+        user = await db.get_user_by_paystack_customer(customer_code)
+        if not user and customer_email:
+            user = await db.get_user_by_email(customer_email)
+        
+        if user:
+            await db.update_user(user["id"], {
+                "tier": "pro",
+                "paystack_customer_code": customer_code,
+                "paystack_subscription_code": subscription_code,
+            })
+            logger.info(f"[PAYMENTS] User {user['id']} subscription activated")
 
-        logger.info(f"[PAYMENTS] Subscription deleted - customer: {customer_id}")
-
-        # Find user and downgrade to free
-        user = await db.get_user_by_stripe_customer(customer_id)
+    elif event_type in ["subscription.disable", "subscription.not_renew"]:
+        # Subscription cancelled or not renewed
+        customer = data.get("customer", {})
+        customer_code = customer.get("customer_code")
+        customer_email = customer.get("email")
+        
+        logger.info(f"[PAYMENTS] Subscription disabled/not renewed - customer: {customer_code}")
+        
+        user = await db.get_user_by_paystack_customer(customer_code)
+        if not user and customer_email:
+            user = await db.get_user_by_email(customer_email)
+        
         if user:
             await db.update_user(user["id"], {
                 "tier": "free",
-                "stripe_subscription_id": None,
+                "paystack_subscription_code": None,
             })
             logger.info(f"[PAYMENTS] User {user['id']} downgraded to free")
 
-    elif event["type"] == "invoice.paid":
-        invoice = event["data"]["object"]
-        customer_id = invoice.get("customer")
-        amount = invoice.get("amount_paid", 0) / 100  # Convert from cents
-
-        logger.info(f"[PAYMENTS] Invoice paid - customer: {customer_id}, amount: ${amount}")
-
-        # Store payment record
-        user = await db.get_user_by_stripe_customer(customer_id)
+    elif event_type == "invoice.payment_failed":
+        # Payment failed for subscription renewal
+        customer = data.get("customer", {})
+        customer_code = customer.get("customer_code")
+        customer_email = customer.get("email")
+        
+        logger.warning(f"[PAYMENTS] Invoice payment failed - customer: {customer_code}")
+        
+        user = await db.get_user_by_paystack_customer(customer_code)
         if user:
+            # Could send a payment failed email here
+            logger.warning(f"[PAYMENTS] Payment failed for user {user['id']}")
+
+    elif event_type == "invoice.update" and data.get("paid"):
+        # Recurring payment successful
+        customer = data.get("customer", {})
+        customer_code = customer.get("customer_code")
+        customer_email = customer.get("email")
+        amount = data.get("amount", 0) / 100
+        
+        logger.info(f"[PAYMENTS] Invoice paid - customer: {customer_code}, amount: ${amount}")
+        
+        user = await db.get_user_by_paystack_customer(customer_code)
+        if user:
+            # Create payment record for recurring payment
             await db.create_payment_record({
                 "user_id": user["id"],
-                "stripe_invoice_id": invoice.get("id"),
+                "paystack_reference": data.get("reference"),
                 "amount": amount,
-                "currency": invoice.get("currency", "usd"),
+                "currency": data.get("currency", "usd").lower(),
                 "status": "paid",
-                "description": "Watchman Pro Subscription",
+                "description": "Watchman Pro Subscription Renewal - $12/month",
             })
-            logger.info(f"[PAYMENTS] Payment record created for user {user['id']}")
+            logger.info(f"[PAYMENTS] Recurring payment recorded for user {user['id']}")
 
     return {"status": "success"}
 
 
-@router.get("/billing-portal")
-async def get_billing_portal(user: dict = Depends(get_current_user)):
-    """Get Stripe billing portal URL for managing subscription"""
-    if not settings.stripe_secret_key:
+@router.get("/verify/{reference}")
+async def verify_transaction(reference: str, user: dict = Depends(get_current_user)):
+    """Verify a Paystack transaction by reference"""
+    if not settings.paystack_secret_key:
         raise HTTPException(status_code=503, detail="Payment service not configured")
-
-    stripe_customer_id = user.get("stripe_customer_id")
-    if not stripe_customer_id:
-        raise HTTPException(status_code=400, detail="No billing account found")
-
+    
     try:
-        session = stripe.billing_portal.Session.create(
-            customer=stripe_customer_id,
-            return_url="https://trywatchman.app/dashboard/settings",
-        )
-        return {"url": session.url}
-    except stripe.error.StripeError as e:
-        logger.error(f"[PAYMENTS] Billing portal error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to access billing portal")
+        result = await paystack_request("GET", f"/transaction/verify/{reference}")
+        data = result.get("data", {})
+        
+        return {
+            "status": data.get("status"),
+            "amount": data.get("amount", 0) / 100,
+            "currency": data.get("currency"),
+            "paid_at": data.get("paid_at"),
+            "channel": data.get("channel"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[PAYMENTS] Error verifying transaction: {e}")
+        raise HTTPException(status_code=500, detail="Failed to verify transaction")
+
+
+@router.get("/subscription-status")
+async def get_subscription_status(user: dict = Depends(get_current_user)):
+    """Get the current user's subscription status"""
+    subscription_code = user.get("paystack_subscription_code")
+    
+    if not subscription_code:
+        return {
+            "active": False,
+            "tier": user.get("tier", "free"),
+            "message": "No active subscription"
+        }
+    
+    if not settings.paystack_secret_key:
+        return {
+            "active": user.get("tier") == "pro",
+            "tier": user.get("tier", "free"),
+            "message": "Payment service not configured"
+        }
+    
+    try:
+        result = await paystack_request("GET", f"/subscription/{subscription_code}")
+        data = result.get("data", {})
+        
+        return {
+            "active": data.get("status") == "active",
+            "tier": user.get("tier", "free"),
+            "next_payment_date": data.get("next_payment_date"),
+            "plan": data.get("plan", {}).get("name"),
+            "amount": data.get("amount", 0) / 100,
+            "email_token": data.get("email_token"),  # For managing subscription
+        }
+    except Exception as e:
+        logger.error(f"[PAYMENTS] Error getting subscription status: {e}")
+        return {
+            "active": user.get("tier") == "pro",
+            "tier": user.get("tier", "free"),
+            "message": "Could not fetch subscription details"
+        }
+
+
+@router.post("/cancel-subscription")
+async def cancel_subscription(user: dict = Depends(get_current_user)):
+    """Cancel the user's subscription"""
+    subscription_code = user.get("paystack_subscription_code")
+    
+    if not subscription_code:
+        raise HTTPException(status_code=400, detail="No active subscription to cancel")
+    
+    if not settings.paystack_secret_key:
+        raise HTTPException(status_code=503, detail="Payment service not configured")
+    
+    try:
+        # Get subscription to get email_token
+        result = await paystack_request("GET", f"/subscription/{subscription_code}")
+        data = result.get("data", {})
+        email_token = data.get("email_token")
+        
+        if not email_token:
+            raise HTTPException(status_code=400, detail="Could not retrieve subscription details")
+        
+        # Disable subscription
+        await paystack_request("POST", "/subscription/disable", {
+            "code": subscription_code,
+            "token": email_token,
+        })
+        
+        # Update user
+        db = Database(use_admin=True)
+        await db.update_user(user["id"], {
+            "tier": "free",
+            "paystack_subscription_code": None,
+        })
+        
+        logger.info(f"[PAYMENTS] Subscription cancelled for user {user['id']}")
+        
+        return {"status": "cancelled", "message": "Subscription has been cancelled"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[PAYMENTS] Error cancelling subscription: {e}")
+        raise HTTPException(status_code=500, detail="Failed to cancel subscription")
 
 
 @router.get("/payment-history")
@@ -208,3 +396,29 @@ async def get_payment_history(user: dict = Depends(get_current_user)):
     db = Database(use_admin=True)
     payments = await db.get_payment_history(user["id"])
     return {"payments": payments}
+
+
+@router.get("/manage-subscription")
+async def get_manage_subscription_link(user: dict = Depends(get_current_user)):
+    """
+    Get a link for the user to manage their subscription.
+    Paystack sends users to their hosted portal via email.
+    """
+    subscription_code = user.get("paystack_subscription_code")
+    customer_code = user.get("paystack_customer_code")
+    
+    if not subscription_code or not customer_code:
+        return {
+            "has_subscription": False,
+            "message": "No active subscription. Subscribe to Pro to manage billing."
+        }
+    
+    # Paystack doesn't have a direct billing portal like Stripe
+    # Users manage subscriptions through emails from Paystack
+    # We can provide the dashboard settings page as the management location
+    return {
+        "has_subscription": True,
+        "tier": user.get("tier"),
+        "message": "Subscription management is available through your email. Check for emails from Paystack to update payment methods or cancel.",
+        "cancel_url": "/api/payments/cancel-subscription",
+    }

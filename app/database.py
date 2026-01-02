@@ -113,13 +113,33 @@ class Database:
         return await self.update_user(user_id, {"onboarding_completed": True})
 
     async def get_user_by_stripe_customer(self, stripe_customer_id: str) -> Optional[dict]:
-        """Get user by Stripe customer ID"""
+        """Get user by Stripe customer ID (legacy)"""
         logger.debug(f"[DB] get_user_by_stripe_customer: {stripe_customer_id}")
         try:
             result = self.client.table("users").select("*").eq("stripe_customer_id", stripe_customer_id).single().execute()
             return result.data if result.data else None
         except Exception as e:
             logger.error(f"[DB] Error getting user by stripe_customer_id {stripe_customer_id}: {e}")
+            return None
+
+    async def get_user_by_paystack_customer(self, paystack_customer_code: str) -> Optional[dict]:
+        """Get user by Paystack customer code"""
+        logger.debug(f"[DB] get_user_by_paystack_customer: {paystack_customer_code}")
+        try:
+            result = self.client.table("users").select("*").eq("paystack_customer_code", paystack_customer_code).single().execute()
+            return result.data if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error getting user by paystack_customer_code {paystack_customer_code}: {e}")
+            return None
+
+    async def get_user_by_email(self, email: str) -> Optional[dict]:
+        """Get user by email"""
+        logger.debug(f"[DB] get_user_by_email: {email}")
+        try:
+            result = self.client.table("users").select("*").eq("email", email).single().execute()
+            return result.data if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error getting user by email {email}: {e}")
             return None
 
     async def create_payment_record(self, data: dict) -> Optional[dict]:
