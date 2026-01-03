@@ -3,6 +3,7 @@ Watchman Authentication Middleware
 Validates Supabase JWT tokens and extracts user information
 """
 
+import httpx
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 from fastapi import Request, HTTPException, Depends
@@ -18,8 +19,50 @@ from app.services.email_service import get_email_service
 # Trial period configuration
 TRIAL_DURATION_DAYS = 3
 
+# Cache for IP geolocation to avoid repeated API calls
+_ip_geo_cache = {}
+
 
 security = HTTPBearer(auto_error=False)
+
+
+async def get_ip_geolocation(ip: str) -> dict:
+    """
+    Get geolocation data for an IP address using ip-api.com (free, no key needed).
+    Caches results to avoid repeated API calls.
+    """
+    # Skip local/private IPs
+    if not ip or ip.startswith(('127.', '192.168.', '10.', '172.')) or ip == '::1':
+        return {}
+    
+    # Check cache
+    if ip in _ip_geo_cache:
+        return _ip_geo_cache[ip]
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,regionName,city,timezone",
+                timeout=3.0
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success":
+                    geo_data = {
+                        "country": data.get("country"),
+                        "country_code": data.get("countryCode"),
+                        "region": data.get("regionName"),
+                        "city": data.get("city"),
+                        "timezone": data.get("timezone"),
+                    }
+                    _ip_geo_cache[ip] = geo_data
+                    logger.debug(f"[GEO] Got location for {ip}: {geo_data.get('country')}")
+                    return geo_data
+    except Exception as e:
+        logger.debug(f"[GEO] Failed to get location for {ip}: {e}")
+    
+    return {}
 
 
 class AuthMiddleware:
@@ -98,6 +141,9 @@ async def get_current_user(
     logger.debug(f"[AUTH] Fetching user from database - auth_id: {auth_id}")
     db = Database(use_admin=True)
     user = await db.get_user_by_auth_id(auth_id)
+    
+    # Get client IP for geolocation
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.client.host if request.client else None
 
     if not user:
         # Auto-create user from Supabase Auth data
@@ -109,8 +155,11 @@ async def get_current_user(
         name = user_metadata.get("full_name") or user_metadata.get("name") or email.split("@")[0]
 
         logger.info(f"[AUTH] Creating new user - email: {email}, name: {name}")
+        
+        # Get geolocation for new user
+        geo_data = await get_ip_geolocation(client_ip) if client_ip else {}
 
-        # Create user in database
+        # Create user in database with location
         user = await db.create_user({
             "auth_id": auth_id,
             "email": email,
@@ -118,7 +167,14 @@ async def get_current_user(
             "tier": "free",
             "role": "user",
             "onboarding_completed": False,
-            "settings": {"max_concurrent_commitments": 2}
+            "settings": {"max_concurrent_commitments": 2},
+            "country": geo_data.get("country"),
+            "country_code": geo_data.get("country_code"),
+            "region": geo_data.get("region"),
+            "city": geo_data.get("city"),
+            "timezone": geo_data.get("timezone"),
+            "last_ip": client_ip,
+            "last_active": datetime.utcnow().isoformat(),
         })
 
         if not user:
@@ -128,7 +184,7 @@ async def get_current_user(
                 detail="Failed to create user account"
             )
 
-        logger.info(f"[AUTH] User created successfully: {user.get('id')} ({email})")
+        logger.info(f"[AUTH] User created successfully: {user.get('id')} ({email}) from {geo_data.get('country', 'Unknown')}")
 
         # Send welcome email to new user
         try:
@@ -143,6 +199,29 @@ async def get_current_user(
             logger.warning(f"[AUTH] Failed to send welcome email to {email}: {e}")
     else:
         logger.info(f"[AUTH] User found: {user.get('id')} ({user.get('email')}) - tier: {user.get('tier', 'free')}")
+        
+        # Update last_active and location if missing
+        update_data = {"last_active": datetime.utcnow().isoformat()}
+        
+        # Update location if not set
+        if not user.get("country") and client_ip:
+            geo_data = await get_ip_geolocation(client_ip)
+            if geo_data:
+                update_data.update({
+                    "country": geo_data.get("country"),
+                    "country_code": geo_data.get("country_code"),
+                    "region": geo_data.get("region"),
+                    "city": geo_data.get("city"),
+                    "timezone": geo_data.get("timezone"),
+                    "last_ip": client_ip,
+                })
+                logger.info(f"[AUTH] Updated user location: {geo_data.get('country')}")
+        
+        # Update in background (don't await to keep auth fast)
+        try:
+            await db.update_user(user["id"], update_data)
+        except Exception as e:
+            logger.warning(f"[AUTH] Failed to update last_active: {e}")
 
     return user
 

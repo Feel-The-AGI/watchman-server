@@ -15,7 +15,7 @@ import time
 
 from app.config import get_settings
 from app.routes import auth, cycles, commitments, calendar, stats, settings as settings_routes
-from app.routes import chat, commands, master_settings, daily_logs, incidents, sharing, payments, cron
+from app.routes import chat, commands, master_settings, daily_logs, incidents, sharing, payments, cron, admin
 from app.database import init_supabase
 
 
@@ -159,6 +159,7 @@ def create_app() -> FastAPI:
     app.include_router(sharing.router, prefix="/api/sharing", tags=["Sharing"])
     app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
     app.include_router(cron.router, prefix="/api/cron", tags=["Cron Jobs"])
+    app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
     logger.info("[ROUTES] All routes registered")
 
     @app.get("/", tags=["Health"])
