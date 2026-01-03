@@ -115,10 +115,12 @@ async def get_admin_overview(user: dict = Depends(require_admin)):
         )
         
         # Average revenue per paying user (ARPPU)
-        arppu = round(total_revenue_usd / pro_users, 2) if pro_users > 0 else 0
+        paying_count = pro_users + admin_users
+        arppu = round(total_revenue_usd / paying_count, 2) if paying_count > 0 else 0
         
-        # MRR (Monthly Recurring Revenue)
-        mrr = pro_users * 12  # $12/month per pro user
+        # MRR (Monthly Recurring Revenue) - count pro AND admin (paid admins)
+        paying_users = pro_users + admin_users  # Both pro and admin are paying
+        mrr = paying_users * 12  # $12/month per paying user
         
         # ARR (Annual Recurring Revenue)
         arr = mrr * 12
@@ -190,6 +192,7 @@ async def get_admin_overview(user: dict = Depends(require_admin)):
                 "free": free_users,
                 "pro": pro_users,
                 "admin": admin_users,
+                "paying": pro_users + admin_users,  # Pro + Admin = Paying
                 "onboarded": onboarded_users,
                 "not_onboarded": not_onboarded,
                 "onboarding_rate": onboarding_rate,
