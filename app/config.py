@@ -29,7 +29,10 @@ class Settings(BaseSettings):
     paystack_secret_key: str = ""  # Set via PAYSTACK_SECRET_KEY env var
     paystack_public_key: str = ""  # Set via PAYSTACK_PUBLIC_KEY env var
     paystack_webhook_secret: str = ""  # Optional: for webhook signature verification
-    paystack_plan_code_pro: str = ""  # Set via PAYSTACK_PLAN_CODE_PRO env var
+    
+    # Exchange Rate API (for USD to GHS conversion)
+    exchange_rate_api_key: str = ""  # Set via EXCHANGE_RATE_API_KEY env var
+    pro_price_usd: float = 12.0  # Pro subscription price in USD
 
     # Email (Resend)
     resend_api_key: str = ""

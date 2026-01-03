@@ -1,10 +1,12 @@
 """
 Watchman Payments Routes
-Paystack integration for Pro subscriptions ($12/month)
+Paystack integration for Pro subscriptions ($12/month, charged in GHS)
+Uses dynamic USD→GHS conversion via exchange rate API
 """
 
 import hashlib
 import hmac
+import time
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
@@ -20,6 +22,54 @@ settings = get_settings()
 
 # Paystack API configuration
 PAYSTACK_BASE_URL = "https://api.paystack.co"
+
+# Cache exchange rate for 1 hour to avoid too many API calls
+_exchange_rate_cache = {"rate": None, "timestamp": 0}
+EXCHANGE_RATE_CACHE_SECONDS = 3600  # 1 hour
+
+
+async def get_usd_to_ghs_rate() -> float:
+    """
+    Fetch current USD to GHS exchange rate.
+    Uses exchangerate-api.com service.
+    Caches result for 1 hour.
+    """
+    current_time = time.time()
+    
+    # Check cache
+    if (_exchange_rate_cache["rate"] is not None and 
+        current_time - _exchange_rate_cache["timestamp"] < EXCHANGE_RATE_CACHE_SECONDS):
+        logger.debug(f"[EXCHANGE] Using cached rate: {_exchange_rate_cache['rate']}")
+        return _exchange_rate_cache["rate"]
+    
+    # Fetch fresh rate
+    try:
+        async with httpx.AsyncClient() as client:
+            api_key = settings.exchange_rate_api_key
+            if not api_key:
+                # Fallback to a reasonable default if no API key
+                logger.warning("[EXCHANGE] No API key, using fallback rate of 14.5")
+                return 14.5
+            
+            # ExchangeRate-API format
+            url = f"https://v6.exchangerate-api.com/v6/{api_key}/pair/USD/GHS"
+            response = await client.get(url, timeout=10.0)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("result") == "success":
+                    rate = data.get("conversion_rate", 14.5)
+                    _exchange_rate_cache["rate"] = rate
+                    _exchange_rate_cache["timestamp"] = current_time
+                    logger.info(f"[EXCHANGE] Fetched fresh USD→GHS rate: {rate}")
+                    return rate
+            
+            logger.warning(f"[EXCHANGE] API error, using fallback rate")
+            return 14.5
+            
+    except Exception as e:
+        logger.error(f"[EXCHANGE] Error fetching rate: {e}, using fallback")
+        return 14.5
 
 
 async def paystack_request(method: str, endpoint: str, data: dict = None) -> dict:
@@ -52,6 +102,7 @@ async def paystack_request(method: str, endpoint: str, data: dict = None) -> dic
 async def create_checkout_session(user: dict = Depends(get_current_user)):
     """
     Initialize a Paystack transaction for Pro subscription ($12/month).
+    Converts USD to GHS dynamically using current exchange rate.
     Returns a checkout URL for the user to complete payment.
     """
     if not settings.paystack_secret_key:
@@ -64,32 +115,46 @@ async def create_checkout_session(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="User email required for payment")
 
     try:
-        # Initialize transaction
-        # Amount is in the smallest currency unit (kobo for NGN, cents for USD)
-        # $12 = 1200 cents
+        # Get current exchange rate
+        exchange_rate = await get_usd_to_ghs_rate()
+        
+        # Convert $12 USD to GHS
+        usd_price = settings.pro_price_usd  # $12
+        ghs_amount = usd_price * exchange_rate
+        
+        # Round to 2 decimal places for display, convert to pesewas for Paystack
+        ghs_amount_rounded = round(ghs_amount, 2)
+        amount_in_pesewas = int(ghs_amount_rounded * 100)  # Paystack uses smallest unit
+        
+        logger.info(f"[PAYMENTS] Converting ${usd_price} USD → GHS {ghs_amount_rounded} (rate: {exchange_rate})")
+        
+        # Initialize transaction in GHS
         transaction_data = {
             "email": user_email,
-            "amount": 1200,  # $12 in cents
-            "currency": "USD",
+            "amount": amount_in_pesewas,  # Amount in pesewas
+            "currency": "GHS",
             "callback_url": "https://trywatchman.app/dashboard/settings?success=true",
             "metadata": {
                 "watchman_user_id": user_id,
                 "plan": "pro",
+                "usd_price": usd_price,
+                "exchange_rate": exchange_rate,
+                "ghs_amount": ghs_amount_rounded,
                 "custom_fields": [
                     {
                         "display_name": "Plan",
                         "variable_name": "plan",
                         "value": "Watchman Pro"
+                    },
+                    {
+                        "display_name": "USD Equivalent",
+                        "variable_name": "usd_equivalent",
+                        "value": f"${usd_price}"
                     }
                 ]
             },
-            # If plan code is set, use subscription mode
-            "plan": settings.paystack_plan_code_pro if settings.paystack_plan_code_pro else None,
-            "channels": ["card", "bank", "ussd", "qr", "mobile_money", "bank_transfer", "apple_pay"],
+            "channels": ["card", "apple_pay"],  # Card and Apple Pay only
         }
-        
-        # Remove None values
-        transaction_data = {k: v for k, v in transaction_data.items() if v is not None}
 
         result = await paystack_request("POST", "/transaction/initialize", transaction_data)
         
@@ -98,12 +163,15 @@ async def create_checkout_session(user: dict = Depends(get_current_user)):
         access_code = data.get("access_code")
         reference = data.get("reference")
 
-        logger.info(f"[PAYMENTS] Paystack transaction initialized for user {user_id}, ref: {reference}")
+        logger.info(f"[PAYMENTS] Paystack transaction initialized for user {user_id}, ref: {reference}, GHS {ghs_amount_rounded}")
         
         return {
             "checkout_url": authorization_url,
             "access_code": access_code,
             "reference": reference,
+            "amount_ghs": ghs_amount_rounded,
+            "amount_usd": usd_price,
+            "exchange_rate": exchange_rate,
         }
 
     except HTTPException:
@@ -111,6 +179,40 @@ async def create_checkout_session(user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"[PAYMENTS] Error initializing Paystack transaction: {e}")
         raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+
+@router.get("/pricing")
+async def get_pricing():
+    """
+    Get current pricing information including exchange rate.
+    This endpoint is public (no auth required) so pricing page can use it.
+    """
+    try:
+        exchange_rate = await get_usd_to_ghs_rate()
+        usd_price = settings.pro_price_usd
+        ghs_amount = round(usd_price * exchange_rate, 2)
+        
+        return {
+            "usd_price": usd_price,
+            "ghs_amount": ghs_amount,
+            "exchange_rate": exchange_rate,
+            "currency": "GHS",
+            "display_price": f"${int(usd_price)}",
+            "display_ghs": f"GHS {ghs_amount:.2f}",
+            "note": f"Approximately ${int(usd_price)} USD at current exchange rate",
+        }
+    except Exception as e:
+        logger.error(f"[PAYMENTS] Error getting pricing: {e}")
+        # Return fallback pricing
+        return {
+            "usd_price": 12.0,
+            "ghs_amount": 174.0,  # Fallback estimate
+            "exchange_rate": 14.5,
+            "currency": "GHS",
+            "display_price": "$12",
+            "display_ghs": "GHS 174.00",
+            "note": "Approximately $12 USD",
+        }
 
 
 @router.post("/webhook")
@@ -154,13 +256,15 @@ async def paystack_webhook(request: Request):
         customer = data.get("customer", {})
         customer_email = customer.get("email")
         customer_code = customer.get("customer_code")
-        amount = data.get("amount", 0) / 100  # Convert from kobo/cents
-        currency = data.get("currency", "USD")
+        amount = data.get("amount", 0) / 100  # Convert from pesewas to GHS
+        currency = data.get("currency", "GHS")
         reference = data.get("reference")
         metadata = data.get("metadata", {})
         user_id = metadata.get("watchman_user_id")
+        usd_price = metadata.get("usd_price", 12.0)  # Original USD price
+        exchange_rate = metadata.get("exchange_rate", 0)
         
-        logger.info(f"[PAYMENTS] Charge success - email: {customer_email}, amount: {amount} {currency}")
+        logger.info(f"[PAYMENTS] Charge success - email: {customer_email}, amount: {amount} {currency} (${usd_price} USD)")
         
         # Find user by ID from metadata, or by email
         user = None
@@ -178,14 +282,17 @@ async def paystack_webhook(request: Request):
                 "paystack_subscription_code": data.get("subscription_code"),
             })
             
-            # Create payment record
+            # Create payment record with both GHS and USD amounts
             await db.create_payment_record({
                 "user_id": user["id"],
                 "paystack_reference": reference,
-                "amount": amount,
-                "currency": currency.lower(),
+                "amount": usd_price,  # Store USD amount for display
+                "amount_local": amount,  # GHS amount actually charged
+                "currency": "usd",  # Display currency
+                "currency_local": currency.lower(),  # Actual charge currency
+                "exchange_rate": exchange_rate,
                 "status": "paid",
-                "description": "Watchman Pro Subscription - $12/month",
+                "description": f"Watchman Pro - ${int(usd_price)}/month (GHS {amount:.2f})",
             })
             
             # Send Pro upgrade email
