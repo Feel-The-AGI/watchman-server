@@ -392,9 +392,53 @@ class EmailService:
             html=html,
         )
 
+    async def send_admin_new_subscriber_notification(
+        self,
+        admin_email: str,
+        subscriber_email: str,
+        subscriber_name: str,
+        amount_usd: float,
+    ) -> bool:
+        """Send notification to admin when someone subscribes"""
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+        </head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #0a0a0f; color: #e5e5e5; padding: 20px; margin: 0;">
+            <div style="max-width: 600px; margin: 0 auto; background-color: #1a1a2e; border-radius: 16px; padding: 32px;">
+                <div style="text-align: center; margin-bottom: 24px;">
+                    <div style="font-size: 28px; font-weight: bold; color: #10b981;">New Pro Subscriber!</div>
+                </div>
+                <div style="line-height: 1.8; color: #e5e5e5;">
+                    <p style="color: #e5e5e5;">Someone just upgraded to Watchman Pro!</p>
+                    
+                    <div style="background-color: #0a0a0f; border-radius: 12px; padding: 20px; margin: 24px 0;">
+                        <p style="margin: 8px 0; color: #e5e5e5;"><strong style="color: #ffffff;">Name:</strong> {subscriber_name}</p>
+                        <p style="margin: 8px 0; color: #e5e5e5;"><strong style="color: #ffffff;">Email:</strong> {subscriber_email}</p>
+                        <p style="margin: 8px 0; color: #e5e5e5;"><strong style="color: #ffffff;">Amount:</strong> ${int(amount_usd)}/month</p>
+                    </div>
+                    
+                    <p style="color: #10b981; font-size: 24px; text-align: center;">💰</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+
+        return await self.send_email(
+            to=admin_email,
+            subject=f"💰 New Pro Subscriber: {subscriber_name}",
+            html=html,
+        )
+
 
 # Singleton instance
 _email_service: Optional[EmailService] = None
+
+# Admin email for notifications
+ADMIN_EMAIL = "notifications@trywatchman.app"  # Add admin email address
 
 
 def get_email_service() -> EmailService:

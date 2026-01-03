@@ -14,7 +14,7 @@ from loguru import logger
 from app.config import get_settings
 from app.database import Database
 from app.middleware.auth import get_current_user
-from app.services.email_service import get_email_service
+from app.services.email_service import get_email_service, ADMIN_EMAIL
 
 
 router = APIRouter()
@@ -292,7 +292,7 @@ async def paystack_webhook(request: Request):
                 "currency_local": currency.lower(),  # Actual charge currency
                 "exchange_rate": exchange_rate,
                 "status": "paid",
-                "description": f"Watchman Pro - ${int(usd_price)}/month (GHS {amount:.2f})",
+                "description": f"Watchman Pro - ${int(usd_price)}/month",
             })
             
             # Send Pro upgrade email
@@ -305,6 +305,18 @@ async def paystack_webhook(request: Request):
                 logger.info(f"[PAYMENTS] Pro upgrade email sent to {customer_email}")
             except Exception as e:
                 logger.warning(f"[PAYMENTS] Failed to send Pro upgrade email: {e}")
+            
+            # Send admin notification
+            try:
+                await email_service.send_admin_new_subscriber_notification(
+                    admin_email=ADMIN_EMAIL,
+                    subscriber_email=customer_email,
+                    subscriber_name=user_name,
+                    amount_usd=usd_price,
+                )
+                logger.info(f"[PAYMENTS] Admin notification sent for new subscriber {customer_email}")
+            except Exception as e:
+                logger.warning(f"[PAYMENTS] Failed to send admin notification: {e}")
             
             logger.info(f"[PAYMENTS] User {user['id']} upgraded to Pro")
         else:
