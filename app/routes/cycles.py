@@ -127,7 +127,7 @@ async def create_cycle(
     existing_cycles = await db.get_cycles(user["id"])
     for existing in existing_cycles:
         if existing.get("is_active"):
-            await db.update_cycle(existing["id"], {"is_active": False})
+            await db.update_cycle(existing["id"], {"is_active": False}, user_id=user["id"])
     
     # Create the new cycle
     cycle = await db.create_cycle(cycle_data)
@@ -197,6 +197,11 @@ async def update_cycle(
     """Update an existing cycle and regenerate calendar if needed"""
     db = Database(use_admin=True)
     engine = create_calendar_engine(user["id"])
+
+    # Confirm ownership before any side effects, including deactivating other cycles.
+    owned_cycles = await db.get_cycles(user["id"])
+    if not any(c.get("id") == cycle_id for c in owned_cycles):
+        raise HTTPException(status_code=404, detail="Cycle not found")
     
     # Track if we need to regenerate calendar
     needs_regeneration = False
@@ -228,7 +233,7 @@ async def update_cycle(
             existing_cycles = await db.get_cycles(user["id"])
             for existing in existing_cycles:
                 if existing.get("id") != cycle_id and existing.get("is_active"):
-                    await db.update_cycle(existing["id"], {"is_active": False})
+                    await db.update_cycle(existing["id"], {"is_active": False}, user_id=user["id"])
             needs_regeneration = True
     
     if data.crew is not None:
@@ -240,7 +245,9 @@ async def update_cycle(
     if not update_data:
         return {"message": "No changes provided"}
     
-    cycle = await db.update_cycle(cycle_id, update_data)
+    cycle = await db.update_cycle(cycle_id, update_data, user_id=user["id"])
+    if not cycle:
+        raise HTTPException(status_code=404, detail="Cycle not found")
     
     # SYNC TO MASTER SETTINGS
     if cycle:
@@ -310,7 +317,9 @@ async def delete_cycle(
 ):
     """Delete a cycle"""
     db = Database(use_admin=True)
-    await db.delete_cycle(cycle_id)
+    deleted = await db.delete_cycle(cycle_id, user_id=user["id"])
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Cycle not found")
     
     return {
         "success": True,

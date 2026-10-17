@@ -189,6 +189,9 @@ async def update_constraint(
 ):
     """Update a constraint"""
     db = Database(use_admin=True)
+    own_constraints = await db.get_constraints(user["id"])
+    if not any(c.get("id") == constraint_id for c in own_constraints):
+        raise HTTPException(status_code=404, detail="Constraint not found")
     
     update_data = {
         "name": data.name,
@@ -198,7 +201,9 @@ async def update_constraint(
         "is_active": data.is_active
     }
     
-    constraint = await db.update_constraint(constraint_id, update_data)
+    constraint = await db.update_constraint(constraint_id, update_data, user_id=user["id"])
+    if not constraint:
+        raise HTTPException(status_code=404, detail="Constraint not found")
     
     return {
         "success": True,
@@ -218,6 +223,8 @@ async def delete_constraint(
     # Check if it's a system constraint
     constraints = await db.get_constraints(user["id"])
     constraint = next((c for c in constraints if c["id"] == constraint_id), None)
+    if constraint is None:
+        raise HTTPException(status_code=404, detail="Constraint not found")
     
     if constraint and constraint.get("is_system"):
         raise HTTPException(
@@ -225,7 +232,9 @@ async def delete_constraint(
             detail="Cannot delete system constraints. You can deactivate them instead."
         )
     
-    await db.delete_constraint(constraint_id)
+    deleted = await db.delete_constraint(constraint_id, user_id=user["id"])
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Constraint not found")
     
     return {
         "success": True,

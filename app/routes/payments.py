@@ -224,17 +224,20 @@ async def paystack_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("x-paystack-signature")
     
-    # Verify webhook signature if secret is configured
-    if settings.paystack_webhook_secret:
-        computed_signature = hmac.new(
-            settings.paystack_webhook_secret.encode('utf-8'),
-            payload,
-            hashlib.sha512
-        ).hexdigest()
-        
-        if sig_header != computed_signature:
-            logger.error("[PAYMENTS] Invalid Paystack webhook signature")
-            raise HTTPException(status_code=400, detail="Invalid signature")
+    # Paystack signs the raw payload with the API secret key (not a separate
+    # webhook secret). Fail closed if the secret or signature is unavailable.
+    # See https://paystack.com/docs/payments/webhooks/
+    if not settings.paystack_secret_key:
+        logger.error("[PAYMENTS] Cannot validate webhook without Paystack secret key")
+        raise HTTPException(status_code=503, detail="Payment service not configured")
+    computed_signature = hmac.new(
+        settings.paystack_secret_key.encode("utf-8"), payload, hashlib.sha512
+    ).hexdigest()
+    if not sig_header or not hmac.compare_digest(
+        sig_header.encode("utf-8"), computed_signature.encode("ascii")
+    ):
+        logger.warning("[PAYMENTS] Invalid Paystack webhook signature")
+        raise HTTPException(status_code=401, detail="Invalid signature")
 
     try:
         event = await request.json()

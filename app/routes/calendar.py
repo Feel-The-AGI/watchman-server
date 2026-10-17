@@ -483,7 +483,12 @@ async def delete_leave_block(
 ):
     """Delete a leave block"""
     db = Database(use_admin=True)
-    await db.delete_leave_block(leave_id)
+    leaves = await db.get_leave_blocks(user["id"])
+    if not any(item.get("id") == leave_id for item in leaves):
+        raise HTTPException(status_code=404, detail="Leave block not found")
+    deleted = await db.delete_leave_block(leave_id, user_id=user["id"])
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Leave block not found")
     
     return {
         "success": True,
