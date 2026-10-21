@@ -20,6 +20,7 @@ from app.engines.chat_context import (
     INTERNAL_PARSE_SYSTEM,
     annotate_closed_proposals,
     empty_calendar,
+    repeats_declined_proposal,
     is_hidden_chat_message,
     is_internal_chat_content,
     rotation_status,
@@ -664,9 +665,10 @@ class ChatService:
         if not isinstance(calendar, dict):
             calendar = {**empty_calendar(), "text": str(calendar)}
         logs_and_incidents = await self._get_logs_and_incidents()
+        recent_proposals = await self._recent_proposals()
         chat_history = annotate_closed_proposals(
             await self.get_history(limit=10),
-            await self._recent_proposals(),
+            recent_proposals,
         )
         master_settings = settings_for_prompt(document, projection)
         applied = rotation_status(master_settings.get("cycle"), calendar)
@@ -698,6 +700,15 @@ class ChatService:
             tool = None
 
         command = None
+        if tool and tool.get("name") and repeats_declined_proposal(
+            content, tool["name"], tool.get("input") or {}, recent_proposals
+        ):
+            logger.info(
+                f"[CHAT] Dropped {tool['name']} for {self.user_id}: "
+                "it repeats a declined proposal"
+            )
+            response_text = "You declined that change, so I didn't propose it again."
+            tool = None
         if tool and tool.get("name"):
             payload = tool.get("input") or {}
             command = {

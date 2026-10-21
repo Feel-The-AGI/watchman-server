@@ -7,7 +7,8 @@ API, not only a master-settings document that is still empty.
 """
 
 import json
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from app.engines.calendar_authority import cycle_is_present
@@ -272,6 +273,135 @@ def _is_past(value: Any, now: Optional[datetime]) -> bool:
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return expires <= current.astimezone(timezone.utc)
+
+
+_ACTION_CUES = {
+    "add_leave": ("leave", "vacation", "sick", "day off", "time off"),
+    "remove_leave": ("leave", "vacation", "sick", "day off", "time off"),
+    "update_leave": ("leave", "vacation", "sick", "day off", "time off"),
+    "add_commitment": ("commitment", "appointment", "event"),
+    "remove_commitment": ("commitment", "appointment", "event"),
+    "update_commitment": ("commitment", "appointment", "event"),
+    "override_days": ("shift", "override", "work day", "night", "blank"),
+    "update_cycle": ("rotation", "cycle", "pattern", "anchor"),
+}
+_MONTH_NAMES = (
+    ("january", "jan"),
+    ("february", "feb"),
+    ("march", "mar"),
+    ("april", "apr"),
+    ("may", "may"),
+    ("june", "jun"),
+    ("july", "jul"),
+    ("august", "aug"),
+    ("september", "sep"),
+    ("october", "oct"),
+    ("november", "nov"),
+    ("december", "dec"),
+)
+
+
+def repeats_declined_proposal(
+    message: str,
+    action: str,
+    payload: Optional[dict],
+    proposals: Optional[list],
+) -> bool:
+    """True when this tool call is a declined change the user did not ask for again.
+
+    Same action and the same start/end dates. A later message that names those
+    dates and the kind of change is an explicit request, so the tool stands.
+    """
+    span = command_span(payload)
+    if span is None or explicitly_requests(message, action, payload):
+        return False
+    for proposal in proposals or []:
+        if proposal_outcome(proposal) != "declined":
+            continue
+        command = _command(proposal)
+        if str(command.get("action") or "") != action:
+            continue
+        body = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        if command_span(body) == span:
+            return True
+    return False
+
+
+def explicitly_requests(message: str, action: str, payload: Optional[dict]) -> bool:
+    """The latest message names this change's dates and what kind of change it is."""
+    span = command_span(payload)
+    if span is None:
+        return False
+    if not _mentions_span(message or "", span):
+        return False
+    lowered = (message or "").lower()
+    cues = list(_ACTION_CUES.get(action, ()))
+    name = str((payload or {}).get("name") or "").strip().lower()
+    if len(name) >= 3 and name not in {"leave", "other"}:
+        cues.append(name)
+    return any(cue in lowered for cue in cues)
+
+
+def command_span(payload: Optional[dict]) -> Optional[tuple]:
+    """Inclusive start and end for a tool payload. None when it has no date."""
+    if not isinstance(payload, dict):
+        return None
+    start = _day(payload.get("start_date") or payload.get("date"))
+    end = _day(payload.get("end_date")) or start
+    if start is None or end is None:
+        return None
+    if end < start:
+        end = start
+    return (start.isoformat(), end.isoformat())
+
+
+def _mentions_span(message: str, span: tuple) -> bool:
+    start = date.fromisoformat(span[0])
+    end = date.fromisoformat(span[1])
+    if not _mentions_day(message, start):
+        return False
+    return start == end or _mentions_day(message, end)
+
+
+def _mentions_day(message: str, day: date) -> bool:
+    if day.isoformat() in (message or ""):
+        return True
+    lowered = (message or "").lower()
+    full, short = _MONTH_NAMES[day.month - 1]
+    number = rf"{day.day}(?:st|nd|rd|th)?"
+    patterns = (
+        rf"\b{number}\s+{full}\b",
+        rf"\b{number}\s+{short}\b",
+        rf"\b{full}\s+{number}\b",
+        rf"\b{short}\s+{number}\b",
+    )
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def _command(proposal: dict) -> dict:
+    command = proposal.get("command")
+    if isinstance(command, str):
+        try:
+            command = json.loads(command)
+        except json.JSONDecodeError:
+            return {}
+    return command if isinstance(command, dict) else {}
+
+
+def _day(value: Any) -> Optional[date]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def _as_datetime(value: Any) -> Optional[datetime]:
