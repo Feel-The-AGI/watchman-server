@@ -9,8 +9,10 @@ import pytest
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
 
+from app.engines.command_executor import CommandExecutor
 from app.middleware.auth import get_current_user
 from app.routes import chat, commands
+from app.routes.commands import unexpired_proposal_filter
 
 
 @pytest.fixture
@@ -21,6 +23,8 @@ def flow(monkeypatch):
         "command": {"action": "add_leave", "payload": {"name": "Annual leave"}},
         "message_id": None, "expires_at": None,
     }]
+
+    seen_filters = []
 
     class Query:
         def __init__(self):
@@ -33,6 +37,7 @@ def flow(monkeypatch):
             return self
         def or_(self, expression):
             self.expiration_filter = expression
+            seen_filters.append(expression)
             return self
         def order(self, *args, **kwargs): return self
         def limit(self, *args): return self
@@ -68,7 +73,7 @@ def flow(monkeypatch):
 
     app.dependency_overrides[get_current_user] = user
     return SimpleNamespace(client=TestClient(app), rows=rows, id=proposal_id,
-                           executor=executor, service=service)
+                           executor=executor, service=service, filters=seen_filters)
 
 
 def review(flow, user="alice", decision="approve"):
@@ -152,4 +157,61 @@ def test_previous_client_can_approve_matching_saved_proposal(flow):
 
 def test_unauthenticated_review_is_rejected(flow):
     assert review(flow, user="unauthenticated").status_code == 401
+    flow.executor.execute.assert_not_awaited()
+
+
+def test_unexpired_filter_quotes_timestamp():
+    expression = unexpired_proposal_filter(datetime(2026, 10, 21, 17, 4, 5, 123456, timezone.utc))
+    assert expression == 'expires_at.is.null,expires_at.gt."2026-10-21T17:04:05Z"'
+
+
+@pytest.mark.asyncio
+async def test_new_proposals_expire_in_seven_days():
+    inserted = {}
+
+    class Query:
+        def insert(self, data):
+            inserted.update(data)
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[dict(inserted)])
+
+    executor = CommandExecutor.__new__(CommandExecutor)
+    executor.user_id = "alice"
+    executor.db = SimpleNamespace(client=SimpleNamespace(table=lambda name: Query()))
+    executor.validate_command = AsyncMock(return_value={"valid": True, "violations": []})
+    before = datetime.now(timezone.utc)
+    proposal = await executor.create_proposal({"action": "add_leave", "payload": {}})
+    expires = datetime.fromisoformat(proposal["expires_at"])
+    assert timedelta(days=6, hours=23) < expires - before < timedelta(days=7, minutes=1)
+
+
+def test_expiry_filter_quotes_timestamp_for_postgrest(flow):
+    assert review(flow).status_code == 200
+    assert flow.filters
+    expression = flow.filters[0]
+    assert 'expires_at.gt."' in expression
+    assert expression.endswith('"')
+    assert "+" not in expression
+
+
+def test_failed_validation_restores_pending_proposal(flow):
+    flow.executor.execute.return_value = {
+        "success": False,
+        "error": "Command has constraint violations",
+        "validation": {"valid": False, "violations": [{"message": "blocked"}]},
+    }
+    response = review(flow)
+    assert response.status_code == 422
+    assert flow.rows[0]["status"] == "pending"
+    flow.executor.execute.return_value = {"success": True}
+    assert review(flow).status_code == 200
+    assert flow.rows[0]["status"] == "approved"
+
+
+def test_invalid_stored_command_is_not_executed(flow):
+    flow.rows[0]["command"] = "add_leave"
+    assert review(flow).status_code == 409
+    assert flow.rows[0]["status"] == "pending"
     flow.executor.execute.assert_not_awaited()
