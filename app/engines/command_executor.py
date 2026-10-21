@@ -1082,13 +1082,19 @@ class CommandExecutor:
                 base_state = dict(override.get("state_json") or {})
                 work_type = override.get("work_type") or d.work_type.value
                 cycle_day = override.get("cycle_day") if override.get("cycle_day") is not None else d.cycle_day
+                previous_chips = base_state.get("commitments") or []
             else:
                 base_state = dict(d.state_json)
                 previous = (existing_by_date.get(date_str) or {}).get("state_json") or {}
-                if previous.get("commitments"):
-                    base_state["commitments"] = list(previous.get("commitments") or [])
+                previous_chips = previous.get("commitments") or []
                 work_type = d.work_type.value
                 cycle_day = d.cycle_day
+            # Chips with an id are re-stamped from the current commitment list.
+            # A removed commitment therefore leaves the day. Chips with no id stay.
+            base_state["commitments"] = [
+                chip for chip in previous_chips
+                if isinstance(chip, dict) and not chip.get("commitment_id")
+            ]
             state = stamp_day_state(base_state, d.date, commitments, leave_blocks)
             block_day = block_day_for(d.cycle_day, engine_pattern)
             state["engine_version"] = CALENDAR_ENGINE_VERSION
