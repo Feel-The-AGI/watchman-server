@@ -17,6 +17,25 @@ from app.engines.command_executor import create_command_executor
 router = APIRouter(prefix="/commands", tags=["commands"])
 
 
+def unexpired_proposal_filter(now: datetime | None = None) -> str:
+    """PostgREST `or` filter for proposals that have not expired.
+
+    Values containing `.` or `+` must be double-quoted. An unquoted ISO
+    timestamp is split on the fractional-second dot and the query errors.
+    """
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+    stamp = current.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f'expires_at.is.null,expires_at.gt."{stamp}"'
+
+
+def _restore_pending_proposal(db: Database, proposal_id: UUID, user_id: str) -> None:
+    """Return a claimed proposal to pending when nothing was applied."""
+    db.client.table("proposals").update({
+        "status": "pending",
+        "reviewed_at": None,
+    }).eq("id", str(proposal_id)).eq("user_id", user_id).eq("status", "approved").execute()
+
+
 @router.get("")
 async def list_commands(
     limit: int = 50,
@@ -78,11 +97,10 @@ class ReviewProposalRequest(BaseModel):
 @router.get("/proposals/pending")
 async def pending_proposals(user: dict = Depends(get_current_user)):
     db = Database(use_admin=True)
-    now = datetime.now(timezone.utc).isoformat()
     result = db.client.table("proposals").select("*").eq(
         "user_id", user["id"]
     ).eq("status", "pending").or_(
-        f"expires_at.is.null,expires_at.gt.{now}"
+        unexpired_proposal_filter()
     ).order("created_at").limit(50).execute()
     return {"proposals": result.data or []}
 
@@ -103,18 +121,34 @@ async def review_proposal(
         "status": status, "reviewed_at": now,
     }).eq("id", str(proposal_id)).eq("user_id", user["id"]).eq(
         "status", "pending"
-    ).or_(f"expires_at.is.null,expires_at.gt.{now}").execute()
+    ).or_(unexpired_proposal_filter()).execute()
     if not result.data:
         raise HTTPException(status_code=409, detail="Proposal unavailable or already reviewed")
     proposal = result.data[0]
     if request.decision == "reject":
         return {"success": True, "proposal_id": str(proposal_id), "status": status}
+    command = proposal.get("command")
+    if not isinstance(command, dict):
+        _restore_pending_proposal(db, proposal_id, user["id"])
+        raise HTTPException(status_code=409, detail="Stored proposal command is invalid")
     executor = create_command_executor(db, user["id"])
     # Revalidate against the current calendar and constraints at approval time.
-    # If execution fails, do not automatically retry a potentially partial change.
-    return await executor.execute(
-        proposal["command"], source="api", message_id=proposal.get("message_id")
-    )
+    # Validation failures write nothing, so the proposal can be reviewed again.
+    # An action that fails after it has started to write stays claimed.
+    try:
+        outcome = await executor.execute(
+            command, source="api", message_id=proposal.get("message_id")
+        )
+    except ValueError:
+        _restore_pending_proposal(db, proposal_id, user["id"])
+        raise HTTPException(status_code=422, detail="Command could not be applied")
+    if isinstance(outcome, dict) and outcome.get("success") is False and "validation" in outcome:
+        _restore_pending_proposal(db, proposal_id, user["id"])
+        raise HTTPException(
+            status_code=422,
+            detail=outcome.get("error") or "Command failed validation",
+        )
+    return outcome
 
 
 @router.post("/execute")
@@ -130,9 +164,12 @@ async def execute_command(
         if not request.action:
             raise HTTPException(status_code=422, detail="A proposal identifier is required")
         pending = await pending_proposals(user)
-        match = next((proposal for proposal in pending["proposals"]
-                      if proposal["command"].get("action") == request.action
-                      and proposal["command"].get("payload", {}) == request.payload), None)
+        match = next((
+            proposal for proposal in pending["proposals"]
+            if isinstance(proposal.get("command"), dict)
+            and proposal["command"].get("action") == request.action
+            and proposal["command"].get("payload", {}) == request.payload
+        ), None)
         if not match:
             raise HTTPException(status_code=409, detail="No matching pending proposal")
         proposal_id = UUID(match["id"])

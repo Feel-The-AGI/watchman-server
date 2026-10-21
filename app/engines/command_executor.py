@@ -4,7 +4,7 @@ Validates commands, routes through Constraint Engine, creates proposals, execute
 """
 
 from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from uuid import uuid4
 from loguru import logger
 
@@ -100,14 +100,15 @@ class CommandExecutor:
         # Validate first
         validation = await self.validate_command(command)
         
-        # Create proposal record
+        # Create proposal record. Expired proposals cannot be approved.
         proposal_data = {
             "id": str(uuid4()),
             "user_id": self.user_id,
             "command": command,
             "validation": validation,
             "status": "pending",
-            "message_id": message_id
+            "message_id": message_id,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
         }
         
         result = self.db.client.table("proposals").insert(proposal_data).execute()
