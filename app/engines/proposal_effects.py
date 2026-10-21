@@ -205,28 +205,208 @@ def event_dates(commitments: list, leaves: list) -> list:
 
 
 def describe_command(action: str, payload: Optional[dict]) -> str:
-    """Short card text such as 'Add Dentist appointment on Tue 27 Oct, 3–4pm'."""
+    """Card text built only from the payload, for every action a proposal can carry."""
     payload = payload or {}
-    if action == "add_commitment":
-        name = str(payload.get("name") or "commitment").strip() or "commitment"
-        when = _when_phrase(payload)
-        clock = _clock_phrase(payload.get("time_start"), payload.get("time_end"))
-        text = f"Add {name}"
-        if when:
-            text += f" on {when}" if _is_one_day(payload) else f" from {when}"
+    writers = {
+        "add_commitment": _describe_add_commitment,
+        "remove_commitment": _describe_remove_commitment,
+        "add_leave": _describe_add_leave,
+        "remove_leave": _describe_remove_leave,
+        "override_days": _describe_override,
+        "update_cycle": _describe_cycle,
+        "create_daily_log": _describe_daily_log,
+        "create_incident": _describe_incident,
+        "copy_incident": _describe_copy_incident,
+        "update_constraint": _describe_update_constraint,
+        "remove_constraint": _describe_remove_constraint,
+        "undo": lambda _payload: "Undo your last change",
+        "redo": lambda _payload: "Redo your last undone change",
+    }
+    writer = writers.get(action)
+    if writer is None:
+        return "Update the calendar"
+    return writer(payload)
+
+
+def _describe_add_commitment(payload: dict) -> str:
+    name = _label(payload.get("name"), "commitment")
+    clock = _clock_phrase(payload.get("time_start"), payload.get("time_end"))
+    weekdays = _weekdays(payload.get("days_of_week"))
+    if weekdays:
+        text = f"Add {name} {_every_phrase(weekdays)}"
+        span = _compact_range(payload)
+        if span:
+            text += f", {span}"
         if clock:
             text += f", {clock}"
         return text
-    if action == "add_leave":
-        when = _when_phrase(payload)
-        name = str(payload.get("name") or "").strip()
-        if name.lower() in _GENERIC_LEAVE_NAMES:
-            return f"Mark {when} as leave" if when else "Mark leave"
-        if when:
-            return f"Add {name} on {when}" if _is_one_day(payload) else f"Add {name} from {when}"
-        return f"Add {name}"
-    label = str(payload.get("name") or action or "change").replace("_", " ")
-    return label[:1].upper() + label[1:] if label else "Update the calendar"
+    when = _when_phrase(payload)
+    text = f"Add {name}"
+    if when:
+        text += f" on {when}" if _is_one_day(payload) else f" from {when}"
+    if clock:
+        text += f", {clock}"
+    return text
+
+
+def _describe_remove_commitment(payload: dict) -> str:
+    return _describe_removal("commitment", payload)
+
+
+def _describe_add_leave(payload: dict) -> str:
+    when = _when_phrase(payload)
+    name = str(payload.get("name") or "").strip()
+    if name.lower() in _GENERIC_LEAVE_NAMES:
+        return f"Mark {when} as leave" if when else "Mark leave"
+    if when:
+        return f"Add {name} on {when}" if _is_one_day(payload) else f"Add {name} from {when}"
+    return f"Add {name}"
+
+
+def _describe_remove_leave(payload: dict) -> str:
+    return _describe_removal("leave", payload)
+
+
+def _describe_removal(kind: str, payload: dict) -> str:
+    name = str(payload.get("name") or "").strip()
+    when = _when_phrase(payload)
+    if name and when:
+        return f"Remove {name} on {when}" if _is_one_day(payload) else f"Remove {name}, {when}"
+    if name:
+        return f"Remove {name}"
+    if when:
+        return f"Remove {kind} on {when}" if _is_one_day(payload) else f"Remove {kind}, {when}"
+    item_id = str(payload.get("id") or "").strip()
+    if item_id:
+        return f"Remove {kind} {item_id}"
+    return f"Remove that {kind}"
+
+
+def _describe_override(payload: dict) -> str:
+    start = _as_date(payload.get("start_date") or payload.get("date"))
+    end = _as_date(payload.get("end_date")) or start
+    if start and end and start != end:
+        span = f"{_format_day(start)} \u2013 {_format_day(end)}"
+    elif start:
+        span = _format_day(start)
+    else:
+        span = "those days"
+    kind = _SHIFT_NAMES.get(str(payload.get("work_type") or "").strip().lower(), "that shift")
+    text = f"Set {span} to {kind}"
+    if _keeps_off_days(payload):
+        text += ", keeping off days"
+    return text
+
+
+def _describe_cycle(payload: dict) -> str:
+    shift = payload.get("shift_by_days")
+    if shift is not None and shift != "":
+        try:
+            count = int(shift)
+        except (TypeError, ValueError):
+            count = None
+        if count is not None:
+            unit = "day" if abs(count) == 1 else "days"
+            return f"Shift your rotation by {count} {unit}"
+    pattern = _pattern_phrase(payload.get("pattern"))
+    anchor = _as_date(payload.get("anchor_date"))
+    cycle_day = payload.get("anchor_cycle_day")
+    anchor_block = payload.get("anchor")
+    if isinstance(anchor_block, dict):
+        if anchor is None:
+            anchor = _as_date(anchor_block.get("date"))
+        if cycle_day in (None, ""):
+            cycle_day = anchor_block.get("cycle_day")
+    pieces = []
+    if pattern:
+        pieces.append(pattern)
+    if anchor is not None:
+        anchor_text = f"anchored on {_format_day(anchor)}"
+        if cycle_day not in (None, ""):
+            anchor_text += f" as day {cycle_day}"
+        pieces.append(anchor_text)
+    elif cycle_day not in (None, ""):
+        pieces.append(f"anchor day {cycle_day}")
+    if not pieces:
+        return "Update the rotation"
+    return "Set rotation to " + ", ".join(pieces)
+
+
+def _describe_daily_log(payload: dict) -> str:
+    day = _as_date(payload.get("date"))
+    when = _format_day(day) if day else "that day"
+    text = f"Log a note for {when}"
+    hours = _hour_phrase(payload.get("actual_hours"))
+    if hours:
+        text += f", {hours}"
+    overtime = payload.get("overtime_hours")
+    if overtime not in (None, "", 0, 0.0):
+        extra = _hour_phrase(overtime)
+        if extra:
+            text += f", {extra} overtime"
+    return text
+
+
+def _describe_incident(payload: dict) -> str:
+    title = _label(payload.get("title"), "incident")
+    day = _as_date(payload.get("date"))
+    when = _format_day(day) if day else "that day"
+    return f"Log incident: {title} on {when}"
+
+
+def _describe_copy_incident(payload: dict) -> str:
+    source = _as_date(payload.get("source_date"))
+    target = _as_date(payload.get("target_date"))
+    left = _format_day(source) if source else "that day"
+    right = _format_day(target) if target else "that day"
+    return f"Copy the {left} incident to {right}"
+
+
+def _describe_update_constraint(payload: dict) -> str:
+    label = _constraint_label(payload)
+    if label:
+        return f"Update constraint: {label}"
+    return "Update that constraint"
+
+
+def _describe_remove_constraint(payload: dict) -> str:
+    label = _constraint_label(payload)
+    if label:
+        return f"Remove constraint: {label}"
+    return "Remove that constraint"
+
+
+_SHIFT_NAMES = {
+    "work_day": "day shift",
+    "day_shift": "day shift",
+    "day": "day shift",
+    "work_night": "night shift",
+    "night_shift": "night shift",
+    "night": "night shift",
+    "off": "off",
+    "rest": "off",
+    "blank": "blank",
+}
+
+_WEEKDAY_SHORT = {
+    "monday": "Mon",
+    "mon": "Mon",
+    "tuesday": "Tue",
+    "tue": "Tue",
+    "tues": "Tue",
+    "wednesday": "Wed",
+    "wed": "Wed",
+    "thursday": "Thu",
+    "thu": "Thu",
+    "thur": "Thu",
+    "thurs": "Thu",
+    "friday": "Fri",
+    "fri": "Fri",
+    "saturday": "Sat",
+    "sat": "Sat",
+    "sunday": "Sun",
+    "sun": "Sun",
+}
 
 
 def explanation_for(action: str, payload: Optional[dict], model_text: Optional[str] = None) -> str:
@@ -295,7 +475,10 @@ def _as_date(value: Any) -> Optional[date]:
     text = str(value).strip()
     if not text:
         return None
-    return date.fromisoformat(text[:10])
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def _span(record: dict):
@@ -394,6 +577,112 @@ def _clock_phrase(start: Any, end: Any) -> str:
     if left_suffix == right_suffix:
         return f"{left}\u2013{right}{right_suffix}"
     return f"{left}{left_suffix}\u2013{right}{right_suffix}"
+
+
+def _label(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _constraint_label(payload: dict) -> str:
+    for key in ("description", "name"):
+        text = str(payload.get(key) or "").strip()
+        if text:
+            return text
+    rule = payload.get("rule")
+    if isinstance(rule, dict):
+        rule = rule.get("type") or rule.get("name") or ""
+    text = str(rule or "").strip()
+    if text:
+        return text.replace("_", " ")
+    return str(payload.get("id") or "").strip()
+
+
+def _keeps_off_days(payload: dict) -> bool:
+    if "preserve_off_days" not in payload:
+        return True
+    value = payload.get("preserve_off_days")
+    if isinstance(value, str):
+        return value.strip().lower() not in {"false", "0", "no"}
+    return bool(value)
+
+
+def _pattern_phrase(pattern: Any) -> str:
+    if not isinstance(pattern, list):
+        return ""
+    parts = []
+    for block in pattern:
+        if not isinstance(block, dict):
+            continue
+        raw = str(block.get("label") or block.get("type") or "").strip()
+        try:
+            duration = int(block.get("duration", block.get("days")))
+        except (TypeError, ValueError):
+            duration = None
+        kind = {
+            "work_day": "day",
+            "day_shift": "day",
+            "work_night": "night",
+            "night_shift": "night",
+            "off": "off",
+        }.get(raw, raw.replace("_", " "))
+        if duration is None:
+            if kind:
+                parts.append(kind)
+            continue
+        unit = "day" if duration == 1 else "days"
+        if kind == "off":
+            parts.append(f"{duration} {unit} off")
+        elif kind in {"day", "night"}:
+            shift = "shift" if duration == 1 else "shifts"
+            parts.append(f"{duration} {kind} {shift}")
+        else:
+            parts.append(f"{duration} {unit} {kind}")
+    return ", ".join(parts)
+
+
+def _every_phrase(days: list) -> str:
+    labels = []
+    for day in days:
+        short = _WEEKDAY_SHORT.get(str(day).strip().lower(), str(day).strip()[:3].title())
+        if short and short not in labels:
+            labels.append(short)
+    if not labels:
+        return "every week"
+    if len(labels) == 1:
+        return f"every {labels[0]}"
+    if len(labels) == 2:
+        return f"every {labels[0]} and {labels[1]}"
+    return "every " + ", ".join(labels[:-1]) + f" and {labels[-1]}"
+
+
+def _compact_range(payload: dict) -> str:
+    start = _as_date(payload.get("start_date") or payload.get("date"))
+    end = _as_date(payload.get("end_date")) or start
+    if start is None:
+        return ""
+    if end is None or end == start:
+        return _month_day(start)
+    return f"{_month_day(start)} \u2013 {_month_day(end)}"
+
+
+def _month_day(day: date) -> str:
+    return f"{day.day} {_MONTHS[day.month - 1]}"
+
+
+def _hour_phrase(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if number == int(number):
+        shown = int(number)
+    else:
+        shown = number
+    unit = "hour" if shown == 1 else "hours"
+    return f"{shown} {unit}"
 
 
 def _ampm(value: str):
