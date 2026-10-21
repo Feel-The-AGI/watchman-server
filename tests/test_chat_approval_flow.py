@@ -119,9 +119,21 @@ def test_other_user_cannot_approve_or_read_pending(flow):
     flow.executor.execute.assert_not_awaited()
 
 
+@pytest.mark.parametrize("decision", ["reject", "rejected", "decline", "declined"])
+def test_decline_words_are_stored_as_declined(flow, decision):
+    response = review(flow, decision=decision)
+    assert response.status_code == 200
+    assert response.json()["status"] == "declined"
+    assert flow.rows[0]["status"] == "declined"
+    assert review(flow).status_code == 409
+    flow.executor.execute.assert_not_awaited()
+
+
 def test_rejection_is_persisted_and_cannot_be_approved(flow):
-    assert review(flow, decision="reject").status_code == 200
-    assert flow.rows[0]["status"] == "rejected"
+    response = review(flow, decision="reject")
+    assert response.status_code == 200
+    assert response.json()["status"] == "declined"
+    assert flow.rows[0]["status"] == "declined"
     assert review(flow).status_code == 409
     flow.executor.execute.assert_not_awaited()
 
