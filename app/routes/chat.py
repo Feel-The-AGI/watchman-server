@@ -90,7 +90,7 @@ async def send_message(
 
         chat_service = create_chat_service(db, user["id"])
 
-        logger.info(f"[CHAT] Sending message to Gemini for user {user['id']}")
+        logger.info(f"[CHAT] Sending message to Claude for user {user['id']}")
         result = await chat_service.send_message(
             content=request.content,
             auto_execute=request.auto_execute

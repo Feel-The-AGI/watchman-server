@@ -22,7 +22,8 @@ Set these on the host. Names match `.env.example`.
 | `SUPABASE_ANON_KEY` | Same page → anon public key |
 | `SUPABASE_SERVICE_KEY` | Same page → service_role key. Server only. |
 | `SUPABASE_JWT_SECRET` | Project Settings → API → JWT Secret |
-| `GEMINI_API_KEY` | Google AI Studio / Gemini API key |
+| `ANTHROPIC_API_KEY` | Anthropic Console → API keys |
+| `ANTHROPIC_MODEL` | Optional. Defaults to `claude-haiku-5-5` |
 | `PAYSTACK_SECRET_KEY` | Paystack → Settings → API Keys & Webhooks. This key also verifies webhooks. |
 | `PAYSTACK_PUBLIC_KEY` | Same page. Not used to verify webhooks. |
 | `EXCHANGE_RATE_API_KEY` | exchangerate-api.com. Checkout returns 503 without a live USD→GHS rate. |
@@ -54,9 +55,10 @@ Take a database backup before 009, 010, and 011.
 
 ## 3. Render
 
-`render.yaml` describes one Python web service, plan starter, health check `GET /health`. `autoDeploy` is false so the first boot does not race an unmerged branch.
+`render.yaml` describes one **free** Python web service. Health check path is `/health`. `autoDeploy` is false so the first boot is started from the dashboard.
 
 1. In Render, create a Blueprint from this repo, or create a web service manually with:
+   - Instance type: **Free**
    - Build: `pip install -r requirements.txt`
    - Start: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
    - Health check path: `/health`
@@ -67,7 +69,7 @@ Take a database backup before 009, 010, and 011.
 5. In Paystack, set the webhook URL to `https://<your-service>.onrender.com/api/payments/webhook` and send a test event. A bad signature returns 401. Do not grant Pro from the Paystack dashboard by hand.
 6. Point the Vercel project's `NEXT_PUBLIC_API_URL` at the new origin and redeploy the client. The client still defaults to the deleted Render host when that variable is empty.
 
-The starter plan does not sleep. This service does not ping the deleted host.
+The free instance sleeps after a period without traffic. The first request after sleep can take up to a minute while Render starts the process. `GET /health` is the check that process uses. This service does not ping itself.
 
 ## 4. Docker
 
