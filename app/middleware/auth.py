@@ -173,7 +173,7 @@ async def get_current_user(
             "country_code": geo_data.get("country_code"),
             "region": geo_data.get("region"),
             "city": geo_data.get("city"),
-            "timezone": geo_data.get("timezone"),
+            "timezone": geo_data.get("timezone") or "UTC",
             "last_ip": client_ip,
             "last_active": datetime.utcnow().isoformat(),
         })
@@ -213,7 +213,7 @@ async def get_current_user(
                     "country_code": geo_data.get("country_code"),
                     "region": geo_data.get("region"),
                     "city": geo_data.get("city"),
-                    "timezone": geo_data.get("timezone"),
+                    "timezone": geo_data.get("timezone") or user.get("timezone") or "UTC",
                     "last_ip": client_ip,
                 })
                 logger.info(f"[AUTH] Updated user location: {geo_data.get('country')}")

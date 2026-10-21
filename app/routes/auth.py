@@ -33,13 +33,13 @@ async def get_profile(user: dict = Depends(get_current_user)):
     logger.info(f"[AUTH_ROUTE] GET /me - user_id: {user.get('id')}")
     return UserProfileResponse(
         id=user.get("id"),
-        email=user.get("email"),
-        name=user.get("name"),
-        timezone=user.get("timezone", "UTC"),
-        tier=user.get("tier", "free"),
-        role=user.get("role", "user"),
-        onboarding_completed=user.get("onboarding_completed", False),
-        settings=user.get("settings", {})
+        email=user.get("email") or "",
+        name=user.get("name") or "",
+        timezone=user.get("timezone") or "UTC",
+        tier=user.get("tier") or "free",
+        role=user.get("role") or "user",
+        onboarding_completed=bool(user.get("onboarding_completed")),
+        settings=user.get("settings") or {},
     )
 
 

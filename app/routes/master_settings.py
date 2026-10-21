@@ -4,6 +4,7 @@ Single source of truth for all user parameters
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
 from pydantic import BaseModel
 from typing import Optional, Any, Dict
 
@@ -40,7 +41,8 @@ async def get_master_settings(
         result = await service.get(user["id"])
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[SETTINGS] Failed to load master settings for {user['id']}: {e}")
+        raise HTTPException(status_code=500, detail="Could not load your settings. Please try again.")
 
 
 @router.put("")
@@ -66,7 +68,8 @@ async def update_master_settings(
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))  # Conflict
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[SETTINGS] Failed to update master settings for {user['id']}: {e}")
+        raise HTTPException(status_code=500, detail="Could not save your settings. Please try again.")
 
 
 @router.patch("/{section}")
@@ -95,7 +98,8 @@ async def update_section(
         result = await service.update_section(user["id"], section, request.value)
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[SETTINGS] Failed to update {section} for {user['id']}: {e}")
+        raise HTTPException(status_code=500, detail="Could not save your settings. Please try again.")
 
 
 @router.get("/snapshot")
@@ -114,4 +118,5 @@ async def get_snapshot(
         result = await service.get_snapshot(user["id"])
         return {"settings": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[SETTINGS] Failed to load snapshot for {user['id']}: {e}")
+        raise HTTPException(status_code=500, detail="Could not load your settings. Please try again.")

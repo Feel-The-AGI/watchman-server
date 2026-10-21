@@ -78,7 +78,7 @@ async def update_settings(
     """Update user settings"""
     db = Database(use_admin=True)
     
-    current_settings = user.get("settings", {})
+    current_settings = dict(user.get("settings") or {})
     
     if data.constraint_mode is not None:
         if data.constraint_mode not in ["binary", "weighted"]:
@@ -261,7 +261,7 @@ async def toggle_weighted_mode(
             detail="Weighted constraints are a Pro feature. Upgrade to Pro to unlock advanced constraint rules with priorities and weights!"
         )
 
-    settings = user.get("settings", {})
+    settings = dict(user.get("settings") or {})
     settings["weighted_mode_enabled"] = enabled
 
     if enabled:

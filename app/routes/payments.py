@@ -137,6 +137,10 @@ async def create_checkout_session(user: dict = Depends(get_current_user)):
 
         logger.info(f"[PAYMENTS] Converting ${usd_price} USD → GHS {ghs_amount_rounded} (rate: {exchange_rate})")
 
+        # Do not send `channels`. This Ghana Starter Business account rejects
+        # card / apple_pay with "No active channel to process transaction".
+        # Omitting the field lets Paystack offer every channel enabled on the
+        # account, including mobile money and bank transfer.
         transaction_data = {
             "email": user_email,
             "amount": amount_in_pesewas,
@@ -162,7 +166,6 @@ async def create_checkout_session(user: dict = Depends(get_current_user)):
                     }
                 ]
             },
-            "channels": ["card", "apple_pay"],
         }
 
         result = await paystack_request("POST", "/transaction/initialize", transaction_data)

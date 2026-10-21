@@ -4,6 +4,7 @@ Handles command history, undo, and redo
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 from datetime import datetime, timezone
@@ -201,7 +202,8 @@ async def undo_command(
         result = await executor.execute(command, source="api", skip_validation=True)
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[COMMANDS] Undo failed for user {user['id']}: {e}")
+        raise HTTPException(status_code=500, detail="That action could not be completed. Please try again.")
 
 
 class RedoRequest(BaseModel):
@@ -229,4 +231,5 @@ async def redo_command(
         result = await executor.execute(command, source="api", skip_validation=True)
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"[COMMANDS] Redo failed for user {user['id']}: {e}")
+        raise HTTPException(status_code=500, detail="That action could not be completed. Please try again.")

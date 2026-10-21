@@ -12,6 +12,7 @@ from datetime import datetime
 from app.middleware.auth import get_current_user, get_effective_tier
 from app.database import Database
 from app.engines.chat_service import create_chat_service
+from app.engines.claude_chat import USER_FACING_MODEL_ERROR
 
 # Free tier limits
 FREE_MESSAGE_LIMIT = 100  # Total messages per month
@@ -102,17 +103,19 @@ async def send_message(
         if result.get('execution'):
             logger.info(f"[CHAT] Execution result: success={result.get('execution', {}).get('success')}")
 
-        # Add remaining messages info for free users
+        # Add remaining messages info for free users. An internal parse is not
+        # stored, so it does not consume a visible message.
         if effective_tier == "free":
-            result["messages_remaining"] = max(0, FREE_MESSAGE_LIMIT - message_count - 1)
+            used = 0 if result.get("internal") else 1
+            result["messages_remaining"] = max(0, FREE_MESSAGE_LIMIT - message_count - used)
 
         return result
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[CHAT] Error for user {user['id']}: {str(e)}")
+        logger.error(f"[CHAT] Error for user {user['id']}: {e}")
         logger.exception("[CHAT] Full traceback:")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=USER_FACING_MODEL_ERROR)
 
 
 @router.get("/history")

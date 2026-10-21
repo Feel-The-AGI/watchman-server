@@ -119,10 +119,20 @@ async def test_missing_key_and_timeout_stay_off_the_user_message(monkeypatch):
         return {"id": "message", "role": role, "content": content}
 
     service._save_message = save
-    service._get_calendar_snapshot = AsyncMock(return_value="calendar")
+    service._get_calendar_snapshot = AsyncMock(return_value={
+        "text": "calendar",
+        "count": 0,
+        "start": None,
+        "end": None,
+        "counts": {},
+    })
     service._get_logs_and_incidents = AsyncMock(return_value="logs")
     service.get_history = AsyncMock(return_value=[{"role": "user", "content": "Hi"}])
-    monkeypatch.setattr(chat_service, "effective_constraints", AsyncMock(return_value=[]))
+    monkeypatch.setattr(chat_service, "projection_for_user", AsyncMock(return_value={
+        "cycle": None,
+        "constraints": [],
+        "leave_blocks": [],
+    }))
 
     monkeypatch.setattr(
         chat_service,
