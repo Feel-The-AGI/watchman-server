@@ -616,7 +616,6 @@ class ChatService:
                 tools=None,
                 max_tokens=INTERNAL_PARSE_MAX_TOKENS,
                 thinking={"type": "adaptive"},
-                effort={"effort": "low"},
             )
         except (ModelRequestError, anthropic.APIError) as exc:
             logger.error(f"[CLAUDE] Internal parse failed for user {self.user_id}: {exc}")

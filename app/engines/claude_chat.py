@@ -2,7 +2,7 @@
 
 Callers still receive a command dict of {action, payload, explanation}.
 Haiku 5.5 can use adaptive thinking. Do not send the deprecated budget_tokens
-mode. Chat defaults to thinking disabled and a 1024 token cap so a normal
+mode. Chat defaults to thinking disabled and a 2048 token cap so a normal
 reply does not spend the whole client timeout on hidden reasoning.
 """
 
@@ -17,7 +17,7 @@ from app.config import get_settings
 MODEL_TIMEOUT_SECONDS = 30
 # Visible reply plus one tool call. Adaptive thinking, when enabled, needs a
 # higher cap because those tokens come out of this same budget.
-CHAT_MAX_TOKENS = 1024
+CHAT_MAX_TOKENS = 2048
 ADAPTIVE_MAX_TOKENS = 2048
 _UNSET = object()
 _EFFORTS = {"low", "medium", "high", "xhigh", "max"}
@@ -139,7 +139,7 @@ async def complete_chat(
 ) -> tuple[str, Optional[dict]]:
     """Call Claude. Raises ModelRequestError or anthropic.APIError on failure.
 
-    Chat uses the settings default (thinking disabled, 1024 tokens). Pass
+    Chat uses the settings default (thinking disabled, 2048 tokens). Pass
     ``thinking`` to override that, including None when the request should omit
     the field. Omit ``tools`` when the caller wants JSON instead of a tool call.
     A timeout is an anthropic.APITimeoutError so the chat route can turn it
@@ -177,6 +177,15 @@ async def complete_chat(
     if effort and isinstance(thinking, dict) and thinking.get("type") == "adaptive":
         request["output_config"] = effort if "effort" in effort else {"effort": effort}
     response = await client.messages.create(**request)
+    if getattr(response, "stop_reason", None) == "max_tokens":
+        # A cut-off tool call must not become a proposal. One higher cap, then stop.
+        raised = min(max(int(request["max_tokens"]) * 2, int(request["max_tokens"]) + 1), 8192)
+        if raised > int(request["max_tokens"]):
+            request = {**request, "max_tokens": raised}
+            response = await client.messages.create(**request)
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            logger.warning("[CLAUDE] Response hit max_tokens")
+            raise ModelRequestError("Claude response was cut off at max_tokens")
     text, tool = parse_model_response(response)
     if tool:
         logger.info(f"[CLAUDE] Tool called: {tool['name']}")

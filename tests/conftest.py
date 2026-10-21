@@ -29,7 +29,7 @@ def mock_settings():
             anthropic_model="claude-haiku-5-5",
             anthropic_thinking="disabled",
             anthropic_thinking_effort="low",
-            anthropic_chat_max_tokens=1024,
+            anthropic_chat_max_tokens=2048,
             anthropic_timeout_seconds=30,
             cors_origins="http://localhost:3000",
             cors_origins_list=["http://localhost:3000"]

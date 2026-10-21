@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # anthropic_thinking_effort so the budget stays small.
     anthropic_thinking: str = "disabled"
     anthropic_thinking_effort: str = "low"
-    anthropic_chat_max_tokens: int = 1024
+    anthropic_chat_max_tokens: int = 2048
     anthropic_timeout_seconds: float = 30
 
     # Paystack. Webhook signatures use paystack_secret_key.

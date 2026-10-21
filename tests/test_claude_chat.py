@@ -108,7 +108,7 @@ async def test_chat_default_disables_thinking_and_caps_tokens(monkeypatch):
     assert tool is None
     request = captured["create"]
     assert request["model"] == "claude-haiku-5-5"
-    assert request["max_tokens"] == 1024
+    assert request["max_tokens"] == 2048
     assert request["max_tokens"] < 8192
     assert request["thinking"] == {"type": "disabled"}
     assert request["thinking"].get("type") != "enabled"
@@ -156,24 +156,62 @@ async def test_timeout_propagates_for_the_friendly_chat_error(monkeypatch):
         await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
 
 
-def test_old_adaptive_budget_is_much_slower_than_the_chat_default():
-    """Model of the production 25-30s chat turn. No API key is required.
+def _message(stop_reason, tool_name=None):
+    content = []
+    if tool_name:
+        content.append(SimpleNamespace(type="tool_use", name=tool_name, input={"name": "Partial"}))
+    else:
+        content.append(SimpleNamespace(type="text", text="cut off"))
+    return SimpleNamespace(stop_reason=stop_reason, content=content)
 
-    Adaptive thinking spends tokens inside max_tokens. The old request allowed
-    8192 of them and landed at about 28s. The chat default disables thinking
-    and caps the reply at 1024 tokens.
-    """
 
-    def simulated_seconds(max_tokens, thinking):
-        if thinking and thinking.get("type") == "adaptive":
-            return max_tokens / 8192 * 28.0
-        return 0.6 + max_tokens / 1024 * 0.9
+@pytest.mark.asyncio
+async def test_max_tokens_retries_once_and_does_not_return_a_cutoff_tool(monkeypatch):
+    captured = []
 
-    old_seconds = simulated_seconds(8192, {"type": "adaptive"})
-    new_seconds = simulated_seconds(1024, {"type": "disabled"})
-    assert 25 <= old_seconds <= 30
-    assert new_seconds < 3
-    assert old_seconds / new_seconds > 10
+    class Messages:
+        async def create(self, **kwargs):
+            captured.append(kwargs)
+            if len(captured) == 1:
+                return _message("max_tokens", "add_leave")
+            return SimpleNamespace(
+                stop_reason="tool_use",
+                content=[SimpleNamespace(type="tool_use", name="add_leave", input={"name": "Annual"})],
+            )
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.messages = Messages()
+
+    monkeypatch.setattr(
+        "app.engines.claude_chat.get_settings",
+        lambda: SimpleNamespace(anthropic_api_key="sk-test", anthropic_model="claude-haiku-5-5"),
+    )
+    monkeypatch.setattr("app.engines.claude_chat.anthropic.AsyncAnthropic", Client)
+    text, tool = await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
+    assert text == ""
+    assert tool == {"name": "add_leave", "input": {"name": "Annual"}}
+    assert captured[0]["max_tokens"] == 2048
+    assert captured[1]["max_tokens"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_after_retry_is_a_model_error(monkeypatch):
+    class Messages:
+        async def create(self, **kwargs):
+            return _message("max_tokens", "add_commitment")
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.messages = Messages()
+
+    monkeypatch.setattr(
+        "app.engines.claude_chat.get_settings",
+        lambda: SimpleNamespace(anthropic_api_key="sk-test", anthropic_model="claude-haiku-5-5"),
+    )
+    monkeypatch.setattr("app.engines.claude_chat.anthropic.AsyncAnthropic", Client)
+    with pytest.raises(ModelRequestError):
+        await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
 
 
 @pytest.mark.asyncio
@@ -217,6 +255,18 @@ async def test_missing_key_and_timeout_stay_off_the_user_message(monkeypatch):
     assert "timed out" not in failed["response"].lower()
     assert "anthropic" not in failed["response"].lower()
     service.command_executor.execute.assert_not_called()
+    service.command_executor.create_proposal.assert_not_awaited()
+
+    monkeypatch.setattr(
+        chat_service,
+        "complete_chat",
+        AsyncMock(side_effect=ModelRequestError("cut off")),
+    )
+    cutoff = await service.send_message("Add leave", auto_execute=False)
+    assert cutoff["is_command"] is False
+    assert cutoff["proposal"] is None
+    assert cutoff["response"] == USER_FACING_MODEL_ERROR
+    service.command_executor.create_proposal.assert_not_awaited()
 
     monkeypatch.setattr(
         chat_service,
