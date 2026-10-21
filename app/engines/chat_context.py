@@ -277,9 +277,9 @@ def _is_past(value: Any, now: Optional[datetime]) -> bool:
 
 
 _ACTION_CUES = {
-    "add_leave": ("leave", "vacation", "sick", "day off", "time off"),
-    "remove_leave": ("leave", "vacation", "sick", "day off", "time off"),
-    "update_leave": ("leave", "vacation", "sick", "day off", "time off"),
+    "add_leave": ("leave", "leaves", "vacation", "sick", "day off", "days off", "time off"),
+    "remove_leave": ("leave", "leaves", "vacation", "sick", "day off", "days off", "time off"),
+    "update_leave": ("leave", "leaves", "vacation", "sick", "day off", "days off", "time off"),
     "add_commitment": ("commitment", "appointment", "event"),
     "remove_commitment": ("commitment", "appointment", "event"),
     "update_commitment": ("commitment", "appointment", "event"),
@@ -336,7 +336,7 @@ def declined_again_reply(action: str, payload: Optional[dict]) -> str:
     kind, phrase = _decline_kind_and_phrase(action, payload, when)
     held = "added" if action.startswith("add") or action == "update_leave" else "changed"
     return (
-        f"You declined {kind} a moment ago, so I haven't {held} it. "
+        f"You declined {kind} earlier, so I haven't {held} it. "
         f"If you'd like it after all, just say '{phrase}' and I'll set it up."
     )
 
