@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
+from postgrest.exceptions import APIError
 
 from app.engines.command_executor import CommandExecutor
 from app.middleware.auth import get_current_user
@@ -25,6 +26,7 @@ def flow(monkeypatch):
     }]
 
     seen_filters = []
+    fail = {"rejected": False}
 
     class Query:
         def __init__(self):
@@ -45,6 +47,13 @@ def flow(monkeypatch):
             self.values = values
             return self
         def execute(self):
+            if fail["rejected"] and self.values and self.values.get("status") == "rejected":
+                raise APIError({
+                    "message": 'invalid input value for enum proposal_status: "rejected"',
+                    "code": "22P02",
+                    "hint": None,
+                    "details": None,
+                })
             matched = [row for row in rows if all(
                 row.get(key) == value for key, value in self.filters.items()
             ) and (not self.expiration_filter or row.get("expires_at") is None
@@ -73,7 +82,7 @@ def flow(monkeypatch):
 
     app.dependency_overrides[get_current_user] = user
     return SimpleNamespace(client=TestClient(app), rows=rows, id=proposal_id,
-                           executor=executor, service=service, filters=seen_filters)
+                           executor=executor, service=service, filters=seen_filters, fail=fail)
 
 
 def review(flow, user="alice", decision="approve"):
@@ -105,7 +114,9 @@ def test_chat_proposes_by_default_and_refuses_auto_execution(flow):
 def test_approval_executes_stored_command_once(flow):
     original = deepcopy(flow.rows[0]["command"])
     assert review(flow).status_code == 200
-    flow.executor.execute.assert_awaited_once_with(original, source="api", message_id=None)
+    flow.executor.execute.assert_awaited_once_with(
+        original, source="api", message_id=None, proposal_id=flow.id,
+    )
     assert review(flow).status_code == 409
     assert flow.executor.execute.await_count == 1
 
@@ -194,6 +205,33 @@ def test_expiry_filter_quotes_timestamp_for_postgrest(flow):
     assert 'expires_at.gt."' in expression
     assert expression.endswith('"')
     assert "+" not in expression
+
+
+def test_failed_write_restores_pending_and_is_not_a_success(flow):
+    flow.executor.execute.return_value = {
+        "success": False,
+        "error": "Commitment 'Dentist appointment' was not saved",
+    }
+    response = review(flow)
+    assert response.status_code == 500
+    assert response.json()["detail"] == "The change could not be saved. It is still waiting for review."
+    assert "was not saved" not in response.text
+    assert flow.rows[0]["status"] == "pending"
+    flow.executor.execute.return_value = {"success": True}
+    assert review(flow).status_code == 200
+    assert flow.rows[0]["status"] == "approved"
+
+
+def test_decline_database_error_stays_pending_without_leaking_the_enum(flow):
+    flow.fail["rejected"] = True
+    response = review(flow, decision="reject")
+    assert response.status_code == 500
+    body = response.json()["detail"]
+    assert body == "The change could not be declined. It is still waiting for review."
+    assert "proposal_status" not in response.text
+    assert "22P02" not in response.text
+    assert flow.rows[0]["status"] == "pending"
+    flow.executor.execute.assert_not_awaited()
 
 
 def test_failed_validation_restores_pending_proposal(flow):
