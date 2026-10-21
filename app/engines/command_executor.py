@@ -10,7 +10,13 @@ from loguru import logger
 
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
-from app.engines.calendar_engine import CALENDAR_ENGINE_VERSION, create_calendar_engine
+from app.engines.calendar_engine import (
+    CALENDAR_ENGINE_VERSION,
+    block_day_for,
+    create_calendar_engine,
+    generation_bounds,
+    shift_badge,
+)
 from app.engines.calendar_authority import (
     commitment_is_study,
     effective_constraints,
@@ -975,11 +981,25 @@ class CommandExecutor:
             raise RuntimeError("Calendar was not updated")
 
     async def _regenerate_calendar(self) -> bool:
-        """Regenerate calendar days from current settings, preserving manual overrides.
+        """Rebuild from 1 Jan of the anchor year through the next year."""
+        settings = await self.settings_service.get_snapshot(self.user_id)
+        cycle = settings.get("cycle") or {}
+        anchor_date_str = None
+        if isinstance(cycle.get("anchor"), dict):
+            anchor_date_str = cycle["anchor"].get("date")
+        anchor_date_str = cycle.get("anchor_date") or anchor_date_str
+        if not anchor_date_str:
+            return False
+        anchor_date = date.fromisoformat(str(anchor_date_str)[:10])
+        start_date, end_date = generation_bounds(anchor_date)
+        return await self.rebuild_calendar(start_date, end_date)
 
-        Returns True when days were written. Returns False when there is no
-        cycle to project, so the caller can stamp saved events onto days that
-        already exist.
+    async def rebuild_calendar(self, start_date: date, end_date: date) -> bool:
+        """Rewrite one inclusive range from the cycle.
+
+        Leave in the settings document and leave_blocks are both applied.
+        Commitments are stamped back onto the days. A manual override, including
+        a blank mark and a day before the anchor, keeps its work type.
         """
         settings = await self.settings_service.get_snapshot(self.user_id)
         cycle = settings.get("cycle")
@@ -1004,13 +1024,7 @@ class CommandExecutor:
             logger.warning(f"No anchor date for user {self.user_id}, skipping calendar regeneration")
             return False
 
-        anchor_date = date.fromisoformat(anchor_date_str)
-
         engine = create_calendar_engine(self.user_id)
-
-        # Generate from anchor date to end of that year + next year
-        start_date = anchor_date
-        end_date = date(anchor_date.year + 1, 12, 31)
 
         # Convert pattern to engine format - handle both {label, duration} and {type, days}
         raw_pattern = cycle.get("pattern", [])
@@ -1033,7 +1047,8 @@ class CommandExecutor:
 
         table_leaves = await self.db.get_leave_blocks(self.user_id) or []
         leave_blocks = _merge_leave_blocks(settings.get("leave_blocks") or [], table_leaves)
-        commitments = await self.db.get_commitments(self.user_id) or []
+        table_commitments = await self.db.get_commitments(self.user_id) or []
+        commitments = _merge_records(settings.get("commitments") or [], table_commitments)
 
         constraints = await effective_constraints(
             self.db, self.user_id, settings.get("constraints", [])
@@ -1045,42 +1060,69 @@ class CommandExecutor:
             start_date, end_date, cycle_for_engine, leave_blocks, constraints
         )
 
-        existing_days = await self.db.get_calendar_days(
-            self.user_id, start_date.isoformat(), end_date.isoformat()
-        ) or []
+        existing_days = await self._read_existing_days(start_date, end_date)
+        existing_by_date = {}
         manual_override_days = {}
         for existing_day in existing_days:
+            key = _day_key(existing_day.get("date"))
+            existing_by_date[key] = existing_day
             state = existing_day.get("state_json") or {}
-            if state.get("manual_override"):
-                manual_override_days[_day_key(existing_day.get("date"))] = existing_day
+            if isinstance(state, dict) and state.get("manual_override"):
+                manual_override_days[key] = existing_day
 
         if manual_override_days:
             logger.info(f"Preserving {len(manual_override_days)} manually overridden days during regeneration")
 
         days_data = []
+        written = set()
         for d in days:
             date_str = d.date.isoformat()
             override = manual_override_days.get(date_str)
             if override:
-                base_state = override.get("state_json") or {}
+                base_state = dict(override.get("state_json") or {})
                 work_type = override.get("work_type") or d.work_type.value
+                cycle_day = override.get("cycle_day") if override.get("cycle_day") is not None else d.cycle_day
             else:
-                base_state = d.state_json
+                base_state = dict(d.state_json)
+                previous = (existing_by_date.get(date_str) or {}).get("state_json") or {}
+                if previous.get("commitments"):
+                    base_state["commitments"] = list(previous.get("commitments") or [])
                 work_type = d.work_type.value
+                cycle_day = d.cycle_day
+            state = stamp_day_state(base_state, d.date, commitments, leave_blocks)
+            block_day = block_day_for(d.cycle_day, engine_pattern)
+            state["engine_version"] = CALENDAR_ENGINE_VERSION
+            state["block_day"] = block_day
+            state["shift_badge"] = shift_badge(str(work_type), block_day)
+            if override:
+                state["manual_override"] = True
             days_data.append({
                 "user_id": self.user_id,
                 "date": date_str,
-                "cycle_id": d.cycle_id,
-                "cycle_day": d.cycle_day,
+                "cycle_id": (override or {}).get("cycle_id") or d.cycle_id,
+                "cycle_day": cycle_day,
                 "work_type": work_type,
-                "state_json": stamp_day_state(base_state, d.date, commitments, leave_blocks),
+                "state_json": state,
+            })
+            written.add(date_str)
+
+        # An override the generator did not cover is still included. The write
+        # is one upsert, so a failure leaves the stored rows in place.
+        for key, override in manual_override_days.items():
+            if key in written:
+                continue
+            state = dict(override.get("state_json") or {})
+            state["manual_override"] = True
+            state["engine_version"] = CALENDAR_ENGINE_VERSION
+            days_data.append({
+                "user_id": self.user_id,
+                "date": key,
+                "cycle_id": override.get("cycle_id"),
+                "cycle_day": override.get("cycle_day"),
+                "work_type": override.get("work_type"),
+                "state_json": state,
             })
 
-        deleted = await self.db.delete_calendar_days(
-            self.user_id, start_date.isoformat(), end_date.isoformat()
-        )
-        if deleted is False:
-            raise RuntimeError("Calendar could not be rebuilt")
         if days_data:
             saved = await self.db.upsert_calendar_days(days_data)
             if not saved:
@@ -1092,11 +1134,49 @@ class CommandExecutor:
         )
         return True
 
+    async def _read_existing_days(self, start_date: date, end_date: date) -> list:
+        """Read the range one calendar year at a time.
+
+        A single Supabase read stops at 1,000 rows. A rebuild from 2025 through
+        the following years is longer than that, so a one-shot read would drop
+        overrides past the cap. A failed read raises and nothing is written.
+        """
+        rows = []
+        year = start_date.year
+        while year <= end_date.year:
+            chunk_start = max(start_date, date(year, 1, 1))
+            chunk_end = min(end_date, date(year, 12, 31))
+            batch = await self.db.read_calendar_days(
+                self.user_id, chunk_start.isoformat(), chunk_end.isoformat()
+            )
+            rows.extend(batch or [])
+            year += 1
+        return rows
+
 
 def _day_key(value) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()[:10]
     return str(value or "")[:10]
+
+
+def _merge_records(document_rows: list, table_rows: list) -> list:
+    """Document rows first, then table rows that are not the same id or span."""
+    merged = []
+    seen = set()
+    for row in list(document_rows or []) + list(table_rows or []):
+        if not isinstance(row, dict):
+            continue
+        start = _day_key(row.get("start_date") or row.get("date"))
+        end = _day_key(row.get("end_date")) or start
+        key = (str(row.get("id") or ""), start, end, str(row.get("name") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        if start:
+            row = {**row, "start_date": start, "end_date": end}
+        merged.append(row)
+    return merged
 
 
 def _merge_leave_blocks(document_leaves: list, table_leaves: list) -> list:

@@ -10,7 +10,8 @@ from datetime import date
 
 from app.database import Database
 from app.middleware.auth import get_current_user
-from app.engines.calendar_engine import create_calendar_engine
+from app.engines.calendar_engine import create_calendar_engine, generation_bounds
+from app.engines.command_executor import create_command_executor
 from app.engines.calendar_authority import engine_cycle, projection_for_user, remember_cycle
 from loguru import logger
 
@@ -85,8 +86,7 @@ async def create_cycle(
 ):
     """Create a new cycle and auto-generate calendar"""
     db = Database(use_admin=True)
-    engine = create_calendar_engine(user["id"])
-    
+
     logger.info(f"User {user['id']} creating cycle: {data.name}")
     
     # Check tier limits for free users
@@ -143,37 +143,16 @@ async def create_cycle(
     from datetime import date as date_module
     anchor_value = prepared.get("anchor_date") or data.anchor_date
     anchor_date = anchor_value if not isinstance(anchor_value, str) else date_module.fromisoformat(anchor_value[:10])
-    start_date = anchor_date
-    end_date = date_module(anchor_date.year, 12, 31)
+    # 1 Jan of the anchor year through the end of a future year. Days before
+    # the anchor are the rotation projected backwards.
+    start_date, end_date = generation_bounds(anchor_date)
     
     logger.info(f"Auto-generating calendar from {start_date} to {end_date}")
     
     try:
-        days = engine.generate_range(
-            start_date,
-            end_date,
-            prepared,
-            projection.get("leave_blocks") or [],
-            projection.get("constraints") or [],
-        )
-        
-        days_data = [
-            {
-                "user_id": user["id"],
-                "date": d.date.isoformat(),
-                "cycle_id": prepared.get("id") or cycle["id"],
-                "cycle_day": d.cycle_day,
-                "work_type": d.work_type.value,
-                "state_json": d.state_json
-            }
-            for d in days
-        ]
-        
-        # Clear from anchor forward only
-        await db.delete_calendar_days(user["id"], start_date.isoformat(), end_date.isoformat())
-        await db.upsert_calendar_days(days_data)
-        
-        logger.info(f"Generated {len(days_data)} calendar days from {start_date}")
+        executor = create_command_executor(db, user["id"])
+        await executor.rebuild_calendar(start_date, end_date)
+        logger.info(f"Generated calendar days from {start_date} to {end_date}")
     except Exception as e:
         logger.error(f"Failed to auto-generate calendar: {e}")
         # Don't fail the cycle creation, just log the error
@@ -193,7 +172,6 @@ async def update_cycle(
 ):
     """Update an existing cycle and regenerate calendar if needed"""
     db = Database(use_admin=True)
-    engine = create_calendar_engine(user["id"])
 
     # Confirm ownership before any side effects, including deactivating other cycles.
     owned_cycles = await db.get_cycles(user["id"])
@@ -258,39 +236,14 @@ async def update_cycle(
         if anchor_date_str:
             from datetime import date as date_module
             anchor_date = date_module.fromisoformat(str(anchor_date_str)[:10])
-            
-            # Generate from anchor date forward only
-            start_date = anchor_date
-            end_date = date_module(anchor_date.year, 12, 31)
+            start_date, end_date = generation_bounds(anchor_date)
             
             logger.info(f"Regenerating calendar from {start_date} to {end_date} after cycle update")
             
             try:
-                days = engine.generate_range(
-                    start_date,
-                    end_date,
-                    prepared,
-                    projection.get("leave_blocks") or [],
-                    projection.get("constraints") or [],
-                )
-                
-                days_data = [
-                    {
-                        "user_id": user["id"],
-                        "date": d.date.isoformat(),
-                        "cycle_id": prepared.get("id") or cycle["id"],
-                        "cycle_day": d.cycle_day,
-                        "work_type": d.work_type.value,
-                        "state_json": d.state_json
-                    }
-                    for d in days
-                ]
-                
-                # Delete from anchor forward, not entire year
-                await db.delete_calendar_days(user["id"], start_date.isoformat(), end_date.isoformat())
-                await db.upsert_calendar_days(days_data)
-                
-                logger.info(f"Regenerated {len(days_data)} calendar days from {start_date}")
+                executor = create_command_executor(db, user["id"])
+                await executor.rebuild_calendar(start_date, end_date)
+                logger.info(f"Regenerated calendar from {start_date} to {end_date}")
             except Exception as e:
                 logger.error(f"Failed to regenerate calendar: {e}")
     

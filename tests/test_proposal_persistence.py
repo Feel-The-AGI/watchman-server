@@ -72,6 +72,9 @@ class FakeDB:
     async def get_calendar_days(self, user_id, start, end):
         return list(self.days)
 
+    async def read_calendar_days(self, user_id, start, end):
+        return list(self.days)
+
     async def delete_calendar_days(self, user_id, start, end):
         return True
 

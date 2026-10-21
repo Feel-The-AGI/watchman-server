@@ -33,6 +33,15 @@ from app.engines.claude_chat import (
     complete_chat,
     history_to_messages,
 )
+from app.engines.day_status import (
+    CHAT_SAMPLE_DAYS_FORWARD,
+    answer_sentence,
+    combine_events,
+    date_from_query,
+    project_day,
+    schedule_question_date,
+    status_from_stored,
+)
 from app.engines.proposal_effects import explanation_for
 
 
@@ -320,6 +329,25 @@ SEVERITY LEVELS:
         }
     },
     {
+        "name": "query_calendar",
+        "description": (
+            "Answer whether one date is a day shift, a night shift, off, or leave. "
+            "Use this for every question about a date, including dates outside the "
+            "calendar sample, before the anchor, and next year. "
+            "The tool result is the whole answer. Do not add a second guess."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "The date to check, YYYY-MM-DD. Christmas is 12-25 of the upcoming year."
+                }
+            },
+            "required": ["date"]
+        }
+    },
+    {
         "name": "undo",
         "description": "Undo the last change made to the calendar or settings",
         "parameters": {
@@ -398,6 +426,13 @@ Propose ONLY what the latest message asks.
 A tool call becomes one new proposal. Do not bundle an earlier request into it.
 A turn marked declined, approved, or expired is closed.
 Do not call a tool for a closed change unless the latest message asks for that change again.
+
+=== DATE QUESTIONS ===
+A question about whether a date is work, off, or leave is answered by query_calendar.
+That result is the whole reply. Do not add another guess, and do not say the schedule ends where the sample ends.
+The calendar sample below is only the days near today. It is not the last stored day and it is not the end of the rotation.
+Work and off for any date come from the cycle and the anchor, plus leave and commitments.
+A day marked as a manual override is answered from that stored day.
 
 === SAFETY & APPROVAL GUARDRAILS ===
 
@@ -494,7 +529,11 @@ class ChatService:
         self.settings_service = MasterSettingsService(db)
         self.command_executor = CommandExecutor(db, user_id)
 
-    async def _get_calendar_snapshot(self, days_back: int = 30, days_forward: int = 60) -> dict:
+    async def _get_calendar_snapshot(
+        self,
+        days_back: int = 30,
+        days_forward: int = CHAT_SAMPLE_DAYS_FORWARD,
+    ) -> dict:
         """Get a snapshot of the user's calendar for context"""
         today = date.today()
         start_date = today - timedelta(days=days_back)
@@ -544,7 +583,8 @@ class ChatService:
         for month, days in months.items():
             lines.append(f"{month}: {', '.join(days)}")
         header = (
-            f"Stored calendar: {len(result.data)} days from {ordered_dates[0]} to {ordered_dates[-1]}. "
+            f"Sample around today, not the end of the schedule: {len(result.data)} days "
+            f"from {ordered_dates[0]} to {ordered_dates[-1]}. "
             f"day={counts.get('work_day', 0)}, night={counts.get('work_night', 0)}, "
             f"off={counts.get('off', 0)}, blank={counts.get('blank', 0)}."
         )
@@ -672,6 +712,18 @@ class ChatService:
             recent_proposals,
         )
         master_settings = settings_for_prompt(document, projection)
+        asked = schedule_question_date(content, date.today())
+        if asked is not None:
+            answer = await self._answer_about_day(asked, master_settings)
+            assistant_message = await self._save_message("assistant", answer)
+            return {
+                "user_message": user_message,
+                "assistant_message": assistant_message,
+                "response": answer,
+                "is_command": False,
+                "command": None,
+                "proposal": None,
+            }
         applied = rotation_status(master_settings.get("cycle"), calendar)
 
         logger.info(f"[CHAT] User {self.user_id} message: {content[:100]}")
@@ -699,6 +751,22 @@ class ChatService:
             logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")
             response_text = USER_FACING_MODEL_ERROR
             tool = None
+
+        if tool and tool.get("name") == "query_calendar":
+            day = date_from_query(tool.get("input") or {}, date.today())
+            if day is None:
+                answer = "I need one date, like 2026-12-25, to say whether you are working."
+            else:
+                answer = await self._answer_about_day(day, master_settings)
+            assistant_message = await self._save_message("assistant", answer)
+            return {
+                "user_message": user_message,
+                "assistant_message": assistant_message,
+                "response": answer,
+                "is_command": False,
+                "command": None,
+                "proposal": None,
+            }
 
         command = None
         if tool and tool.get("name") and repeats_declined_proposal(
@@ -782,6 +850,50 @@ class ChatService:
             logger.warning(f"[CHAT] Could not load proposals for {self.user_id}: {exc}")
             return []
         return result.data or []
+
+    async def _answer_about_day(self, day, master_settings: dict) -> str:
+        """One sentence. A manual override wins over the projected cycle."""
+        stored = await self._stored_day(day)
+        state = (stored or {}).get("state_json") or {}
+        if isinstance(state, dict) and state.get("manual_override"):
+            return answer_sentence(status_from_stored(stored))
+        table_leaves, table_commitments = await self._table_events()
+        leaves, commitments = combine_events(
+            master_settings.get("leave_blocks"),
+            master_settings.get("commitments"),
+            table_leaves,
+            table_commitments,
+        )
+        return answer_sentence(project_day(
+            master_settings.get("cycle"),
+            day,
+            leaves,
+            commitments,
+        ))
+
+    async def _stored_day(self, day):
+        getter = getattr(self.db, "get_calendar_day", None)
+        if getter is None:
+            return None
+        try:
+            return await getter(self.user_id, day.isoformat())
+        except Exception as exc:
+            logger.warning(f"[CHAT] Could not read {day} for {self.user_id}: {exc}")
+            return None
+
+    async def _table_events(self):
+        leaves = []
+        commitments = []
+        try:
+            get_leave = getattr(self.db, "get_leave_blocks", None)
+            get_commitments = getattr(self.db, "get_commitments", None)
+            if get_leave:
+                leaves = await get_leave(self.user_id) or []
+            if get_commitments:
+                commitments = await get_commitments(self.user_id) or []
+        except Exception as exc:
+            logger.warning(f"[CHAT] Could not load leave or commitments for {self.user_id}: {exc}")
+        return leaves, commitments
 
     async def _save_message(
         self,
