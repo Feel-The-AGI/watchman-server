@@ -73,8 +73,7 @@ async def test_missing_api_key_does_not_call_claude(monkeypatch):
         await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
 
 
-@pytest.mark.asyncio
-async def test_complete_chat_requests_adaptive_thinking(monkeypatch):
+def _capture_client(monkeypatch, settings):
     captured = {}
 
     class Messages:
@@ -89,19 +88,130 @@ async def test_complete_chat_requests_adaptive_thinking(monkeypatch):
             captured["client"] = kwargs
             self.messages = Messages()
 
+    monkeypatch.setattr("app.engines.claude_chat.get_settings", lambda: settings)
+    monkeypatch.setattr("app.engines.claude_chat.anthropic.AsyncAnthropic", Client)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_chat_default_disables_thinking_and_caps_tokens(monkeypatch):
+    captured = _capture_client(monkeypatch, SimpleNamespace(
+        anthropic_api_key="sk-test",
+        anthropic_model="claude-haiku-5-5",
+    ))
+    text, tool = await complete_chat(
+        system="sys",
+        messages=[{"role": "user", "content": "Hi"}],
+        tools=[{"name": "add_leave", "description": "Leave", "parameters": {"type": "object"}}],
+    )
+    assert text == "Done."
+    assert tool is None
+    request = captured["create"]
+    assert request["model"] == "claude-haiku-5-5"
+    assert request["max_tokens"] == 2048
+    assert request["max_tokens"] < 8192
+    assert request["thinking"] == {"type": "disabled"}
+    assert request["thinking"].get("type") != "enabled"
+    assert "budget_tokens" not in request
+    assert "output_config" not in request
+    assert request["tools"][0]["name"] == "add_leave"
+    assert captured["client"]["timeout"] == 30
+
+
+@pytest.mark.asyncio
+async def test_adaptive_effort_is_low_and_leaves_room_for_the_tool_call(monkeypatch):
+    captured = _capture_client(monkeypatch, SimpleNamespace(
+        anthropic_api_key="sk-test",
+        anthropic_model="claude-haiku-5-5",
+        anthropic_thinking="adaptive",
+        anthropic_thinking_effort="low",
+        anthropic_chat_max_tokens=1024,
+        anthropic_timeout_seconds=12,
+    ))
+    await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
+    request = captured["create"]
+    assert request["thinking"] == {"type": "adaptive"}
+    assert "budget_tokens" not in request
+    assert request["output_config"] == {"effort": "low"}
+    assert request["max_tokens"] == 2048
+    assert captured["client"]["timeout"] == 12
+
+
+@pytest.mark.asyncio
+async def test_timeout_propagates_for_the_friendly_chat_error(monkeypatch):
+    class Messages:
+        async def create(self, **kwargs):
+            raise _timeout_error()
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.messages = Messages()
+
+    monkeypatch.setattr(
+        "app.engines.claude_chat.get_settings",
+        lambda: SimpleNamespace(anthropic_api_key="sk-test", anthropic_model="claude-haiku-5-5"),
+    )
+    monkeypatch.setattr("app.engines.claude_chat.anthropic.AsyncAnthropic", Client)
+    with pytest.raises(anthropic.APITimeoutError):
+        await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
+
+
+def _message(stop_reason, tool_name=None):
+    content = []
+    if tool_name:
+        content.append(SimpleNamespace(type="tool_use", name=tool_name, input={"name": "Partial"}))
+    else:
+        content.append(SimpleNamespace(type="text", text="cut off"))
+    return SimpleNamespace(stop_reason=stop_reason, content=content)
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_retries_once_and_does_not_return_a_cutoff_tool(monkeypatch):
+    captured = []
+
+    class Messages:
+        async def create(self, **kwargs):
+            captured.append(kwargs)
+            if len(captured) == 1:
+                return _message("max_tokens", "add_leave")
+            return SimpleNamespace(
+                stop_reason="tool_use",
+                content=[SimpleNamespace(type="tool_use", name="add_leave", input={"name": "Annual"})],
+            )
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.messages = Messages()
+
     monkeypatch.setattr(
         "app.engines.claude_chat.get_settings",
         lambda: SimpleNamespace(anthropic_api_key="sk-test", anthropic_model="claude-haiku-5-5"),
     )
     monkeypatch.setattr("app.engines.claude_chat.anthropic.AsyncAnthropic", Client)
     text, tool = await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
-    assert text == "Done."
-    assert tool is None
-    assert captured["create"]["model"] == "claude-haiku-5-5"
-    assert captured["create"]["thinking"] == {"type": "adaptive"}
-    assert "budget_tokens" not in captured["create"]
-    assert captured["create"]["thinking"].get("type") != "enabled"
-    assert captured["client"]["timeout"] == 30
+    assert text == ""
+    assert tool == {"name": "add_leave", "input": {"name": "Annual"}}
+    assert captured[0]["max_tokens"] == 2048
+    assert captured[1]["max_tokens"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_after_retry_is_a_model_error(monkeypatch):
+    class Messages:
+        async def create(self, **kwargs):
+            return _message("max_tokens", "add_commitment")
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.messages = Messages()
+
+    monkeypatch.setattr(
+        "app.engines.claude_chat.get_settings",
+        lambda: SimpleNamespace(anthropic_api_key="sk-test", anthropic_model="claude-haiku-5-5"),
+    )
+    monkeypatch.setattr("app.engines.claude_chat.anthropic.AsyncAnthropic", Client)
+    with pytest.raises(ModelRequestError):
+        await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
 
 
 @pytest.mark.asyncio
@@ -145,6 +255,18 @@ async def test_missing_key_and_timeout_stay_off_the_user_message(monkeypatch):
     assert "timed out" not in failed["response"].lower()
     assert "anthropic" not in failed["response"].lower()
     service.command_executor.execute.assert_not_called()
+    service.command_executor.create_proposal.assert_not_awaited()
+
+    monkeypatch.setattr(
+        chat_service,
+        "complete_chat",
+        AsyncMock(side_effect=ModelRequestError("cut off")),
+    )
+    cutoff = await service.send_message("Add leave", auto_execute=False)
+    assert cutoff["is_command"] is False
+    assert cutoff["proposal"] is None
+    assert cutoff["response"] == USER_FACING_MODEL_ERROR
+    service.command_executor.create_proposal.assert_not_awaited()
 
     monkeypatch.setattr(
         chat_service,

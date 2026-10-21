@@ -267,7 +267,7 @@ async def test_chat_prompt_says_a_generated_rotation_is_applied(monkeypatch):
     assert "14 off" in system
     assert '"duration": 14' in system
     assert captured["tools"]
-    assert captured["thinking"] == {"type": "adaptive"}
+    assert "thinking" not in captured
 
 
 @pytest.mark.asyncio

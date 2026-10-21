@@ -681,7 +681,6 @@ class ChatService:
                 system=system_prompt,
                 messages=messages,
                 tools=WATCHMAN_TOOLS,
-                thinking={"type": "adaptive"},
             )
         except (ModelRequestError, anthropic.APIError) as e:
             logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")

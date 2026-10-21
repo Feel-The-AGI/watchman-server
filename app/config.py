@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     # Anthropic Claude. Haiku 5.5 is the default chat model.
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-haiku-5-5"
+    # Adaptive thinking tokens count toward max_tokens. The previous chat
+    # call used adaptive thinking with max_tokens 8192 and spent 25-30s.
+    # "disabled" skips that hidden reasoning. "adaptive" keeps it and uses
+    # anthropic_thinking_effort so the budget stays small.
+    anthropic_thinking: str = "disabled"
+    anthropic_thinking_effort: str = "low"
+    anthropic_chat_max_tokens: int = 2048
+    anthropic_timeout_seconds: float = 30
 
     # Paystack. Webhook signatures use paystack_secret_key.
     paystack_secret_key: str = ""  # Set via PAYSTACK_SECRET_KEY env var
