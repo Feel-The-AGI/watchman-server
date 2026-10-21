@@ -259,7 +259,7 @@ def test_oversized_body_is_4xx(live_client):
     _assert_no_leak(response)
 
 
-@pytest.mark.parametrize("header", [None, "Bearer ", "Bearer not-a-jwt"])
+@pytest.mark.parametrize("header", [None, "Bearer", "Bearer not-a-jwt"])
 def test_auth_me_rejects_missing_or_garbage_tokens(live_client, header):
     headers = {"Authorization": header} if header is not None else {}
     response = live_client.get("/api/auth/me", headers=headers)

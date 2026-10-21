@@ -93,6 +93,38 @@ def test_applied_cycle_is_described_even_when_the_document_is_empty():
     assert "14 work day" in status
 
 
+def test_authenticated_profile_update_cannot_set_tier_or_role(app, client, monkeypatch):
+    saved = {}
+
+    class DB:
+        def __init__(self, **kwargs):
+            pass
+
+        async def update_user(self, user_id, data):
+            saved["data"] = data
+            return {"id": user_id, "tier": "free", "role": "user", **data}
+
+    monkeypatch.setattr("app.routes.auth.Database", DB)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "id": "user-1",
+        "email": "a@example.com",
+        "name": "A",
+        "timezone": "UTC",
+        "tier": "free",
+        "role": "user",
+        "onboarding_completed": True,
+        "settings": {},
+    }
+    response = client.patch(
+        "/api/auth/me",
+        json={"name": "A", "tier": "admin", "role": "admin", "email": "evil@example.com"},
+    )
+    assert response.status_code == 200
+    assert saved["data"] == {"name": "A"}
+    assert "tier" not in saved["data"]
+    assert "role" not in saved["data"]
+
+
 def test_profile_with_null_fields_returns_200(app, client):
     app.dependency_overrides[get_current_user] = lambda: {
         "id": "user-1",
