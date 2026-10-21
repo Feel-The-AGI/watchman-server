@@ -1,0 +1,156 @@
+"""A declined, approved, or expired proposal must not be offered again."""
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.engines import chat_service
+from app.engines.chat_context import annotate_closed_proposals, closed_proposal_note
+from app.engines.chat_service import SYSTEM_PROMPT, ChatService
+from app.engines.claude_chat import history_to_messages
+
+
+LEAVE = {
+    "id": "proposal-leave",
+    "message_id": "m-leave",
+    "status": "declined",
+    "created_at": "2026-10-21T20:31:00+00:00",
+    "command": {
+        "action": "add_leave",
+        "payload": {"type": "other", "date": "2026-10-31"},
+        "explanation": "Mark Sat Oct 31 as leave",
+    },
+}
+
+# Newest first, as get_history returns it. The dentist turn is the one just saved.
+HISTORY = [
+    {
+        "id": "m-dentist",
+        "role": "user",
+        "content": "Add a dentist appointment next Tuesday Oct 27 from 3pm to 4pm",
+    },
+    {"id": "m-card", "role": "assistant", "content": "Mark Sat Oct 31 as leave"},
+    {"id": "m-leave", "role": "user", "content": "Mark Saturday Oct 31 as leave"},
+]
+
+
+def test_prompt_proposes_only_the_latest_message():
+    assert "Propose ONLY what the latest message asks." in SYSTEM_PROMPT
+    assert "Do not bundle an earlier request" in SYSTEM_PROMPT
+
+
+def test_declined_leave_is_marked_on_the_old_turns_only():
+    note = closed_proposal_note(LEAVE)
+    assert note == "The user declined this change (Mark Sat Oct 31 as leave). Do not re-propose it."
+    annotated = annotate_closed_proposals(HISTORY, [LEAVE])
+    messages = history_to_messages(annotated, HISTORY[0]["content"])
+    earlier = "\n".join(message["content"] for message in messages[:-1])
+    assert "The user declined this change (Mark Sat Oct 31 as leave). Do not re-propose it." in earlier
+    assert messages[-1] == {
+        "role": "user",
+        "content": "Add a dentist appointment next Tuesday Oct 27 from 3pm to 4pm",
+    }
+    assert "declined" not in messages[-1]["content"].lower()
+    assert "Oct 31" not in messages[-1]["content"]
+
+
+def test_approved_and_expired_are_closed_and_pending_is_not():
+    approved = closed_proposal_note({
+        "status": "approved",
+        "command": {
+            "action": "add_commitment",
+            "payload": {
+                "name": "Dentist appointment",
+                "type": "personal",
+                "start_date": "2026-10-27",
+                "end_date": "2026-10-27",
+                "time_start": "15:00",
+                "time_end": "16:00",
+            },
+            "explanation": "Executing add_commitment",
+        },
+    })
+    assert approved.startswith("The user approved this change (")
+    assert "Do not propose it again." in approved
+    assert "Executing" not in approved
+
+    expired = closed_proposal_note({
+        "status": "expired",
+        "command": {"action": "add_leave", "payload": {"date": "2026-10-31"}, "explanation": ""},
+    })
+    assert expired.startswith("This proposal expired (")
+    assert "Do not re-propose it." in expired
+
+    now = datetime(2026, 10, 21, 21, 0, tzinfo=timezone.utc)
+    still_open = {"status": "pending", "expires_at": (now + timedelta(days=1)).isoformat()}
+    assert closed_proposal_note(still_open, now) is None
+    lapsed = {"status": "pending", "expires_at": (now - timedelta(minutes=1)).isoformat()}
+    assert closed_proposal_note(lapsed, now).startswith("This proposal expired")
+    assert annotate_closed_proposals(HISTORY, [still_open], now) == HISTORY
+
+
+@pytest.mark.asyncio
+async def test_later_turn_is_sent_with_the_declined_note(monkeypatch):
+    service = ChatService.__new__(ChatService)
+    service.user_id = "user-1"
+    service.settings_service = SimpleNamespace(get_snapshot=AsyncMock(return_value={"constraints": []}))
+    service.command_executor = SimpleNamespace(create_proposal=AsyncMock(), execute=AsyncMock())
+
+    class Proposals:
+        def select(self, *args, **kwargs):
+            return self
+
+        def eq(self, *args, **kwargs):
+            return self
+
+        def order(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[LEAVE])
+
+    service.db = SimpleNamespace(client=SimpleNamespace(table=lambda name: Proposals()))
+
+    async def save(role, content, command_id=None):
+        return {"id": "m-dentist", "role": role, "content": content}
+
+    service._save_message = save
+    service._get_calendar_snapshot = AsyncMock(return_value={
+        "text": "calendar", "count": 0, "start": None, "end": None, "counts": {},
+    })
+    service._get_logs_and_incidents = AsyncMock(return_value="logs")
+    service.get_history = AsyncMock(return_value=list(HISTORY))
+    monkeypatch.setattr(chat_service, "projection_for_user", AsyncMock(return_value={
+        "cycle": None, "constraints": [], "leave_blocks": [],
+    }))
+    captured = {}
+
+    async def fake_complete(**kwargs):
+        captured.update(kwargs)
+        return ("I'll add the dentist appointment.", {
+            "name": "add_commitment",
+            "input": {
+                "name": "Dentist appointment",
+                "type": "personal",
+                "start_date": "2026-10-27",
+                "end_date": "2026-10-27",
+                "time_start": "15:00",
+                "time_end": "16:00",
+            },
+        })
+
+    monkeypatch.setattr(chat_service, "complete_chat", fake_complete)
+    dentist = "Add a dentist appointment next Tuesday Oct 27 from 3pm to 4pm"
+    result = await service.send_message(dentist, auto_execute=False)
+    assert "Propose ONLY what the latest message asks." in captured["system"]
+    earlier = "\n".join(message["content"] for message in captured["messages"][:-1])
+    assert "The user declined this change (Mark Sat Oct 31 as leave). Do not re-propose it." in earlier
+    assert captured["messages"][-1]["content"] == dentist
+    assert result["command"]["action"] == "add_commitment"
+    assert result["command"]["payload"]["name"] == "Dentist appointment"
+    assert "leave" not in result["command"]["action"]

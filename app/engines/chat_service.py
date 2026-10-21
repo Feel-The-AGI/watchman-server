@@ -18,6 +18,7 @@ from app.engines.command_executor import CommandExecutor
 from app.engines.chat_context import (
     INTERNAL_PARSE_MAX_TOKENS,
     INTERNAL_PARSE_SYSTEM,
+    annotate_closed_proposals,
     empty_calendar,
     is_hidden_chat_message,
     is_internal_chat_content,
@@ -390,6 +391,12 @@ HISTORY:
    - Perfect for: onboarding periods, transition periods, before rotation became stable
    - Blank days show as untracked - no wrong data is better than wrong data
 
+=== WHAT YOU MAY PROPOSE ===
+Propose ONLY what the latest message asks.
+A tool call becomes one new proposal. Do not bundle an earlier request into it.
+A turn marked declined, approved, or expired is closed.
+Do not call a tool for a closed change unless the latest message asks for that change again.
+
 === SAFETY & APPROVAL GUARDRAILS ===
 
 ALWAYS ASK FOR CONFIRMATION before:
@@ -657,7 +664,10 @@ class ChatService:
         if not isinstance(calendar, dict):
             calendar = {**empty_calendar(), "text": str(calendar)}
         logs_and_incidents = await self._get_logs_and_incidents()
-        chat_history = await self.get_history(limit=10)
+        chat_history = annotate_closed_proposals(
+            await self.get_history(limit=10),
+            await self._recent_proposals(),
+        )
         master_settings = settings_for_prompt(document, projection)
         applied = rotation_status(master_settings.get("cycle"), calendar)
 
@@ -744,6 +754,22 @@ class ChatService:
 
         result["assistant_message"] = assistant_message
         return result
+
+    async def _recent_proposals(self) -> list:
+        """Recent proposals so a closed change can be marked in the next prompt."""
+        client = getattr(self.db, "client", None)
+        if client is None:
+            return []
+        try:
+            result = client.table("proposals").select(
+                "id, message_id, status, command, expires_at, created_at"
+            ).eq("user_id", self.user_id).order(
+                "created_at", desc=True
+            ).limit(30).execute()
+        except Exception as exc:
+            logger.warning(f"[CHAT] Could not load proposals for {self.user_id}: {exc}")
+            return []
+        return result.data or []
 
     async def _save_message(
         self,
