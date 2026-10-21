@@ -262,13 +262,41 @@ def test_only_declines_from_the_last_48_hours_are_blocked():
 def test_the_refusal_tells_the_user_how_to_ask_again():
     assert declined_again_reply(
         "add_leave", {"type": "other", "date": "2026-10-27"}
-    ) == "You declined that change. If you still want it, say 'mark 27 Oct as leave'."
+    ) == (
+        "You declined the leave for 27 Oct a moment ago, so I haven't added it. "
+        "If you'd like it after all, just say 'add leave 27 Oct' and I'll set it up."
+    )
+    assert declined_again_reply(
+        "add_leave",
+        {"start_date": "2026-11-24", "end_date": "2026-11-26", "type": "annual"},
+    ) == (
+        "You declined the leave for 24-26 Nov a moment ago, so I haven't added it. "
+        "If you'd like it after all, just say 'add leave 24-26 Nov' and I'll set it up."
+    )
     assert declined_again_reply(
         "add_commitment",
-        {"name": "Dentist appointment", "start_date": "2026-10-27", "end_date": "2026-10-27"},
+        {"name": "Haircut", "start_date": "2026-11-05", "end_date": "2026-11-05"},
     ) == (
-        "You declined that change. If you still want it, say "
-        "'add Dentist appointment on 27 Oct'."
+        "You declined Haircut for 5 Nov a moment ago, so I haven't added it. "
+        "If you'd like it after all, just say 'add Haircut on 5 Nov' and I'll set it up."
+    )
+
+
+def test_leave_cue_is_a_whole_word():
+    tool = {"type": "other", "date": "2026-10-27"}
+    assert repeats_declined_proposal(
+        "I leave work at 5",
+        "add_leave",
+        tool,
+        [DECLINED_OCT_27],
+        now=NOW,
+    )
+    assert not repeats_declined_proposal(
+        "yes, add leave",
+        "add_leave",
+        tool,
+        [DECLINED_OCT_27],
+        now=NOW,
     )
 
 
@@ -336,7 +364,8 @@ async def test_declined_leave_is_dropped_unless_the_latest_message_asks(monkeypa
     assert unrelated["is_command"] is False
     assert unrelated["command"] is None
     assert unrelated["response"] == (
-        "You declined that change. If you still want it, say 'mark 27 Oct as leave'."
+        "You declined the leave for 27 Oct a moment ago, so I haven't added it. "
+        "If you'd like it after all, just say 'add leave 27 Oct' and I'll set it up."
     )
     assert "command" not in created
 

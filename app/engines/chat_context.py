@@ -286,22 +286,6 @@ _ACTION_CUES = {
     "override_days": ("shift", "override", "work day", "night", "blank"),
     "update_cycle": ("rotation", "cycle", "pattern", "anchor"),
 }
-_MONTH_NAMES = (
-    ("january", "jan"),
-    ("february", "feb"),
-    ("march", "mar"),
-    ("april", "apr"),
-    ("may", "may"),
-    ("june", "jun"),
-    ("july", "jul"),
-    ("august", "aug"),
-    ("september", "sep"),
-    ("october", "oct"),
-    ("november", "nov"),
-    ("december", "dec"),
-)
-
-
 # A decline older than this is no longer blocked. The user can be offered it again.
 DECLINE_GUARD = timedelta(hours=48)
 _SHORT_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -340,16 +324,20 @@ def explicitly_requests(message: str, action: str, payload: Optional[dict]) -> b
 
     The cue is enough on its own. 'mark next Tuesday as leave' and 'day off
     27/10' ask for leave again even though those dates are not absolute.
+    'leave' is a whole word, so 'I leave work at 5' does not ask for leave.
     """
     lowered = (message or "").lower()
-    return any(cue in lowered for cue in _cues(action, payload))
+    return any(_cue_matches(lowered, cue) for cue in _cues(action, payload))
 
 
 def declined_again_reply(action: str, payload: Optional[dict]) -> str:
-    """Tell the user the phrase that asks for this declined change again."""
+    """A warm note that names the change and how to ask for it again."""
+    when = _compact_span(payload)
+    kind, phrase = _decline_kind_and_phrase(action, payload, when)
+    held = "added" if action.startswith("add") or action == "update_leave" else "changed"
     return (
-        "You declined that change. If you still want it, say "
-        f"'{_retry_phrase(action, payload)}'."
+        f"You declined {kind} a moment ago, so I haven't {held} it. "
+        f"If you'd like it after all, just say '{phrase}' and I'll set it up."
     )
 
 
@@ -387,29 +375,48 @@ def _cues(action: str, payload: Optional[dict]) -> list:
     return cues
 
 
-def _retry_phrase(action: str, payload: Optional[dict]) -> str:
-    when = _span_phrase(payload)
+def _cue_matches(text: str, cue: str) -> bool:
+    """Match a cue as a whole word or phrase. 'leave work' is not a leave request."""
+    if cue == "leave":
+        text = re.sub(r"\bleave\s+work\b", " ", text)
+    return re.search(rf"\b{re.escape(cue)}\b", text) is not None
+
+
+def _decline_kind_and_phrase(action: str, payload: Optional[dict], when: str) -> tuple:
     name = str((payload or {}).get("name") or "").strip()
     if action in {"add_leave", "update_leave"}:
-        return f"mark {when} as leave" if when else "mark that date as leave"
+        kind = f"the leave for {when}" if when else "that leave"
+        phrase = f"add leave {when}" if when else "add leave"
+        return kind, phrase
     if action == "remove_leave":
-        return f"remove the leave on {when}" if when else "remove that leave"
+        kind = f"removing the leave for {when}" if when else "removing that leave"
+        phrase = f"remove leave {when}" if when else "remove that leave"
+        return kind, phrase
     if action in {"add_commitment", "update_commitment"}:
         label = name or "that event"
-        return f"add {label} on {when}" if when else f"add {label}"
+        kind = f"{label} for {when}" if when else label
+        phrase = f"add {label} on {when}" if when else f"add {label}"
+        return kind, phrase
     if action == "remove_commitment":
         label = name or "that event"
-        return f"remove {label}" + (f" on {when}" if when else "")
+        kind = f"removing {label}" + (f" on {when}" if when else "")
+        phrase = f"remove {label}" + (f" on {when}" if when else "")
+        return kind, phrase
     if action == "override_days":
-        kind = str((payload or {}).get("work_type") or "that shift").replace("_", " ")
-        return f"set {when} to {kind}" if when else f"set those days to {kind}"
+        shift = str((payload or {}).get("work_type") or "that shift").replace("_", " ")
+        kind = f"the {shift} change for {when}" if when else f"the {shift} change"
+        phrase = f"set {when} to {shift}" if when else f"set those days to {shift}"
+        return kind, phrase
     if action == "update_cycle":
-        return "update the rotation"
+        return "the rotation change", "update the rotation"
     text = (action or "that change").replace("_", " ")
-    return f"{text} on {when}" if when else text
+    kind = f"the {text} for {when}" if when else f"the {text}"
+    phrase = f"{text} on {when}" if when else text
+    return kind, phrase
 
 
-def _span_phrase(payload: Optional[dict]) -> str:
+def _compact_span(payload: Optional[dict]) -> str:
+    """'27 Oct', or '24-26 Nov' when the range stays in one month."""
     span = command_span(payload)
     if span is None:
         return ""
@@ -417,34 +424,13 @@ def _span_phrase(payload: Optional[dict]) -> str:
     end = date.fromisoformat(span[1])
     if start == end:
         return _spoken_day(start)
-    return f"{_spoken_day(start)} to {_spoken_day(end)}"
+    if start.month == end.month and start.year == end.year:
+        return f"{start.day}-{end.day} {_SHORT_MONTHS[start.month - 1]}"
+    return f"{_spoken_day(start)}-{_spoken_day(end)}"
 
 
 def _spoken_day(day: date) -> str:
     return f"{day.day} {_SHORT_MONTHS[day.month - 1]}"
-
-
-def _mentions_span(message: str, span: tuple) -> bool:
-    start = date.fromisoformat(span[0])
-    end = date.fromisoformat(span[1])
-    if not _mentions_day(message, start):
-        return False
-    return start == end or _mentions_day(message, end)
-
-
-def _mentions_day(message: str, day: date) -> bool:
-    if day.isoformat() in (message or ""):
-        return True
-    lowered = (message or "").lower()
-    full, short = _MONTH_NAMES[day.month - 1]
-    number = rf"{day.day}(?:st|nd|rd|th)?"
-    patterns = (
-        rf"\b{number}\s+{full}\b",
-        rf"\b{number}\s+{short}\b",
-        rf"\b{full}\s+{number}\b",
-        rf"\b{short}\s+{number}\b",
-    )
-    return any(re.search(pattern, lowered) for pattern in patterns)
 
 
 def _command(proposal: dict) -> dict:
