@@ -9,14 +9,19 @@ Migration 009 closes browser database permissions that bypass backend authorizat
   `TO service_role`; its unconditional check applies to all granted roles.
 - The admin statistics policy likewise applies to all roles.
 - Public reads of all active calendar shares expose share tokens as a list.
+  Direct share inserts also bypass the API's Pro check. The browser client
+  creates shares through FastAPI (`/api/sharing`), which uses the service role.
 
 These are findings from the checked-in schema, not a claim that the production
 database currently has the same grants or that exploitation has occurred.
 
 The migration removes direct profile/billing writes for browser roles, restricts
-the two service policies to their intended role, and removes public share-list
-access. Existing user-owned reads and backend service operations are preserved.
-It changes privileges and policies without deleting or rewriting user data.
+the two service policies to their intended role, removes public share-list
+access, and removes direct share writes. Explicit SELECT grants keep own-row
+reads for authenticated users. Existing backend service operations are preserved.
+Profile name and timezone updates go through `PATCH /api/auth/me`, which uses
+the service role. It changes privileges and policies without deleting or
+rewriting user data.
 
 ## Validation
 
@@ -27,7 +32,9 @@ in an isolated PostgreSQL instance, applies the migration twice, and verifies:
   subscriptions/payments;
 - those roles cannot read or modify admin statistics;
 - a user can still read their own profile and share, with other shares hidden;
-- the service role can still upgrade a user, record a payment, and resolve shares.
+- a user cannot insert a share directly;
+- the service role can still upgrade a user, record a payment, create a share,
+  and resolve shares.
 
 Run with Node and `@electric-sql/pglite` installed in the module resolution path.
 For an isolated dependency directory, set `PGLITE_PACKAGE_JSON` to its absolute

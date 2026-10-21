@@ -31,8 +31,10 @@ await db.exec(`
   CREATE POLICY users_update_own ON users FOR UPDATE USING(auth.uid() = auth_id);
   CREATE POLICY subscriptions_select_own ON subscriptions FOR SELECT
     USING(user_id IN (SELECT id FROM users WHERE auth_id = auth.uid()));
-  CREATE POLICY subscriptions_insert_own ON subscriptions FOR INSERT WITH CHECK(true);
-  CREATE POLICY subscriptions_update_own ON subscriptions FOR UPDATE USING(true);
+  CREATE POLICY subscriptions_insert_own ON subscriptions FOR INSERT
+    WITH CHECK(user_id IN (SELECT id FROM users WHERE auth_id = auth.uid()));
+  CREATE POLICY subscriptions_update_own ON subscriptions FOR UPDATE
+    USING(user_id IN (SELECT id FROM users WHERE auth_id = auth.uid()));
   CREATE POLICY "Service role can insert payments" ON payments FOR INSERT WITH CHECK(true);
   CREATE POLICY "Users can view own payments" ON payments FOR SELECT
     USING(user_id IN (SELECT id FROM users WHERE auth_id = auth.uid()));
@@ -51,10 +53,26 @@ await db.exec(`
   SELECT set_config('request.jwt.claim.sub','10000000-0000-0000-0000-000000000001',false);
 `);
 
-// Confirm this fixture reproduces the original own-profile escalation.
+// Confirm this fixture reproduces the original authority holes.
 await db.exec(`SET ROLE authenticated; UPDATE users SET tier='admin' WHERE auth_id=auth.uid(); RESET ROLE;`);
 assert.equal((await db.query(`SELECT tier FROM users WHERE id='00000000-0000-0000-0000-000000000001'`)).rows[0].tier, 'admin');
-await db.exec(`UPDATE users SET tier='free';`);
+await db.exec(`
+  SET ROLE authenticated;
+  INSERT INTO subscriptions VALUES ('30000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','pro');
+  INSERT INTO payments VALUES ('40000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001',12);
+  INSERT INTO calendar_shares VALUES ('20000000-0000-0000-0000-000000000003','00000000-0000-0000-0000-000000000001','direct-code',true);
+  RESET ROLE;
+`);
+await db.exec('SET ROLE anon');
+const publicShares = (await db.query('SELECT share_code FROM calendar_shares ORDER BY share_code')).rows.map((row) => row.share_code);
+assert.deepEqual(publicShares, ['direct-code', 'own-code', 'private-code']);
+await db.exec('RESET ROLE');
+await db.exec(`
+  UPDATE users SET tier='free';
+  DELETE FROM subscriptions;
+  DELETE FROM payments;
+  DELETE FROM calendar_shares WHERE share_code='direct-code';
+`);
 const migration = await readFile(new URL('../migrations/009_billing_authority.sql', import.meta.url), 'utf8');
 await db.exec(migration);
 await db.exec(migration); // Safe to rerun.
@@ -73,6 +91,10 @@ for (const role of ['anon', 'authenticated']) {
   else {
     const shares = (await db.query('SELECT share_code FROM calendar_shares')).rows;
     assert.deepEqual(shares, [{ share_code: 'own-code' }]);
+    await assert.rejects(
+      db.exec(`INSERT INTO calendar_shares VALUES ('20000000-0000-0000-0000-000000000009','00000000-0000-0000-0000-000000000001','bypass',true)`),
+      /permission denied/,
+    );
   }
   await db.exec('RESET ROLE');
 }
@@ -80,8 +102,9 @@ await db.exec('SET ROLE authenticated');
 assert.equal((await db.query('SELECT * FROM users')).rows.length, 1);
 await db.exec('RESET ROLE; SET ROLE service_role');
 await db.exec(`UPDATE users SET tier='pro' WHERE id='00000000-0000-0000-0000-000000000001'`);
-await db.exec(`INSERT INTO payments VALUES (gen_random_uuid(),'00000000-0000-0000-0000-000000000001',12)`);
-assert.equal((await db.query('SELECT * FROM calendar_shares')).rows.length, 2);
+await db.exec(`INSERT INTO payments VALUES ('40000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000001',12)`);
+await db.exec(`INSERT INTO calendar_shares VALUES ('20000000-0000-0000-0000-000000000004','00000000-0000-0000-0000-000000000001','service-code',true)`);
+assert.equal((await db.query('SELECT * FROM calendar_shares')).rows.length, 3);
 await db.exec('RESET ROLE');
 await db.close();
 console.log('Billing authority migration passed PostgreSQL role, isolation and repeat-application checks.');
