@@ -43,9 +43,6 @@ ruff
 mypy
 black
 
-# Stripe for payments
-stripe
-
 # Logging
 loguru
 

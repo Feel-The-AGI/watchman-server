@@ -9,8 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from loguru import logger
 import sys
-import asyncio
-import httpx
 import time
 
 from app.config import get_settings
@@ -53,52 +51,18 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
-async def keep_alive_ping():
-    """
-    Background task to ping the server every 4 minutes.
-    Prevents Render free tier from sleeping.
-    """
-    settings = get_settings()
-    
-    # Only run in production
-    if settings.app_env != "production":
-        logger.info("Keep-alive disabled in non-production environment")
-        return
-    
-    # Wait 30 seconds for server to fully start
-    await asyncio.sleep(30)
-    
-    ping_url = "https://watchman-api-dnm0.onrender.com/health"
-    
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                response = await client.get(ping_url, timeout=10)
-                logger.debug(f"Keep-alive ping: {response.status_code}")
-            except Exception as e:
-                logger.warning(f"Keep-alive ping failed: {e}")
-            
-            # Sleep for 4 minutes (240 seconds)
-            await asyncio.sleep(240)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     logger.info("Starting Watchman Server...")
     
-    # Initialize Supabase client
+    # Initialize Supabase client. /health stays up even when this is incomplete
+    # outside production; production refuses to start without it.
     init_supabase()
-    logger.info("Supabase client initialized")
-    
-    # Start keep-alive background task
-    keep_alive_task = asyncio.create_task(keep_alive_ping())
-    logger.info("Keep-alive task started (pings every 4 mins)")
+    logger.info("Supabase startup check finished")
     
     yield
     
-    # Cancel keep-alive on shutdown
-    keep_alive_task.cancel()
     logger.info("Shutting down Watchman Server...")
 
 
@@ -180,7 +144,6 @@ def create_app() -> FastAPI:
             "status": "healthy",
             "environment": settings.app_env,
             "version": "1.0.0",
-            "cors_origins": settings.cors_origins_list
         }
 
     logger.info("=== WATCHMAN API READY ===")
