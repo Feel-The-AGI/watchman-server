@@ -238,8 +238,14 @@ class CommandExecutor:
         try:
             if commitment_id:
                 await self.db.delete_commitment(commitment_id, self.user_id)
+                await self.settings_service.remove_from_list(
+                    self.user_id, "commitments", commitment_id
+                )
             if leave_id:
                 await self.db.delete_leave_block(leave_id, self.user_id)
+                await self.settings_service.remove_from_list(
+                    self.user_id, "leave_blocks", leave_id
+                )
         except Exception as exc:
             logger.error(f"Could not remove orphan row after a failed calendar write: {exc}")
     

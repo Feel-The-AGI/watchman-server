@@ -106,6 +106,8 @@ class Settings:
         return self.snapshot
 
     async def remove_from_list(self, user_id, section, item_id):
+        items = self.snapshot.get(section) or []
+        self.snapshot[section] = [item for item in items if item.get("id") != item_id]
         return self.snapshot
 
 
@@ -154,7 +156,9 @@ async def test_approving_dentist_persists_commitment_and_calendar_day():
 async def test_failed_calendar_write_removes_the_commitment_just_inserted():
     db = FakeDB()
     db.fail_calendar = True
-    executor = _executor(db, Settings(cycle=True))
+    settings = Settings(cycle=True)
+    settings.snapshot["commitments"] = [{"id": "already-there", "name": "Gym"}]
+    executor = _executor(db, settings)
     result = await executor.execute(
         {"action": "add_commitment", "payload": DENTIST, "explanation": "Add it"},
         source="api",
@@ -163,13 +167,18 @@ async def test_failed_calendar_write_removes_the_commitment_just_inserted():
     assert db.commitments == []
     assert db.deleted_commitments
     assert db.deleted_commitments[0][1] == "user-1"
+    assert executor.settings_service.snapshot["commitments"] == [
+        {"id": "already-there", "name": "Gym"}
+    ]
 
 
 @pytest.mark.asyncio
 async def test_failed_calendar_write_removes_the_leave_just_inserted():
     db = FakeDB()
     db.fail_calendar = True
-    executor = _executor(db, Settings(cycle=True))
+    settings = Settings(cycle=True)
+    settings.snapshot["leave_blocks"] = [{"id": "already-there", "name": "Booked leave"}]
+    executor = _executor(db, settings)
     result = await executor.execute(
         {
             "action": "add_leave",
@@ -182,6 +191,9 @@ async def test_failed_calendar_write_removes_the_leave_just_inserted():
     assert db.leaves == []
     assert db.deleted_leaves
     assert db.deleted_leaves[0][1] == "user-1"
+    assert executor.settings_service.snapshot["leave_blocks"] == [
+        {"id": "already-there", "name": "Booked leave"}
+    ]
 
 
 @pytest.mark.asyncio
