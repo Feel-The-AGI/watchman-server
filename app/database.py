@@ -6,11 +6,20 @@ Supabase client initialization and connection management
 from typing import Optional
 from supabase import create_client, Client
 from loguru import logger
+from postgrest.exceptions import APIError
 
 from app.config import get_settings
 
 _supabase_client: Optional[Client] = None
 _supabase_admin_client: Optional[Client] = None
+
+
+def _is_missing_row(exc: Exception) -> bool:
+    """PostgREST .single() raises PGRST116 when the lookup finds nothing."""
+    if not isinstance(exc, APIError) or exc.code != "PGRST116":
+        return False
+    details = f"{exc.message or ''} {exc.details or ''}".lower()
+    return "0 rows" in details
 
 
 def init_supabase() -> None:
@@ -374,6 +383,9 @@ class Database:
             result = self.client.table("commitments").select("*").eq("id", commitment_id).single().execute()
             return result.data if result.data else None
         except Exception as e:
+            if _is_missing_row(e):
+                logger.info(f"[DB] get_commitment: no row for {commitment_id} ({e.code})")
+                return None
             logger.error(f"[DB] Error getting commitment: {e}")
             return None
 

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import date
+from uuid import uuid4
 
 from app.database import Database
 from app.engines.command_executor import PENDING_COMMITMENT_REMOVAL, create_command_executor
@@ -124,32 +125,7 @@ async def create_commitment(
     db = Database(use_admin=True)
     
     logger.info(f"User {user['id']} creating commitment: {data.name} ({data.type})")
-    
-    # Check tier limits for free users
-    tier = user.get("tier", "free")
-    if tier == "free":
-        all_commitments = await db.get_commitments(user["id"])
-        if len(all_commitments) >= 2:
-            logger.warning(f"Free tier user {user['id']} blocked from creating additional commitment")
-            raise HTTPException(
-                status_code=403,
-                detail="You've hit the 2 commitment limit on the free plan. Want to track more? Upgrade to Pro for unlimited commitments."
-            )
-    
-    # Check concurrent commitment limit for education
-    if data.type == "education" and data.status == "active":
-        active_education = await db.get_active_commitments(user["id"])
-        education_count = sum(1 for c in active_education if c.get("type") == "education")
-        
-        settings = user.get("settings", {})
-        max_concurrent = settings.get("max_concurrent_commitments", 2)
-        
-        if education_count >= max_concurrent:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Maximum {max_concurrent} concurrent education commitments allowed. Current: {education_count}"
-            )
-    
+
     commitment_data = {
         "user_id": user["id"],
         "name": data.name,
@@ -171,11 +147,47 @@ async def create_commitment(
         "notes": data.notes,
         "source": "manual"
     }
-    
-    commitment = await db.create_commitment(commitment_data)
-    
+
+    existing_rows = await db.get_commitments(user["id"])
+    matched = _matching_commitment(existing_rows, commitment_data)
+    tier = user.get("tier", "free")
+    if tier == "free" and not matched and len(existing_rows) >= 2:
+        logger.warning(f"Free tier user {user['id']} blocked from creating additional commitment")
+        raise HTTPException(
+            status_code=403,
+            detail="You've hit the 2 commitment limit on the free plan. Want to track more? Upgrade to Pro for unlimited commitments."
+        )
+    if data.type == "education" and data.status == "active":
+        active_education = await db.get_active_commitments(user["id"])
+        education_count = sum(
+            1 for row in active_education
+            if row.get("type") == "education" and (not matched or row.get("id") != matched.get("id"))
+        )
+        max_concurrent = user.get("settings", {}).get("max_concurrent_commitments", 2)
+        if education_count >= max_concurrent:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Maximum {max_concurrent} concurrent education commitments allowed. Current: {education_count}"
+            )
+
+    # A retry of the same request reuses the row already inserted, then finishes
+    # the settings copy and the calendar rebuild.
+    if matched:
+        commitment_data["id"] = matched["id"]
+        commitment = await db.update_commitment(matched["id"], commitment_data) or matched
+    else:
+        commitment_data["id"] = str(uuid4())
+        commitment = await db.create_commitment(commitment_data)
+    if not commitment:
+        raise HTTPException(status_code=500, detail="Commitment could not be saved")
+    try:
+        await _publish_commitment(db, user["id"], commitment)
+    except Exception as exc:
+        logger.error(f"[COMMITMENTS] Create was not fully saved for {commitment.get('id')}: {exc}")
+        raise HTTPException(status_code=500, detail="Commitment could not be saved") from exc
+
     logger.info(f"Commitment created: {commitment.get('id')} for user {user['id']}")
-    
+
     return {
         "success": True,
         "message": "Commitment created",
@@ -184,6 +196,7 @@ async def create_commitment(
 
 
 @router.patch("/{commitment_id}")
+@router.put("/{commitment_id}")
 async def update_commitment(
     commitment_id: str,
     data: UpdateCommitmentRequest,
@@ -241,13 +254,21 @@ async def update_commitment(
     
     if not update_data:
         return {"message": "No changes provided"}
-    
+
     commitment = await db.update_commitment(commitment_id, update_data)
-    
+    if not commitment:
+        raise HTTPException(status_code=500, detail="Commitment could not be saved")
+    saved = {**existing, **commitment}
+    try:
+        await _publish_commitment(db, user["id"], saved)
+    except Exception as exc:
+        logger.error(f"[COMMITMENTS] Update was not fully saved for {commitment_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Commitment could not be saved") from exc
+
     return {
         "success": True,
         "message": "Commitment updated",
-        "data": commitment
+        "data": saved
     }
 
 
@@ -308,6 +329,49 @@ async def delete_commitment(
         "success": True,
         "message": "Commitment deleted"
     }
+
+
+def _same_day(left, right) -> bool:
+    return str(left or "")[:10] == str(right or "")[:10]
+
+
+def _matching_commitment(rows: list, data: dict):
+    """The row a repeated create should finish, matching the chat add path."""
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if (
+            row.get("name") == data.get("name")
+            and row.get("type") == data.get("type")
+            and _same_day(row.get("start_date"), data.get("start_date"))
+        ):
+            return row
+    return None
+
+
+async def _publish_commitment(db: Database, user_id: str, saved: dict):
+    """Keep the settings copy and the calendar in step with this row."""
+    service = MasterSettingsService(db)
+    current = await service.get(user_id)
+    settings = dict(current.get("settings") or {})
+    saved_id = str(saved.get("id") or "")
+    items = []
+    replaced = False
+    for item in settings.get("commitments") or []:
+        if isinstance(item, dict) and str(item.get("id") or "") == saved_id:
+            items.append(saved)
+            replaced = True
+        else:
+            items.append(item)
+    if not replaced:
+        items.append(saved)
+    settings["commitments"] = items
+    await service.update(user_id, settings, current["version"])
+
+    executor = create_command_executor(db, user_id)
+    wrote = await executor._regenerate_calendar()
+    if not wrote:
+        await executor._project_saved_events()
 
 
 def _listed(items, commitment_id: str) -> bool:
