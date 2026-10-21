@@ -7,9 +7,11 @@ API, not only a master-settings document that is still empty.
 """
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.engines.calendar_authority import cycle_is_present
+from app.engines.proposal_effects import describe_command, explanation_for
 
 
 _PROMPT_MARKERS = (
@@ -165,3 +167,124 @@ def empty_calendar() -> dict[str, Any]:
         "end": None,
         "counts": {},
     }
+
+
+_CLOSED_OUTCOMES = {"declined", "approved", "expired"}
+
+
+def proposal_outcome(proposal: Optional[dict], now: Optional[datetime] = None) -> Optional[str]:
+    """Closed outcomes the model must not propose again. Pending stays unmarked."""
+    if not isinstance(proposal, dict):
+        return None
+    status = str(proposal.get("status") or "").strip().lower()
+    if status == "rejected":
+        status = "declined"
+    if status == "pending" and _is_past(proposal.get("expires_at"), now):
+        return "expired"
+    if status in _CLOSED_OUTCOMES:
+        return status
+    return None
+
+
+def closed_proposal_note(proposal: Optional[dict], now: Optional[datetime] = None) -> Optional[str]:
+    """One sentence telling the model a previous change is finished."""
+    outcome = proposal_outcome(proposal, now)
+    if outcome is None or not isinstance(proposal, dict):
+        return None
+    summary = _change_summary(proposal)
+    detail = f" ({summary})" if summary else ""
+    if outcome == "declined":
+        return f"The user declined this change{detail}. Do not re-propose it."
+    if outcome == "approved":
+        return (
+            f"The user approved this change{detail}. "
+            "It is already applied. Do not propose it again."
+        )
+    return f"This proposal expired{detail}. Do not re-propose it."
+
+
+def annotate_closed_proposals(
+    history: Optional[list],
+    proposals: Optional[list],
+    now: Optional[datetime] = None,
+) -> list:
+    """Mark the user turn and the assistant card for a closed proposal.
+
+    ``history`` is newest first, matching get_history. Pending proposals are
+    left as written. The original rows are not mutated.
+    """
+    rows = list(history or [])
+    notes = _notes_by_message(proposals, now)
+    if not notes:
+        return rows
+    oldest_first = list(reversed(rows))
+    annotated = []
+    carry = None
+    for row in oldest_first:
+        if not isinstance(row, dict):
+            annotated.append(row)
+            continue
+        updated = dict(row)
+        content = updated.get("content") or ""
+        note = notes.get(str(updated.get("id") or ""))
+        if note and updated.get("role") == "user":
+            updated["content"] = f"{content}\n\n[{note}]"
+            carry = note
+        elif carry and updated.get("role") == "assistant":
+            updated["content"] = f"{content}\n\n[{carry}]"
+            carry = None
+        annotated.append(updated)
+    return list(reversed(annotated))
+
+
+def _notes_by_message(proposals: Optional[list], now: Optional[datetime]) -> dict:
+    notes = {}
+    ordered = sorted(
+        [item for item in (proposals or []) if isinstance(item, dict)],
+        key=lambda item: str(item.get("created_at") or ""),
+        reverse=True,
+    )
+    for proposal in ordered:
+        message_id = str(proposal.get("message_id") or "")
+        if not message_id or message_id in notes:
+            continue
+        note = closed_proposal_note(proposal, now)
+        if note:
+            notes[message_id] = note
+    return notes
+
+
+def _change_summary(proposal: dict) -> str:
+    command = proposal.get("command") if isinstance(proposal.get("command"), dict) else {}
+    action = str(command.get("action") or "")
+    payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+    text = explanation_for(action, payload, command.get("explanation")) if action else ""
+    if text:
+        return text
+    return describe_command(action, payload) if action else ""
+
+
+def _is_past(value: Any, now: Optional[datetime]) -> bool:
+    expires = _as_datetime(value)
+    if expires is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return expires <= current.astimezone(timezone.utc)
+
+
+def _as_datetime(value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
