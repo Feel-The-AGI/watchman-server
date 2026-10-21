@@ -152,6 +152,34 @@ class Database:
             logger.error(f"[DB] Error creating payment record: {e}")
             return None
 
+    async def get_payment_by_reference(self, reference: str) -> Optional[dict]:
+        """Get a payment recorded for a Paystack reference."""
+        try:
+            result = self.client.table("payments").select("*").eq(
+                "paystack_reference", reference
+            ).limit(1).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error getting payment {reference}: {e}")
+            return None
+
+    async def update_payment_by_reference(
+        self,
+        reference: str,
+        data: dict,
+        status: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Update a payment. Optional status makes the write a compare-and-set."""
+        try:
+            query = self.client.table("payments").update(data).eq("paystack_reference", reference)
+            if status is not None:
+                query = query.eq("status", status)
+            result = query.execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"[DB] Error updating payment {reference}: {e}")
+            return None
+
     async def get_payment_history(self, user_id: str) -> list:
         """Get user's payment history"""
         logger.debug(f"[DB] get_payment_history: {user_id}")

@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 
+from app.billing import monthly_recurring_revenue, paying_user_count
 from app.config import get_settings
 from app.database import Database
 from app.middleware.auth import get_current_user
@@ -114,13 +115,12 @@ async def get_admin_overview(user: dict = Depends(require_admin)):
             if p.get("status") == "paid" and parse_date(p.get("created_at")) and parse_date(p.get("created_at")) >= quarter_ago
         )
         
-        # Average revenue per paying user (ARPPU)
-        paying_count = pro_users + admin_users
-        arppu = round(total_revenue_usd / paying_count, 2) if paying_count > 0 else 0
-        
-        # MRR (Monthly Recurring Revenue) - count pro AND admin (paid admins)
-        paying_users = pro_users + admin_users  # Both pro and admin are paying
-        mrr = paying_users * 12  # $12/month per paying user
+        # Paying users are Pro accounts with current access. Admin accounts are
+        # not customers. A null pro_expires_at is a complimentary grant and is
+        # still counted; migration 010 sets an expiry on users who have paid.
+        paying_users = paying_user_count(all_users, now)
+        arppu = round(total_revenue_usd / paying_users, 2) if paying_users > 0 else 0
+        mrr = monthly_recurring_revenue(all_users, settings.pro_price_usd, now)
         
         # ARR (Annual Recurring Revenue)
         arr = mrr * 12
@@ -192,7 +192,7 @@ async def get_admin_overview(user: dict = Depends(require_admin)):
                 "free": free_users,
                 "pro": pro_users,
                 "admin": admin_users,
-                "paying": pro_users + admin_users,  # Pro + Admin = Paying
+                "paying": paying_users,
                 "onboarded": onboarded_users,
                 "not_onboarded": not_onboarded,
                 "onboarding_rate": onboarding_rate,
