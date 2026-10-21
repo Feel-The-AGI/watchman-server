@@ -222,7 +222,7 @@ async def test_onboarding_parse_is_not_saved_and_skips_tools(monkeypatch):
     assert result["assistant_message"] is None
     assert result["response"] == ONBOARDING_JSON
     assert captured["tools"] is None
-    assert captured["thinking"] is None
+    assert captured["thinking"] == {"type": "adaptive"}
     assert captured["max_tokens"] == 2048
     assert "WATCHMAN_TOOLS" not in str(captured.get("tools"))
 

@@ -25,8 +25,9 @@ INTERNAL_PARSE_SYSTEM = (
     "label is work_day, work_night, or off."
 )
 
-# The parse is a short JSON extraction. Adaptive thinking and the full tool
-# list are what make the onboarding call take 15-20s.
+# The parse is a short JSON extraction. The 15-20s came from sending it
+# through the full tool-using agent with an 8192-token thinking budget.
+# Keep adaptive thinking (this model is called that way) but cap the budget.
 INTERNAL_PARSE_MAX_TOKENS = 2048
 
 

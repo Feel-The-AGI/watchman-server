@@ -603,9 +603,9 @@ class ChatService:
     async def _complete_internal(self, content: str) -> Dict[str, Any]:
         """Parse an onboarding schedule without writing chat history.
 
-        The client asks for one JSON object. Tools, adaptive thinking, and the
-        full calendar prompt make that call take 15-20s and then leave the
-        prompt in the user's conversation.
+        The client asks for one JSON object. Tools and the full calendar prompt
+        make that call take 15-20s and then leave the prompt in the user's
+        conversation. Adaptive thinking stays on, with a 2048 token cap.
         """
         logger.info(f"[CHAT] Internal parse for user {self.user_id} ({len(content)} chars)")
         try:
@@ -614,7 +614,7 @@ class ChatService:
                 messages=[{"role": "user", "content": content}],
                 tools=None,
                 max_tokens=INTERNAL_PARSE_MAX_TOKENS,
-                thinking=None,
+                thinking={"type": "adaptive"},
             )
         except (ModelRequestError, anthropic.APIError) as exc:
             logger.error(f"[CLAUDE] Internal parse failed for user {self.user_id}: {exc}")
