@@ -9,11 +9,17 @@ from typing import Optional, List
 from datetime import date
 
 from app.database import Database
+from app.engines.command_executor import create_command_executor
+from app.engines.master_settings_service import MasterSettingsService
 from app.middleware.auth import get_current_user
 from loguru import logger
 
 
 router = APIRouter()
+
+# Ids removed from the stamped list but not yet rebuilt. A failed rebuild
+# leaves the id here so a retry can finish the calendar write.
+_PENDING_REMOVAL = "commitments_pending_removal"
 
 
 class CommitmentConstraintsSchema(BaseModel):
@@ -59,7 +65,7 @@ async def list_commitments(
     user: dict = Depends(get_current_user)
 ):
     """Get all commitments for the current user"""
-    db = Database()
+    db = Database(use_admin=True)
     commitments = await db.get_commitments(user["id"])
     
     # Filter if needed
@@ -78,7 +84,7 @@ async def list_commitments(
 @router.get("/active")
 async def list_active_commitments(user: dict = Depends(get_current_user)):
     """Get all active commitments"""
-    db = Database()
+    db = Database(use_admin=True)
     commitments = await db.get_active_commitments(user["id"])
     
     return {
@@ -94,7 +100,7 @@ async def get_commitment(
     user: dict = Depends(get_current_user)
 ):
     """Get a specific commitment"""
-    db = Database()
+    db = Database(use_admin=True)
     commitment = await db.get_commitment(commitment_id)
     
     if not commitment:
@@ -115,7 +121,7 @@ async def create_commitment(
     user: dict = Depends(get_current_user)
 ):
     """Create a new commitment"""
-    db = Database()
+    db = Database(use_admin=True)
     
     logger.info(f"User {user['id']} creating commitment: {data.name} ({data.type})")
     
@@ -184,7 +190,7 @@ async def update_commitment(
     user: dict = Depends(get_current_user)
 ):
     """Update a commitment"""
-    db = Database()
+    db = Database(use_admin=True)
     
     # Verify ownership
     existing = await db.get_commitment(commitment_id)
@@ -250,19 +256,85 @@ async def delete_commitment(
     commitment_id: str,
     user: dict = Depends(get_current_user)
 ):
-    """Delete a commitment"""
-    db = Database()
-    
-    # Verify ownership
+    """Delete a commitment.
+
+    Safe to retry. A missing table row is still removed from the settings
+    document, and a failed rebuild stays pending until a later call finishes it.
+    """
+    db = Database(use_admin=True)
+    user_id = user["id"]
     existing = await db.get_commitment(commitment_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Commitment not found")
-    if existing.get("user_id") != user["id"]:
+    if existing and existing.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Not authorized")
-    
-    await db.delete_commitment(commitment_id, user["id"])
-    
+
+    service = MasterSettingsService(db)
+    current = await service.get(user_id)
+    settings = current["settings"] if isinstance(current.get("settings"), dict) else {}
+    in_document = _listed(settings.get("commitments"), commitment_id)
+    pending = commitment_id in _text_ids(settings.get(_PENDING_REMOVAL))
+    if not existing and not in_document and not pending:
+        raise HTTPException(status_code=404, detail="Commitment not found")
+
+    try:
+        if in_document:
+            await service.remove_from_list(user_id, "commitments", commitment_id)
+        if not pending:
+            await _remember_removal(service, user_id, commitment_id)
+    except Exception as exc:
+        logger.error(f"[COMMITMENTS] Settings update failed for {commitment_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Commitment could not be removed") from exc
+
+    if existing:
+        deleted = await db.delete_commitment(commitment_id, user_id)
+        if not deleted and await db.get_commitment(commitment_id):
+            raise HTTPException(status_code=500, detail="Commitment could not be removed")
+
+    executor = create_command_executor(db, user_id)
+    try:
+        wrote = await executor._regenerate_calendar()
+        if not wrote:
+            await executor._project_saved_events()
+    except Exception as exc:
+        logger.error(f"[COMMITMENTS] Rebuild failed for {commitment_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Commitment could not be removed") from exc
+
+    try:
+        await _forget_removal(service, user_id, commitment_id)
+    except Exception as exc:
+        logger.error(f"[COMMITMENTS] Could not clear pending removal for {commitment_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Commitment could not be removed") from exc
+
     return {
         "success": True,
         "message": "Commitment deleted"
     }
+
+
+def _listed(items, commitment_id: str) -> bool:
+    return any(
+        isinstance(item, dict) and str(item.get("id") or "") == commitment_id
+        for item in items or []
+    )
+
+
+def _text_ids(items) -> set:
+    return {str(item) for item in items or []}
+
+
+async def _remember_removal(service: MasterSettingsService, user_id: str, commitment_id: str):
+    current = await service.get(user_id)
+    settings = dict(current["settings"])
+    pending = [item for item in _text_ids(settings.get(_PENDING_REMOVAL)) if item != commitment_id]
+    pending.append(commitment_id)
+    settings[_PENDING_REMOVAL] = pending
+    await service.update(user_id, settings, current["version"])
+
+
+async def _forget_removal(service: MasterSettingsService, user_id: str, commitment_id: str):
+    current = await service.get(user_id)
+    settings = dict(current["settings"])
+    current_ids = _text_ids(settings.get(_PENDING_REMOVAL))
+    if commitment_id not in current_ids:
+        return
+    settings[_PENDING_REMOVAL] = [item for item in current_ids if item != commitment_id]
+    await service.update(user_id, settings, current["version"])
