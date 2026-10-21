@@ -10,6 +10,7 @@ from datetime import date
 
 from app.database import Database
 from app.middleware.auth import get_current_user, get_effective_tier
+from app.engines.calendar_authority import engine_cycle, projection_for_user
 from app.engines.calendar_engine import create_calendar_engine, CALENDAR_ENGINE_VERSION
 
 
@@ -267,10 +268,11 @@ async def generate_calendar(
             )
     
     logger.info(f"User {user['id']} generating calendar for year {data.year}")
-    
-    # Get active cycle
-    cycle = await db.get_active_cycle(user["id"])
-    
+
+    # Master Settings wins. The cycles table is used only when the document has no cycle.
+    projection = await projection_for_user(db, user["id"])
+    cycle = projection.get("cycle")
+
     if not cycle:
         raise HTTPException(
             status_code=400,
@@ -291,39 +293,10 @@ async def generate_calendar(
             "count": len(existing)
         }
     
-    # Get leave blocks
-    leave_blocks = await db.get_leave_blocks(user["id"])
-    
-    # Normalize cycle format for calendar engine
-    # Handle both cycles table format and master_settings format
-    raw_pattern = cycle.get("pattern", [])
-    engine_pattern = []
-    for block in raw_pattern:
-        if "label" in block:
-            engine_pattern.append({"label": block["label"], "duration": block["duration"]})
-        elif "type" in block:
-            engine_pattern.append({"label": block["type"], "duration": block.get("days", block.get("duration", 5))})
-        else:
-            engine_pattern.append(block)
-    
-    # Handle anchor format - support both nested and flat
-    anchor_date_str = None
-    anchor_cycle_day = 1
-    if isinstance(cycle.get("anchor"), dict):
-        anchor_date_str = cycle["anchor"].get("date")
-        anchor_cycle_day = cycle["anchor"].get("cycle_day", 1)
-    if cycle.get("anchor_date"):
-        anchor_date_str = cycle.get("anchor_date") or anchor_date_str
-        anchor_cycle_day = cycle.get("anchor_cycle_day") or anchor_cycle_day
-    
-    # Build normalized cycle for engine
-    cycle_for_engine = {
-        "id": cycle.get("id"),
-        "anchor_date": anchor_date_str,
-        "anchor_cycle_day": anchor_cycle_day,
-        "cycle_length": cycle.get("cycle_length") or cycle.get("total_days") or sum(b.get("duration", b.get("days", 0)) for b in raw_pattern),
-        "pattern": engine_pattern
-    }
+    leave_blocks = projection.get("leave_blocks") or []
+    constraints = projection.get("constraints") or []
+    cycle_for_engine = engine_cycle(cycle)
+    anchor_date_str = cycle_for_engine.get("anchor_date")
     
     if anchor_date_str:
         from datetime import date as date_module
@@ -333,11 +306,13 @@ async def generate_calendar(
         end_date = date_module(data.year, 12, 31)
         
         engine = create_calendar_engine(user["id"])
-        days = engine.generate_range(start_date, end_date, cycle_for_engine, leave_blocks)
+        days = engine.generate_range(
+            start_date, end_date, cycle_for_engine, leave_blocks, constraints
+        )
     else:
         # No anchor - generate full year
         engine = create_calendar_engine(user["id"])
-        days = engine.generate_year(data.year, cycle_for_engine, leave_blocks)
+        days = engine.generate_year(data.year, cycle_for_engine, leave_blocks, constraints)
 
     # Fetch existing days that have manual_override flag to preserve them
     existing_days = await db.get_calendar_days(

@@ -9,6 +9,7 @@ from typing import Optional
 from loguru import logger
 
 from app.database import Database
+from app.engines.calendar_authority import mirror_onboarding_constraints
 from app.middleware.auth import get_current_user
 
 
@@ -88,7 +89,8 @@ async def complete_onboarding(user: dict = Depends(get_current_user)):
 
     # Create default constraints
     logger.info(f"[AUTH_ROUTE] Creating default constraints for user {user.get('id')}")
-    await db.create_default_constraints(user["id"])
+    created = await db.create_default_constraints(user["id"])
+    await mirror_onboarding_constraints(db, user["id"], created)
 
     # Mark onboarding as complete
     await db.complete_onboarding(user["id"])

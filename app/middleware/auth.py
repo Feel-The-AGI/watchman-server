@@ -276,7 +276,10 @@ async def require_pro_tier(
 async def require_admin(
     user: dict = Depends(get_current_user)
 ) -> dict:
-    """Dependency to require admin role"""
+    """Admin access is tier='admin' or role='admin'.
+
+    The live admin account is tier admin with role user, so tier alone is enough.
+    """
     role = user.get("role", "user")
     tier = user.get("tier", "free")
 
