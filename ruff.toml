@@ -1,0 +1,7 @@
+# CI lint is limited to errors that mean the code cannot run.
+# Style findings that already exist in the tree are not gated here.
+
+line-length = 120
+
+[lint]
+select = ["E9", "F821", "F811"]
