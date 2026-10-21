@@ -1,17 +1,22 @@
-# Watchman Server - Render Configuration
-# For deployment on Render.com
+# Watchman API — Render blueprint for a new web service.
+# Create the service from this file, then paste the secret values in the dashboard.
+# Do not put secret values in this file. autoDeploy is off until the stacked
+# security branches are merged to the branch named below.
 
 services:
-  # Production Service (main branch)
   - type: web
     name: watchman-api
-    env: python
+    runtime: python
     region: oregon
     plan: starter
     branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: false
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
       - key: APP_ENV
         value: production
       - key: DEBUG
@@ -26,42 +31,17 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      - key: STRIPE_SECRET_KEY
+      - key: PAYSTACK_SECRET_KEY
         sync: false
-      - key: STRIPE_WEBHOOK_SECRET
+      - key: PAYSTACK_PUBLIC_KEY
         sync: false
-      - key: STRIPE_PRICE_ID_PRO
+      - key: EXCHANGE_RATE_API_KEY
         sync: false
-      - key: CORS_ORIGINS
-        value: https://trywatchman.vercel.app,https://watchman-client.vercel.app,https://watchman.app
-    healthCheckPath: /health
-    autoDeploy: true
-    
-  # Staging Service (dev branch)
-  - type: web
-    name: watchman-api-staging
-    env: python
-    region: oregon
-    plan: starter
-    branch: dev
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: APP_ENV
-        value: staging
-      - key: DEBUG
-        value: true
-      - key: SUPABASE_URL
+      - key: RESEND_API_KEY
         sync: false
-      - key: SUPABASE_ANON_KEY
-        sync: false
-      - key: SUPABASE_SERVICE_KEY
-        sync: false
-      - key: SUPABASE_JWT_SECRET
-        sync: false
-      - key: GEMINI_API_KEY
+      - key: EMAIL_FROM
+        value: Watchman <notifications@trywatchman.app>
+      - key: CRON_SECRET
         sync: false
       - key: CORS_ORIGINS
-        value: https://trywatchman.vercel.app,https://watchman-client.vercel.app
-    healthCheckPath: /health
-    autoDeploy: true
+        value: https://trywatchman.app,https://www.trywatchman.app,https://watchman.app,https://www.watchman.app,https://watchman-client.vercel.app

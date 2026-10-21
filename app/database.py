@@ -14,23 +14,28 @@ _supabase_admin_client: Optional[Client] = None
 
 
 def init_supabase() -> None:
-    """Initialize Supabase clients"""
+    """Initialize Supabase clients. Missing configuration does not point at a default project."""
     global _supabase_client, _supabase_admin_client
-    
+
     settings = get_settings()
-    
+    if not settings.supabase_url or not settings.supabase_anon_key or not settings.supabase_service_key:
+        logger.error("Supabase URL, anon key, and service role key are required")
+        if settings.is_production:
+            raise RuntimeError("Supabase configuration is required in production")
+        return
+
     # Regular client with anon key (respects RLS)
     _supabase_client = create_client(
         settings.supabase_url,
         settings.supabase_anon_key
     )
-    
+
     # Admin client with service role key (bypasses RLS)
     _supabase_admin_client = create_client(
         settings.supabase_url,
         settings.supabase_service_key
     )
-    
+
     logger.info("Supabase clients initialized successfully")
 
 
@@ -38,6 +43,8 @@ def get_supabase() -> Client:
     """Get the regular Supabase client (with RLS)"""
     if _supabase_client is None:
         init_supabase()
+    if _supabase_client is None:
+        raise RuntimeError("Supabase is not configured")
     return _supabase_client
 
 
@@ -45,6 +52,8 @@ def get_supabase_admin() -> Client:
     """Get the admin Supabase client (bypasses RLS)"""
     if _supabase_admin_client is None:
         init_supabase()
+    if _supabase_admin_client is None:
+        raise RuntimeError("Supabase is not configured")
     return _supabase_admin_client
 
 
@@ -111,16 +120,6 @@ class Database:
         """Mark user onboarding as completed"""
         logger.info(f"[DB] complete_onboarding: {user_id}")
         return await self.update_user(user_id, {"onboarding_completed": True})
-
-    async def get_user_by_stripe_customer(self, stripe_customer_id: str) -> Optional[dict]:
-        """Get user by Stripe customer ID (legacy)"""
-        logger.debug(f"[DB] get_user_by_stripe_customer: {stripe_customer_id}")
-        try:
-            result = self.client.table("users").select("*").eq("stripe_customer_id", stripe_customer_id).single().execute()
-            return result.data if result.data else None
-        except Exception as e:
-            logger.error(f"[DB] Error getting user by stripe_customer_id {stripe_customer_id}: {e}")
-            return None
 
     async def get_user_by_paystack_customer(self, paystack_customer_code: str) -> Optional[dict]:
         """Get user by Paystack customer code"""

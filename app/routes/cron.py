@@ -4,6 +4,7 @@ Endpoints for scheduled tasks (weekly summaries, reminders)
 Called by external cron service (cron-job.org) or Render cron jobs
 """
 
+import hmac
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Header
 from loguru import logger
@@ -16,13 +17,12 @@ from app.services.email_service import get_email_service
 router = APIRouter()
 settings = get_settings()
 
-# Simple secret key for cron endpoints (set in env)
-CRON_SECRET = settings.supabase_service_key[:32] if settings.supabase_service_key else "dev-cron-secret"
-
-
 def verify_cron_secret(x_cron_secret: str = Header(None)):
-    """Verify the cron secret to prevent unauthorized access"""
-    if x_cron_secret != CRON_SECRET:
+    """Verify the cron secret. There is no default, and the service key is not reused."""
+    expected = settings.cron_secret
+    if not expected:
+        raise HTTPException(status_code=503, detail="Cron secret is not configured")
+    if not x_cron_secret or not hmac.compare_digest(x_cron_secret, expected):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return True
 
