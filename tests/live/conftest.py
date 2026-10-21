@@ -10,12 +10,16 @@ import pytest
 
 
 def pytest_collection_modifyitems(config, items):
-    if os.environ.get("LIVE_BASE_URL"):
-        return
-    skip = pytest.mark.skip(reason="Set LIVE_BASE_URL to run black-box tests against a deployed API")
+    skip = None
+    if not os.environ.get("LIVE_BASE_URL"):
+        skip = pytest.mark.skip(reason="Set LIVE_BASE_URL to run black-box tests against a deployed API")
+    live = pytest.mark.live
     for item in items:
         path = str(getattr(item, "path", item.fspath)).replace("\\", "/")
-        if "/tests/live/" in path:
+        if "/tests/live/" not in path:
+            continue
+        item.add_marker(live)
+        if skip is not None:
             item.add_marker(skip)
 
 

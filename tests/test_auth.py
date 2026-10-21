@@ -76,7 +76,6 @@ class TestAuthMe:
         # Note: HTTP headers can only contain ASCII, so this is expected to fail
         # at the httpx layer. Unicode tokens would be rejected.
         # This is actually a security feature - we just verify the client rejects it
-        import pytest
         with pytest.raises(UnicodeEncodeError):
             client.get(
                 "/api/auth/me",
