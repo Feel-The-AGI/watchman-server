@@ -300,6 +300,7 @@ async def test_checkout_stores_server_price_before_returning_url(monkeypatch):
     sent = payments.paystack_request.await_args.args[2]
     assert sent["amount"] == 18000
     assert sent["currency"] == "GHS"
+    assert "channels" not in sent
     stored = db.payments["ref_1"]
     assert stored["status"] == "pending"
     assert stored["user_id"] == "alice"

@@ -17,6 +17,21 @@ from app.services.email_service import get_email_service
 router = APIRouter()
 settings = get_settings()
 
+def completed_week_range(today):
+    """Most recent Monday–Sunday week.
+
+    The job is documented to run on Sunday evening. On Sunday that week
+    includes today. On every other day it is the week that ended on the
+    previous Sunday. ``today.weekday() + 7`` skips that Sunday week.
+    """
+    day = today.date() if isinstance(today, datetime) else today
+    if day.weekday() == 6:
+        week_end = day
+    else:
+        week_end = day - timedelta(days=day.weekday() + 1)
+    return week_end - timedelta(days=6), week_end
+
+
 def verify_cron_secret(x_cron_secret: str = Header(None)):
     """Verify the cron secret. There is no default, and the service key is not reused."""
     expected = settings.cron_secret
@@ -55,16 +70,16 @@ async def send_weekly_summaries(x_cron_secret: str = Header(None)):
         logger.error(f"[CRON] Failed to fetch users: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch users")
 
-    # Calculate week range
-    today = datetime.now()
-    week_start = (today - timedelta(days=today.weekday() + 7)).strftime("%Y-%m-%d")
-    week_end = (today - timedelta(days=today.weekday() + 1)).strftime("%Y-%m-%d")
+    # Last completed Monday–Sunday. On Sunday that week includes today.
+    week_start_date, week_end_date = completed_week_range(datetime.now())
+    week_start = week_start_date.strftime("%Y-%m-%d")
+    week_end = week_end_date.strftime("%Y-%m-%d")
 
     sent_count = 0
     error_count = 0
 
     for user in users:
-        user_settings = user.get("settings", {})
+        user_settings = user.get("settings") or {}
 
         # Check if user has email notifications enabled
         if not user_settings.get("notifications_email", False):

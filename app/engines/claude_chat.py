@@ -13,6 +13,11 @@ from app.config import get_settings
 
 
 MODEL_TIMEOUT_SECONDS = 30
+# Adaptive thinking tokens count toward max_tokens. 8192 lets one reply think
+# until it is close to the 30s client timeout, which is why chat turns land
+# around 25-30s. The budget stays high so a tool call is not cut off.
+CHAT_MAX_TOKENS = 8192
+_ADAPTIVE_THINKING = {"type": "adaptive"}
 USER_FACING_MODEL_ERROR = (
     "I'm having trouble reaching Watchman right now. Please try again in a moment."
 )
@@ -93,9 +98,16 @@ async def complete_chat(
     *,
     system: str,
     messages: list,
-    tools: list,
+    tools: Optional[list] = None,
+    max_tokens: int = CHAT_MAX_TOKENS,
+    thinking: Optional[dict] = _ADAPTIVE_THINKING,
 ) -> tuple[str, Optional[dict]]:
-    """Call Claude. Raises ModelRequestError or anthropic.APIError on failure."""
+    """Call Claude. Raises ModelRequestError or anthropic.APIError on failure.
+
+    ``thinking`` defaults to adaptive mode. Pass None for a short extraction
+    that should not spend the token budget on hidden reasoning. Omit ``tools``
+    when the caller wants JSON instead of a tool call.
+    """
     settings = get_settings()
     if not settings.anthropic_api_key:
         raise ModelRequestError("ANTHROPIC_API_KEY is not set")
@@ -104,14 +116,17 @@ async def complete_chat(
         api_key=settings.anthropic_api_key,
         timeout=MODEL_TIMEOUT_SECONDS,
     )
-    response = await client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=8192,
-        system=system,
-        tools=anthropic_tools(tools),
-        messages=messages,
-        thinking={"type": "adaptive"},
-    )
+    request = {
+        "model": settings.anthropic_model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": messages,
+    }
+    if tools:
+        request["tools"] = anthropic_tools(tools)
+    if thinking:
+        request["thinking"] = thinking
+    response = await client.messages.create(**request)
     text, tool = parse_model_response(response)
     if tool:
         logger.info(f"[CLAUDE] Tool called: {tool['name']}")

@@ -13,8 +13,17 @@ import anthropic
 
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
-from app.engines.calendar_authority import effective_constraints
+from app.engines.calendar_authority import projection_for_user
 from app.engines.command_executor import CommandExecutor
+from app.engines.chat_context import (
+    INTERNAL_PARSE_MAX_TOKENS,
+    INTERNAL_PARSE_SYSTEM,
+    empty_calendar,
+    is_hidden_chat_message,
+    is_internal_chat_content,
+    rotation_status,
+    settings_for_prompt,
+)
 from app.engines.claude_chat import (
     USER_FACING_MODEL_ERROR,
     ModelRequestError,
@@ -333,11 +342,14 @@ Today: {current_date}
 Legend: D=Day Shift, N=Night Shift, O=Off, B=Blank/Untracked
 {calendar_snapshot}
 
+=== ROTATION ALREADY ON THE ACCOUNT ===
+{rotation_status}
+
 === USER'S RECENT LOGS & INCIDENTS ===
 {logs_and_incidents}
 
 === YOUR CAPABILITIES (TOOLS) ===
-You have direct access to modify the user's calendar and records. Use these tools - your words alone don't change anything!
+You have direct access to modify the user's calendar and records. A reply that does not call a tool does not change stored data. Data already listed under ROTATION ALREADY ON THE ACCOUNT is saved; do not describe it as missing.
 
 CALENDAR MANAGEMENT:
 • override_days - Change date ranges to: day shifts, night shifts, off days, or blank (untracked)
@@ -472,7 +484,7 @@ class ChatService:
         self.settings_service = MasterSettingsService(db)
         self.command_executor = CommandExecutor(db, user_id)
 
-    async def _get_calendar_snapshot(self, days_back: int = 30, days_forward: int = 60) -> str:
+    async def _get_calendar_snapshot(self, days_back: int = 30, days_forward: int = 60) -> dict:
         """Get a snapshot of the user's calendar for context"""
         today = date.today()
         start_date = today - timedelta(days=days_back)
@@ -489,17 +501,25 @@ class ChatService:
         ).order("date").execute()
 
         if not result.data:
-            return "No calendar data found. User needs to set up their rotation first."
+            return empty_calendar()
 
         # Group by month for readability
         months = {}
+        counts = {}
+        ordered_dates = []
         for day in result.data:
-            d = datetime.fromisoformat(day["date"])
+            raw_date = day.get("date")
+            if hasattr(raw_date, "isoformat"):
+                raw_date = raw_date.isoformat()
+            day_text = str(raw_date)[:10]
+            ordered_dates.append(day_text)
+            d = datetime.fromisoformat(day_text)
             month_key = d.strftime("%Y-%m")
             if month_key not in months:
                 months[month_key] = []
 
-            work_type = day["work_type"]
+            work_type = day.get("work_type") or "?"
+            counts[work_type] = counts.get(work_type, 0) + 1
             symbol_map = {
                 "work_day": "D",
                 "work_night": "N",
@@ -513,8 +533,19 @@ class ChatService:
         lines = []
         for month, days in months.items():
             lines.append(f"{month}: {', '.join(days)}")
+        header = (
+            f"Stored calendar: {len(result.data)} days from {ordered_dates[0]} to {ordered_dates[-1]}. "
+            f"day={counts.get('work_day', 0)}, night={counts.get('work_night', 0)}, "
+            f"off={counts.get('off', 0)}, blank={counts.get('blank', 0)}."
+        )
 
-        return "\n".join(lines)
+        return {
+            "text": header + "\n" + "\n".join(lines),
+            "count": len(result.data),
+            "start": ordered_dates[0],
+            "end": ordered_dates[-1],
+            "counts": counts,
+        }
 
     async def _get_logs_and_incidents(self, days_back: int = 30) -> str:
         """Get recent logs and incidents for context"""
@@ -569,6 +600,35 @@ class ChatService:
 
         return "\n".join(lines) if lines else "No recent logs or incidents."
 
+    async def _complete_internal(self, content: str) -> Dict[str, Any]:
+        """Parse an onboarding schedule without writing chat history.
+
+        The client asks for one JSON object. Tools and the full calendar prompt
+        make that call take 15-20s and then leave the prompt in the user's
+        conversation. Adaptive thinking stays on, with a 2048 token cap.
+        """
+        logger.info(f"[CHAT] Internal parse for user {self.user_id} ({len(content)} chars)")
+        try:
+            response_text, _tool = await complete_chat(
+                system=INTERNAL_PARSE_SYSTEM,
+                messages=[{"role": "user", "content": content}],
+                tools=None,
+                max_tokens=INTERNAL_PARSE_MAX_TOKENS,
+                thinking={"type": "adaptive"},
+            )
+        except (ModelRequestError, anthropic.APIError) as exc:
+            logger.error(f"[CLAUDE] Internal parse failed for user {self.user_id}: {exc}")
+            response_text = USER_FACING_MODEL_ERROR
+        return {
+            "user_message": None,
+            "assistant_message": None,
+            "response": response_text,
+            "is_command": False,
+            "command": None,
+            "proposal": None,
+            "internal": True,
+        }
+
     async def send_message(
         self,
         content: str,
@@ -577,28 +637,39 @@ class ChatService:
         """
         Send a message and get agent response using tool calling.
         """
+        if is_internal_chat_content(content):
+            return await self._complete_internal(content)
+
         # Save user message
         user_message = await self._save_message("user", content)
 
-        # Get full context
-        master_settings = await self.settings_service.get_snapshot(self.user_id)
-        master_settings = dict(master_settings)
-        master_settings["constraints"] = await effective_constraints(
-            self.db, self.user_id, master_settings.get("constraints")
-        )
-        calendar_snapshot = await self._get_calendar_snapshot()
+        # Active cycle comes from Master Settings or the cycles table. The
+        # calendar grid is loaded in the same turn so a generated 14/14 is
+        # visible even when the document cycle is still empty.
+        document = await self.settings_service.get_snapshot(self.user_id)
+        try:
+            projection = await projection_for_user(self.db, self.user_id)
+        except Exception as exc:
+            logger.warning(f"[CHAT] Could not load active cycle for {self.user_id}: {exc}")
+            projection = {}
+        calendar = await self._get_calendar_snapshot()
+        if not isinstance(calendar, dict):
+            calendar = {**empty_calendar(), "text": str(calendar)}
         logs_and_incidents = await self._get_logs_and_incidents()
         chat_history = await self.get_history(limit=10)
+        master_settings = settings_for_prompt(document, projection)
+        applied = rotation_status(master_settings.get("cycle"), calendar)
 
         logger.info(f"[CHAT] User {self.user_id} message: {content[:100]}")
-        logger.info(f"[CHAT] Calendar snapshot length: {len(calendar_snapshot)} chars")
+        logger.info(f"[CHAT] Calendar snapshot length: {len(calendar.get('text') or '')} chars")
         logger.info(f"[CHAT] Logs/incidents length: {len(logs_and_incidents)} chars")
 
         # Build system prompt with full context
         system_prompt = SYSTEM_PROMPT.format(
             master_settings=json.dumps(master_settings, indent=2, default=str),
-            calendar_snapshot=calendar_snapshot,
+            calendar_snapshot=calendar.get("text") or "",
             logs_and_incidents=logs_and_incidents,
+            rotation_status=applied,
             current_date=datetime.now().strftime("%Y-%m-%d")
         )
 
@@ -609,6 +680,7 @@ class ChatService:
                 system=system_prompt,
                 messages=messages,
                 tools=WATCHMAN_TOOLS,
+                thinking={"type": "adaptive"},
             )
         except (ModelRequestError, anthropic.APIError) as e:
             logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")
@@ -644,7 +716,10 @@ class ChatService:
                 if exec_result.get("success"):
                     confirm_text = f"Done! {command.get('explanation', 'Changes applied.')}"
                 else:
-                    confirm_text = f"There was an issue: {exec_result.get('error', 'Unknown error')}"
+                    logger.error(
+                        f"[CHAT] Execution failed for user {self.user_id}: {exec_result.get('error')}"
+                    )
+                    confirm_text = "There was an issue applying that change. Please try again."
 
                 assistant_message = await self._save_message(
                     "assistant",
@@ -693,12 +768,15 @@ class ChatService:
         raise Exception("Failed to save message")
 
     async def get_history(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get chat history for user"""
+        """Visible chat history. Onboarding parse rows are left in the table but not returned."""
+        fetch_limit = min(500, max(limit, limit * 4))
         result = self.db.client.table("chat_messages").select("*").eq(
             "user_id", self.user_id
-        ).order("created_at", desc=True).limit(limit).execute()
+        ).order("created_at", desc=True).limit(fetch_limit).execute()
 
-        return result.data if result.data else []
+        rows = result.data if result.data else []
+        visible = [row for row in rows if not is_hidden_chat_message(row)]
+        return visible[:limit]
 
     async def clear_history(self) -> Dict[str, Any]:
         """Clear chat history for user"""

@@ -142,9 +142,15 @@ async def get_admin_overview(user: dict = Depends(require_admin)):
         
         # Get commitments count
         try:
-            commitments_result = db.client.table("master_settings").select("commitments").execute()
-            total_commitments = sum(len(ms.get("commitments", [])) for ms in (commitments_result.data or []))
-        except:
+            # Commitments live inside master_settings.settings, not a column.
+            commitments_result = db.client.table("master_settings").select("settings").execute()
+            total_commitments = 0
+            for row in commitments_result.data or []:
+                stored = row.get("settings") or {}
+                commitments = stored.get("commitments") if isinstance(stored, dict) else None
+                if isinstance(commitments, list):
+                    total_commitments += len(commitments)
+        except Exception:
             total_commitments = 0
         
         # Get incidents count
@@ -261,7 +267,7 @@ async def get_admin_overview(user: dict = Depends(require_admin)):
         
     except Exception as e:
         logger.error(f"[ADMIN] Error getting stats: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get admin stats: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get admin stats")
 
 
 @router.get("/users")
