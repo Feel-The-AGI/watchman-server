@@ -185,7 +185,8 @@ class CommandExecutor:
         
         # Project onto calendar_days before recording success. A failed write
         # must not look applied: the review route turns that into an error and
-        # puts the proposal back to pending.
+        # puts the proposal back to pending. Drop a row inserted in this call
+        # so a failed calendar write does not leave an orphan.
         try:
             if action != "override_days":
                 wrote = await self._regenerate_calendar()
@@ -195,6 +196,7 @@ class CommandExecutor:
                 logger.info("Skipping calendar regeneration for override_days (manual override should persist)")
         except Exception as e:
             logger.error(f"Calendar projection failed: {e}")
+            await self._drop_inserted_row(result)
             return {
                 "success": False,
                 "error": str(e),
@@ -226,6 +228,20 @@ class CommandExecutor:
             "command_id": command_log["id"],
             "result": result
         }
+
+    async def _drop_inserted_row(self, result: Any) -> None:
+        """Remove the commitment or leave inserted by a command whose calendar write failed."""
+        if not isinstance(result, dict):
+            return
+        commitment_id = result.get("inserted_commitment_id")
+        leave_id = result.get("inserted_leave_id")
+        try:
+            if commitment_id:
+                await self.db.delete_commitment(commitment_id, self.user_id)
+            if leave_id:
+                await self.db.delete_leave_block(leave_id, self.user_id)
+        except Exception as exc:
+            logger.error(f"Could not remove orphan row after a failed calendar write: {exc}")
     
     async def _execute_action(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a specific action type"""
@@ -336,12 +352,15 @@ class CommandExecutor:
             proposal_id=getattr(self, "_proposal_id", None),
         )
         saved = await self._matching_commitment(record)
+        inserted_id = None
         if saved is None:
             saved = await self.db.create_commitment(record)
+            if saved:
+                inserted_id = saved.get("id")
         if not saved:
             raise RuntimeError(f"Commitment {record['name']!r} was not saved")
         await self.settings_service.add_to_list(self.user_id, "commitments", saved)
-        return {"commitment": saved}
+        return {"commitment": saved, "inserted_commitment_id": inserted_id}
 
     async def _matching_commitment(self, record: Dict[str, Any]) -> Optional[dict]:
         rows = await self.db.get_commitments(self.user_id) or []
@@ -364,7 +383,7 @@ class CommandExecutor:
         if not commitment_id:
             raise ValueError("Commitment ID required")
 
-        deleted = await self.db.delete_commitment(commitment_id)
+        deleted = await self.db.delete_commitment(commitment_id, self.user_id)
         if deleted is False:
             raise RuntimeError("Commitment could not be removed")
         await self.settings_service.remove_from_list(self.user_id, "commitments", commitment_id)
@@ -379,12 +398,15 @@ class CommandExecutor:
             proposal_id=getattr(self, "_proposal_id", None),
         )
         saved = await self._matching_leave(record)
+        inserted_id = None
         if saved is None:
             saved = await self.db.create_leave_block(record)
+            if saved:
+                inserted_id = saved.get("id")
         if not saved:
             raise RuntimeError("Leave was not saved")
         await self.settings_service.add_to_list(self.user_id, "leave_blocks", saved)
-        return {"leave": saved}
+        return {"leave": saved, "inserted_leave_id": inserted_id}
 
     async def _matching_leave(self, record: Dict[str, Any]) -> Optional[dict]:
         rows = await self.db.get_leave_blocks(self.user_id) or []

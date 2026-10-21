@@ -1,6 +1,6 @@
 """The approve and decline writes, against Postgres.
 
-Decline used to 500 because proposal_status had no 'rejected' label. Approve
+Decline stores proposal_status declined. Production does not have rejected. Approve
 used to report success without a commitments row or a calendar chip.
 """
 
@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from app.engines.proposal_effects import commitment_record, leave_record, stamp_day_state
+from app.routes.commands import proposal_status_for_decision
 from tests.integration.sql_script import execute_sql_file, migration_paths
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,8 +43,8 @@ def _enum_labels(connection, name):
 
 
 @pytest.mark.integration
-def test_missing_rejected_label_is_what_broke_decline_and_014_fixes_it(database_url):
-    """Replay a drifted database: proposal_status created without 'rejected'."""
+def test_production_enum_accepts_declined_and_rejects_rejected(database_url):
+    """A database whose proposal_status matches production, then migration 014."""
     import psycopg
 
     drifted = (MIGRATIONS / "002_overhaul_architecture.sql").read_text(encoding="utf-8")
@@ -95,16 +96,24 @@ def test_missing_rejected_label_is_what_broke_decline_and_014_fixes_it(database_
 
             execute_sql_file(connection, MIGRATIONS / "014_review_enum_gaps.sql")
             execute_sql_file(connection, MIGRATIONS / "014_review_enum_gaps.sql")
+            stored = proposal_status_for_decision("reject")
             updated = connection.execute(
                 """
-                UPDATE proposals SET status = 'rejected', reviewed_at = now()
+                UPDATE proposals SET status = %s, reviewed_at = now()
                 WHERE id = %s AND status = 'pending'
                 RETURNING status::text
                 """,
-                (proposal_id,),
+                (stored, proposal_id),
             ).fetchone()
-            assert updated[0] == "rejected"
+            assert stored == "declined"
+            assert updated[0] == "declined"
+            with pytest.raises(psycopg.errors.InvalidTextRepresentation):
+                connection.execute(
+                    "UPDATE proposals SET status = 'rejected' WHERE id = %s",
+                    (proposal_id,),
+                )
             assert "other" in _enum_labels(connection, "commitment_type")
+            assert "declined" in _enum_labels(connection, "proposal_status")
     finally:
         admin = psycopg.connect(database_url, autocommit=True)
         admin.execute("DROP DATABASE IF EXISTS watchman_drift")

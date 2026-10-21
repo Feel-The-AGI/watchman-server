@@ -24,7 +24,10 @@ class FakeDB:
         self.leaves = []
         self.upserts = []
         self.fail_commitment = False
+        self.fail_calendar = False
         self.days = []
+        self.deleted_commitments = []
+        self.deleted_leaves = []
 
     async def create_commitment(self, data):
         if self.fail_commitment:
@@ -35,9 +38,17 @@ class FakeDB:
     async def get_commitments(self, user_id):
         return list(self.commitments)
 
-    async def delete_commitment(self, commitment_id):
-        self.commitments = [row for row in self.commitments if row["id"] != commitment_id]
-        return True
+    async def delete_commitment(self, commitment_id, user_id):
+        self.deleted_commitments.append((commitment_id, user_id))
+        kept = []
+        removed = False
+        for row in self.commitments:
+            if row.get("id") == commitment_id and row.get("user_id") == user_id:
+                removed = True
+                continue
+            kept.append(row)
+        self.commitments = kept
+        return removed
 
     async def create_leave_block(self, data):
         self.leaves.append(dict(data))
@@ -47,8 +58,16 @@ class FakeDB:
         return list(self.leaves)
 
     async def delete_leave_block(self, leave_id, user_id):
-        self.leaves = [row for row in self.leaves if row["id"] != leave_id]
-        return True
+        self.deleted_leaves.append((leave_id, user_id))
+        kept = []
+        removed = False
+        for row in self.leaves:
+            if row.get("id") == leave_id and row.get("user_id") == user_id:
+                removed = True
+                continue
+            kept.append(row)
+        self.leaves = kept
+        return removed
 
     async def get_calendar_days(self, user_id, start, end):
         return list(self.days)
@@ -57,6 +76,8 @@ class FakeDB:
         return True
 
     async def upsert_calendar_days(self, days):
+        if self.fail_calendar:
+            return []
         self.upserts = days
         return days
 
@@ -127,6 +148,70 @@ async def test_approving_dentist_persists_commitment_and_calendar_day():
         for row in db.upserts if row["date"] != "2026-10-27"
         for chip in row["state_json"]["commitments"]
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_calendar_write_removes_the_commitment_just_inserted():
+    db = FakeDB()
+    db.fail_calendar = True
+    executor = _executor(db, Settings(cycle=True))
+    result = await executor.execute(
+        {"action": "add_commitment", "payload": DENTIST, "explanation": "Add it"},
+        source="api",
+    )
+    assert result["success"] is False
+    assert db.commitments == []
+    assert db.deleted_commitments
+    assert db.deleted_commitments[0][1] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_failed_calendar_write_removes_the_leave_just_inserted():
+    db = FakeDB()
+    db.fail_calendar = True
+    executor = _executor(db, Settings(cycle=True))
+    result = await executor.execute(
+        {
+            "action": "add_leave",
+            "payload": {"type": "other", "date": "2026-10-31"},
+            "explanation": "Add leave",
+        },
+        source="api",
+    )
+    assert result["success"] is False
+    assert db.leaves == []
+    assert db.deleted_leaves
+    assert db.deleted_leaves[0][1] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_delete_commitment_is_limited_to_the_owner():
+    from types import SimpleNamespace
+
+    from app.database import Database
+
+    calls = []
+
+    class Query:
+        def delete(self):
+            return self
+
+        def eq(self, key, value):
+            calls.append((key, value))
+            return self
+
+        def execute(self):
+            owned = ("user_id", "user-1") in calls
+            return SimpleNamespace(data=[{"id": "c1"}] if owned else [])
+
+    database = Database.__new__(Database)
+    database.client = SimpleNamespace(table=lambda name: Query())
+    assert await database.delete_commitment("c1", "user-1") is True
+    assert ("id", "c1") in calls
+    assert ("user_id", "user-1") in calls
+
+    calls.clear()
+    assert await database.delete_commitment("c1", "someone-else") is False
 
 
 @pytest.mark.asyncio

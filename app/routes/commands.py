@@ -92,8 +92,24 @@ class ExecuteCommandRequest(BaseModel):
     explanation: Optional[str] = None
 
 
+# Production proposal_status is pending, approved, declined, expired.
+# The chat client posts decision "reject". "rejected" is not an enum label.
+DECISION_APPROVE = {"approve", "approved"}
+DECISION_DECLINE = {"reject", "rejected", "decline", "declined"}
+
+
+def proposal_status_for_decision(decision: str) -> str:
+    """Map a review action onto the proposal_status value stored in Postgres."""
+    value = (decision or "").strip().lower()
+    if value in DECISION_APPROVE:
+        return "approved"
+    if value in DECISION_DECLINE:
+        return "declined"
+    raise ValueError(f"Unsupported review decision: {decision}")
+
+
 class ReviewProposalRequest(BaseModel):
-    decision: Literal["approve", "reject"]
+    decision: Literal["approve", "approved", "reject", "rejected", "decline", "declined"]
 
 
 @router.get("/proposals/pending")
@@ -116,7 +132,7 @@ async def review_proposal(
     """Review an owned proposal; execute only its stored command, once."""
     db = Database(use_admin=True)
     now = datetime.now(timezone.utc).isoformat()
-    status = "approved" if request.decision == "approve" else "rejected"
+    status = proposal_status_for_decision(request.decision)
     # Atomic compare-and-set prevents duplicate clicks and concurrent reviews
     # from executing the same proposal twice. Never trust a client command body.
     try:
@@ -131,7 +147,7 @@ async def review_proposal(
     if not result.data:
         raise HTTPException(status_code=409, detail="Proposal unavailable or already reviewed")
     proposal = result.data[0]
-    if request.decision == "reject":
+    if status == "declined":
         return {"success": True, "proposal_id": str(proposal_id), "status": status}
     command = proposal.get("command")
     if not isinstance(command, dict):
@@ -171,7 +187,11 @@ async def review_proposal(
 
 
 def _review_failed(decision: str) -> HTTPException:
-    if decision == "reject":
+    try:
+        declined = proposal_status_for_decision(decision) == "declined"
+    except ValueError:
+        declined = False
+    if declined:
         detail = "The change could not be declined. It is still waiting for review."
     else:
         detail = "The change could not be saved. It is still waiting for review."

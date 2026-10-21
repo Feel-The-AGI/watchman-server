@@ -26,7 +26,7 @@ def flow(monkeypatch):
     }]
 
     seen_filters = []
-    fail = {"rejected": False}
+    fail = {"declined": False}
 
     class Query:
         def __init__(self):
@@ -47,9 +47,9 @@ def flow(monkeypatch):
             self.values = values
             return self
         def execute(self):
-            if fail["rejected"] and self.values and self.values.get("status") == "rejected":
+            if fail["declined"] and self.values and self.values.get("status") == "declined":
                 raise APIError({
-                    "message": 'invalid input value for enum proposal_status: "rejected"',
+                    "message": 'invalid input value for enum proposal_status: "declined"',
                     "code": "22P02",
                     "hint": None,
                     "details": None,
@@ -131,8 +131,10 @@ def test_other_user_cannot_approve_or_read_pending(flow):
 
 
 def test_rejection_is_persisted_and_cannot_be_approved(flow):
-    assert review(flow, decision="reject").status_code == 200
-    assert flow.rows[0]["status"] == "rejected"
+    response = review(flow, decision="reject")
+    assert response.status_code == 200
+    assert response.json()["status"] == "declined"
+    assert flow.rows[0]["status"] == "declined"
     assert review(flow).status_code == 409
     flow.executor.execute.assert_not_awaited()
 
@@ -223,7 +225,7 @@ def test_failed_write_restores_pending_and_is_not_a_success(flow):
 
 
 def test_decline_database_error_stays_pending_without_leaking_the_enum(flow):
-    flow.fail["rejected"] = True
+    flow.fail["declined"] = True
     response = review(flow, decision="reject")
     assert response.status_code == 500
     body = response.json()["detail"]

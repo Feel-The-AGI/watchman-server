@@ -405,12 +405,14 @@ class Database:
             logger.error(f"[DB] Error updating commitment: {e}")
             return None
 
-    async def delete_commitment(self, commitment_id: str) -> bool:
-        """Delete a commitment"""
-        logger.info(f"[DB] delete_commitment: {commitment_id}")
+    async def delete_commitment(self, commitment_id: str, user_id: str) -> bool:
+        """Delete one of this user's commitments. The service key bypasses RLS."""
+        logger.info(f"[DB] delete_commitment: {commitment_id} user={user_id}")
         try:
-            self.client.table("commitments").delete().eq("id", commitment_id).execute()
-            return True
+            result = self.client.table("commitments").delete().eq(
+                "id", commitment_id
+            ).eq("user_id", user_id).execute()
+            return bool(result.data)
         except Exception as e:
             logger.error(f"[DB] Error deleting commitment: {e}")
             return False
