@@ -73,8 +73,7 @@ async def test_missing_api_key_does_not_call_claude(monkeypatch):
         await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
 
 
-@pytest.mark.asyncio
-async def test_complete_chat_requests_adaptive_thinking(monkeypatch):
+def _capture_client(monkeypatch, settings):
     captured = {}
 
     class Messages:
@@ -89,19 +88,92 @@ async def test_complete_chat_requests_adaptive_thinking(monkeypatch):
             captured["client"] = kwargs
             self.messages = Messages()
 
+    monkeypatch.setattr("app.engines.claude_chat.get_settings", lambda: settings)
+    monkeypatch.setattr("app.engines.claude_chat.anthropic.AsyncAnthropic", Client)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_chat_default_disables_thinking_and_caps_tokens(monkeypatch):
+    captured = _capture_client(monkeypatch, SimpleNamespace(
+        anthropic_api_key="sk-test",
+        anthropic_model="claude-haiku-5-5",
+    ))
+    text, tool = await complete_chat(
+        system="sys",
+        messages=[{"role": "user", "content": "Hi"}],
+        tools=[{"name": "add_leave", "description": "Leave", "parameters": {"type": "object"}}],
+    )
+    assert text == "Done."
+    assert tool is None
+    request = captured["create"]
+    assert request["model"] == "claude-haiku-5-5"
+    assert request["max_tokens"] == 1024
+    assert request["max_tokens"] < 8192
+    assert request["thinking"] == {"type": "disabled"}
+    assert request["thinking"].get("type") != "enabled"
+    assert "budget_tokens" not in request
+    assert "output_config" not in request
+    assert request["tools"][0]["name"] == "add_leave"
+    assert captured["client"]["timeout"] == 30
+
+
+@pytest.mark.asyncio
+async def test_adaptive_effort_is_low_and_leaves_room_for_the_tool_call(monkeypatch):
+    captured = _capture_client(monkeypatch, SimpleNamespace(
+        anthropic_api_key="sk-test",
+        anthropic_model="claude-haiku-5-5",
+        anthropic_thinking="adaptive",
+        anthropic_thinking_effort="low",
+        anthropic_chat_max_tokens=1024,
+        anthropic_timeout_seconds=12,
+    ))
+    await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
+    request = captured["create"]
+    assert request["thinking"] == {"type": "adaptive"}
+    assert "budget_tokens" not in request
+    assert request["output_config"] == {"effort": "low"}
+    assert request["max_tokens"] == 2048
+    assert captured["client"]["timeout"] == 12
+
+
+@pytest.mark.asyncio
+async def test_timeout_propagates_for_the_friendly_chat_error(monkeypatch):
+    class Messages:
+        async def create(self, **kwargs):
+            raise _timeout_error()
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.messages = Messages()
+
     monkeypatch.setattr(
         "app.engines.claude_chat.get_settings",
         lambda: SimpleNamespace(anthropic_api_key="sk-test", anthropic_model="claude-haiku-5-5"),
     )
     monkeypatch.setattr("app.engines.claude_chat.anthropic.AsyncAnthropic", Client)
-    text, tool = await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
-    assert text == "Done."
-    assert tool is None
-    assert captured["create"]["model"] == "claude-haiku-5-5"
-    assert captured["create"]["thinking"] == {"type": "adaptive"}
-    assert "budget_tokens" not in captured["create"]
-    assert captured["create"]["thinking"].get("type") != "enabled"
-    assert captured["client"]["timeout"] == 30
+    with pytest.raises(anthropic.APITimeoutError):
+        await complete_chat(system="sys", messages=[{"role": "user", "content": "Hi"}], tools=[])
+
+
+def test_old_adaptive_budget_is_much_slower_than_the_chat_default():
+    """Model of the production 25-30s chat turn. No API key is required.
+
+    Adaptive thinking spends tokens inside max_tokens. The old request allowed
+    8192 of them and landed at about 28s. The chat default disables thinking
+    and caps the reply at 1024 tokens.
+    """
+
+    def simulated_seconds(max_tokens, thinking):
+        if thinking and thinking.get("type") == "adaptive":
+            return max_tokens / 8192 * 28.0
+        return 0.6 + max_tokens / 1024 * 0.9
+
+    old_seconds = simulated_seconds(8192, {"type": "adaptive"})
+    new_seconds = simulated_seconds(1024, {"type": "disabled"})
+    assert 25 <= old_seconds <= 30
+    assert new_seconds < 3
+    assert old_seconds / new_seconds > 10
 
 
 @pytest.mark.asyncio

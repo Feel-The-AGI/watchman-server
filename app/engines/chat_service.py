@@ -616,6 +616,7 @@ class ChatService:
                 tools=None,
                 max_tokens=INTERNAL_PARSE_MAX_TOKENS,
                 thinking={"type": "adaptive"},
+                effort={"effort": "low"},
             )
         except (ModelRequestError, anthropic.APIError) as exc:
             logger.error(f"[CLAUDE] Internal parse failed for user {self.user_id}: {exc}")
@@ -681,7 +682,6 @@ class ChatService:
                 system=system_prompt,
                 messages=messages,
                 tools=WATCHMAN_TOOLS,
-                thinking={"type": "adaptive"},
             )
         except (ModelRequestError, anthropic.APIError) as e:
             logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")
