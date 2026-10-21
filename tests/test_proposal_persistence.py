@@ -38,6 +38,9 @@ class FakeDB:
     async def get_commitments(self, user_id):
         return list(self.commitments)
 
+    async def read_commitments(self, user_id):
+        return list(self.commitments)
+
     async def delete_commitment(self, commitment_id, user_id):
         self.deleted_commitments.append((commitment_id, user_id))
         kept = []
@@ -55,6 +58,9 @@ class FakeDB:
         return dict(data)
 
     async def get_leave_blocks(self, user_id):
+        return list(self.leaves)
+
+    async def read_leave_blocks(self, user_id):
         return list(self.leaves)
 
     async def delete_leave_block(self, leave_id, user_id):

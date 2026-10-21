@@ -140,7 +140,13 @@ class FakeDatabase:
     async def get_leave_blocks(self, user_id):
         return list(STORE.leaves)
 
+    async def read_leave_blocks(self, user_id):
+        return list(STORE.leaves)
+
     async def get_commitments(self, user_id):
+        return list(STORE.commitments)
+
+    async def read_commitments(self, user_id):
         return list(STORE.commitments)
 
     async def get_active_cycle(self, user_id):

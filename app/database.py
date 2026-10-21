@@ -362,6 +362,20 @@ class Database:
             logger.error(f"[DB] Error getting commitments: {e}")
             return []
 
+    async def read_commitments(self, user_id: str) -> list:
+        """Every commitment row for a rebuild. Raises if the read fails.
+
+        get_commitments swallows errors and returns []. A rebuild that treated
+        that as an empty list would drop every commitment chip.
+        """
+        result = self.client.table("commitments").select("*").eq(
+            "user_id", user_id
+        ).limit(1000).execute()
+        rows = result.data or []
+        if len(rows) >= 1000:
+            raise RuntimeError("Commitment read hit the 1000 row cap")
+        return rows
+
     async def get_active_commitments(self, user_id: str) -> list:
         """Get only active commitments for a user"""
         logger.debug(f"[DB] get_active_commitments: user_id={user_id}")
@@ -431,6 +445,20 @@ class Database:
         except Exception as e:
             logger.error(f"[DB] Error getting leave blocks: {e}")
             return []
+
+    async def read_leave_blocks(self, user_id: str) -> list:
+        """Every leave row for a rebuild. Raises if the read fails.
+
+        get_leave_blocks swallows errors and returns []. A rebuild that treated
+        that as an empty list would clear leave from the calendar.
+        """
+        result = self.client.table("leave_blocks").select("*").eq(
+            "user_id", user_id
+        ).limit(1000).execute()
+        rows = result.data or []
+        if len(rows) >= 1000:
+            raise RuntimeError("Leave read hit the 1000 row cap")
+        return rows
 
     async def create_leave_block(self, data: dict) -> dict:
         """Create a new leave block"""

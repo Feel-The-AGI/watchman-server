@@ -25,11 +25,11 @@ END = date(2027, 12, 31)
 
 
 class Settings:
-    def __init__(self):
+    def __init__(self, commitments=None):
         self.snapshot = {
             "cycle": CYCLE,
             "leave_blocks": [],
-            "commitments": [],
+            "commitments": list(commitments or []),
             "constraints": [],
         }
 
@@ -38,19 +38,40 @@ class Settings:
 
 
 class RebuildDB:
-    def __init__(self, days, fail_read=False, fail_upsert=False):
+    def __init__(
+        self,
+        days,
+        fail_read=False,
+        fail_upsert=False,
+        fail_commitments=False,
+        fail_leaves=False,
+    ):
         self.days = days
         self.fail_read = fail_read
         self.fail_upsert = fail_upsert
+        self.fail_commitments = fail_commitments
+        self.fail_leaves = fail_leaves
+        self.commitments = []
+        self.leaves = []
         self.reads = []
         self.wrote = False
         self.deletes = 0
 
     async def get_leave_blocks(self, user_id):
-        return []
+        return list(self.leaves)
+
+    async def read_leave_blocks(self, user_id):
+        if self.fail_leaves:
+            raise RuntimeError("leave read failed")
+        return list(self.leaves)
 
     async def get_commitments(self, user_id):
-        return []
+        return list(self.commitments)
+
+    async def read_commitments(self, user_id):
+        if self.fail_commitments:
+            raise RuntimeError("commitments read failed")
+        return list(self.commitments)
 
     async def read_calendar_days(self, user_id, start, end):
         if self.fail_read:
@@ -79,11 +100,11 @@ class RebuildDB:
         raise AssertionError("rebuild must not delete calendar days")
 
 
-def _executor(db):
+def _executor(db, commitments=None):
     executor = CommandExecutor.__new__(CommandExecutor)
     executor.db = db
     executor.user_id = "user-1"
-    executor.settings_service = Settings()
+    executor.settings_service = Settings(commitments)
     return executor
 
 
@@ -164,3 +185,106 @@ async def test_overrides_past_the_1000_row_cap_are_read_year_by_year():
     assert kept["work_type"] == "blank"
     assert kept["state_json"]["manual_override"] is True
     assert kept["state_json"]["engine_version"] == CALENDAR_ENGINE_VERSION
+
+
+@pytest.mark.asyncio
+async def test_a_failed_commitments_read_keeps_chips_and_writes_nothing():
+    original = _span()
+    original[0]["state_json"]["commitments"] = [{
+        "commitment_id": "dentist",
+        "name": "Dentist appointment",
+    }]
+    before = deepcopy(original)
+    db = RebuildDB(original, fail_commitments=True)
+    with pytest.raises(RuntimeError, match="commitments read failed"):
+        await _executor(db).rebuild_calendar(START, END)
+    assert db.wrote is False
+    assert db.deletes == 0
+    assert db.days == before
+    assert db.days[0]["state_json"]["commitments"][0]["name"] == "Dentist appointment"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_leave_read_keeps_chips_and_writes_nothing():
+    original = _span()
+    original[0]["state_json"]["commitments"] = [{
+        "commitment_id": "dentist",
+        "name": "Dentist appointment",
+    }]
+    original[0]["state_json"]["is_leave"] = True
+    before = deepcopy(original)
+    db = RebuildDB(original, fail_leaves=True)
+    with pytest.raises(RuntimeError, match="leave read failed"):
+        await _executor(db).rebuild_calendar(START, END)
+    assert db.wrote is False
+    assert db.deletes == 0
+    assert db.days == before
+    assert db.days[0]["state_json"]["is_leave"] is True
+    assert db.days[0]["state_json"]["commitments"][0]["name"] == "Dentist appointment"
+
+
+@pytest.mark.asyncio
+async def test_paused_and_completed_commitments_are_not_stamped():
+    day = date(2026, 10, 27).isoformat()
+    original = [{
+        "user_id": "user-1",
+        "date": day,
+        "work_type": "off",
+        "cycle_day": 1,
+        "cycle_id": "cycle-1",
+        "state_json": {
+            "engine_version": 2,
+            "manual_override": False,
+            "is_leave": False,
+            "commitments": [
+                {"commitment_id": "paused-1", "name": "Paused class"},
+                {"commitment_id": "done-1", "name": "Finished course"},
+            ],
+        },
+    }]
+    db = RebuildDB(original)
+    db.commitments = [
+        {
+            "id": "paused-1",
+            "name": "Paused class",
+            "type": "education",
+            "status": "paused",
+            "start_date": day,
+            "end_date": day,
+        },
+        {
+            "id": "done-1",
+            "name": "Finished course",
+            "type": "education",
+            "status": "completed",
+            "start_date": day,
+            "end_date": day,
+        },
+        {
+            "id": "active-1",
+            "name": "Dentist appointment",
+            "type": "personal",
+            "status": "active",
+            "start_date": day,
+            "end_date": day,
+        },
+    ]
+    # The settings copy of the paused class has no status. The table status wins.
+    await _executor(db, commitments=[
+        {
+            "id": "paused-1",
+            "name": "Paused class",
+            "type": "education",
+            "start_date": day,
+            "end_date": day,
+        },
+        {
+            "id": "legacy-1",
+            "name": "Gym",
+            "type": "personal",
+            "start_date": day,
+            "end_date": day,
+        },
+    ]).rebuild_calendar(date(2026, 10, 27), date(2026, 10, 27))
+    names = {chip["name"] for chip in db.days[0]["state_json"]["commitments"]}
+    assert names == {"Dentist appointment", "Gym"}

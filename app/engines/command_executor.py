@@ -1045,10 +1045,12 @@ class CommandExecutor:
             "pattern": engine_pattern
         }
 
-        table_leaves = await self.db.get_leave_blocks(self.user_id) or []
+        # These reads raise. A swallowed empty list would look like "nothing
+        # saved" and the write below would clear chips and leave.
+        table_leaves = await self.db.read_leave_blocks(self.user_id)
         leave_blocks = _merge_leave_blocks(settings.get("leave_blocks") or [], table_leaves)
-        table_commitments = await self.db.get_commitments(self.user_id) or []
-        commitments = _merge_records(settings.get("commitments") or [], table_commitments)
+        table_commitments = await self.db.read_commitments(self.user_id)
+        commitments = _commitments_to_stamp(settings.get("commitments") or [], table_commitments)
 
         constraints = await effective_constraints(
             self.db, self.user_id, settings.get("constraints", [])
@@ -1164,6 +1166,25 @@ def _day_key(value) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()[:10]
     return str(value or "")[:10]
+
+
+def _commitments_to_stamp(document_rows: list, table_rows: list) -> list:
+    """Merge both copies. A status stored on the table row wins for that id."""
+    statuses = {}
+    for row in table_rows or []:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        status = row.get("status")
+        if status is not None and str(status).strip() != "":
+            statuses[str(row["id"])] = status
+    merged = []
+    for row in _merge_records(document_rows, table_rows):
+        row = dict(row)
+        known = statuses.get(str(row.get("id") or ""))
+        if known is not None:
+            row["status"] = known
+        merged.append(row)
+    return merged
 
 
 def _merge_records(document_rows: list, table_rows: list) -> list:

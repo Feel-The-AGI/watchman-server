@@ -127,16 +127,32 @@ def leave_covers(leave: dict, day: date) -> bool:
     return start is not None and end is not None and start <= day <= end
 
 
+def commitment_is_stampable(commitment: dict) -> bool:
+    """Active rows are stamped. A settings record with no status is too.
+
+    Paused, completed, and any other status are not painted onto the day.
+    """
+    if not isinstance(commitment, dict):
+        return False
+    status = commitment.get("status")
+    if status is None or str(status).strip() == "":
+        return True
+    return str(status).strip().lower() == "active"
+
+
 def stamp_day_state(state: Optional[dict], day: date, commitments: list, leaves: list) -> dict:
     """Return the day state with these commitments and leave blocks applied once."""
     base = dict(state or {})
-    known_ids = {item.get("id") for item in commitments if item.get("id")}
+    rows = [item for item in (commitments or []) if isinstance(item, dict)]
+    known_ids = {item.get("id") for item in rows if item.get("id")}
     kept = [
         chip for chip in (base.get("commitments") or [])
         if chip.get("commitment_id") not in known_ids
     ]
     added = []
-    for commitment in commitments:
+    for commitment in rows:
+        if not commitment_is_stampable(commitment):
+            continue
         chip = chip_for_day(commitment, day)
         if chip:
             added.append(chip)
