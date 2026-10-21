@@ -1060,9 +1060,7 @@ class CommandExecutor:
             start_date, end_date, cycle_for_engine, leave_blocks, constraints
         )
 
-        existing_days = await self.db.get_calendar_days(
-            self.user_id, start_date.isoformat(), end_date.isoformat()
-        ) or []
+        existing_days = await self._read_existing_days(start_date, end_date)
         existing_by_date = {}
         manual_override_days = {}
         for existing_day in existing_days:
@@ -1108,8 +1106,8 @@ class CommandExecutor:
             })
             written.add(date_str)
 
-        # An override outside the generated set is still written back. Deleting
-        # the range must not drop a blank mark or a pre-anchor override.
+        # An override the generator did not cover is still included. The write
+        # is one upsert, so a failure leaves the stored rows in place.
         for key, override in manual_override_days.items():
             if key in written:
                 continue
@@ -1125,11 +1123,6 @@ class CommandExecutor:
                 "state_json": state,
             })
 
-        deleted = await self.db.delete_calendar_days(
-            self.user_id, start_date.isoformat(), end_date.isoformat()
-        )
-        if deleted is False:
-            raise RuntimeError("Calendar could not be rebuilt")
         if days_data:
             saved = await self.db.upsert_calendar_days(days_data)
             if not saved:
@@ -1140,6 +1133,25 @@ class CommandExecutor:
             f"from {start_date} (preserved {len(manual_override_days)} manual overrides)"
         )
         return True
+
+    async def _read_existing_days(self, start_date: date, end_date: date) -> list:
+        """Read the range one calendar year at a time.
+
+        A single Supabase read stops at 1,000 rows. A rebuild from 2025 through
+        the following years is longer than that, so a one-shot read would drop
+        overrides past the cap. A failed read raises and nothing is written.
+        """
+        rows = []
+        year = start_date.year
+        while year <= end_date.year:
+            chunk_start = max(start_date, date(year, 1, 1))
+            chunk_end = min(end_date, date(year, 12, 31))
+            batch = await self.db.read_calendar_days(
+                self.user_id, chunk_start.isoformat(), chunk_end.isoformat()
+            )
+            rows.extend(batch or [])
+            year += 1
+        return rows
 
 
 def _day_key(value) -> str:

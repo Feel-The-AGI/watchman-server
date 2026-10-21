@@ -479,6 +479,23 @@ class Database:
             logger.error(f"[DB] Error getting calendar days: {e}")
             return []
 
+    async def read_calendar_days(self, user_id: str, start_date: str, end_date: str) -> list:
+        """Read one window for a rebuild. Raises if the read fails.
+
+        A swallowed error must not look like an empty calendar: rebuild would
+        then treat every manual override as absent and write over it.
+        One calendar year is at most 366 rows, under the 1,000-row read cap.
+        """
+        result = self.client.table("calendar_days").select("*").eq(
+            "user_id", user_id
+        ).gte("date", start_date).lte("date", end_date).order("date").limit(1000).execute()
+        rows = result.data or []
+        if len(rows) >= 1000:
+            raise RuntimeError(
+                f"Calendar read {start_date} to {end_date} hit the 1000 row cap"
+            )
+        return rows
+
     async def get_calendar_day(self, user_id: str, date: str) -> Optional[dict]:
         """Get a specific calendar day"""
         logger.debug(f"[DB] get_calendar_day: user_id={user_id}, date={date}")

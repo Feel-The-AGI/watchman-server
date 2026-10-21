@@ -48,6 +48,7 @@ class Store:
         self.commitments = [COMMITMENT]
         self.leaves = []
         self.deletes = 0
+        self.upserts = 0
         self.days = [
             {
                 "user_id": "user-1",
@@ -133,6 +134,9 @@ class FakeDatabase:
         rows = [day for day in STORE.days if start <= day["date"] <= end]
         return sorted(rows, key=lambda day: day["date"])
 
+    async def read_calendar_days(self, user_id, start, end):
+        return await self.get_calendar_days(user_id, start, end)
+
     async def get_leave_blocks(self, user_id):
         return list(STORE.leaves)
 
@@ -148,6 +152,7 @@ class FakeDatabase:
         return True
 
     async def upsert_calendar_days(self, days):
+        STORE.upserts += 1
         by_date = {day["date"]: day for day in STORE.days}
         for day in days:
             by_date[day["date"]] = day
@@ -184,9 +189,11 @@ async def test_v2_year_keeps_document_leave_override_and_commitment(monkeypatch)
     assert dentist["shift_badge"].startswith("D")
     assert STORE.leaves == []
 
-    deletes_after_first = STORE.deletes
+    upserts_after_first = STORE.upserts
+    assert STORE.deletes == 0
     second = await get_year(2026, {"id": "user-1"})
-    assert STORE.deletes == deletes_after_first
+    assert STORE.upserts == upserts_after_first
+    assert STORE.deletes == 0
     assert _day(second, "2026-01-01")["work_type"] == "blank"
     assert _day(second, "2026-11-02")["state_json"]["is_leave"] is True
     assert [chip["name"] for chip in _day(second, "2026-10-27")["state_json"]["commitments"]] == [

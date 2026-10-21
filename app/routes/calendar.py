@@ -103,16 +103,14 @@ async def get_year(
             logger.info(f"Calendar data for user {user['id']} year {year} is stale (old engine version), regenerating...")
         else:
             logger.info(f"No calendar data for user {user['id']} year {year}, auto-generating...")
-        try:
-            # Same path as an approved chat change: document leave and
-            # leave_blocks are merged, commitments are stamped, overrides stay.
-            start_gen, end_gen = year_bounds(year)
-            executor = create_command_executor(db, user["id"])
-            await executor.rebuild_calendar(start_gen, end_gen)
-            days = await db.get_calendar_days(user["id"], start_date, end_date)
-            logger.info(f"Rebuilt {len(days or [])} days for year {year}")
-        except Exception as e:
-            logger.error(f"Failed to auto-generate calendar for {year}: {e}")
+        # Same path as an approved chat change: document leave and
+        # leave_blocks are merged, commitments are stamped, overrides stay.
+        # A failed read or upsert raises. Nothing was deleted first.
+        start_gen, end_gen = year_bounds(year)
+        executor = create_command_executor(db, user["id"])
+        await executor.rebuild_calendar(start_gen, end_gen)
+        days = await db.get_calendar_days(user["id"], start_date, end_date)
+        logger.info(f"Rebuilt {len(days or [])} days for year {year}")
     
     shown = [present_calendar_day(day) for day in (days or [])]
     return {
