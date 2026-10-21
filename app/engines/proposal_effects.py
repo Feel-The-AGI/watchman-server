@@ -229,12 +229,53 @@ def describe_command(action: str, payload: Optional[dict]) -> str:
     return label[:1].upper() + label[1:] if label else "Update the calendar"
 
 
-def explanation_for(action: str, payload: Optional[dict], model_text: Optional[str]) -> str:
-    """Use the model's sentence only when it actually described the change."""
-    text = (model_text or "").strip()
-    if text and not _is_generic_model_text(text, action):
+def explanation_for(action: str, payload: Optional[dict], model_text: Optional[str] = None) -> str:
+    """Card text the user approves. Always built from the payload.
+
+    The model's sentence is not used here. A date in that sentence can
+    disagree with the dates Apply writes.
+    """
+    return describe_command(action, payload or {})
+
+
+def card_command(command: Optional[dict]) -> dict:
+    """Proposal command whose explanation is the payload summary.
+
+    ``payload`` is copied unchanged. A useful model sentence is kept on
+    ``model_text``, separate from the text the user approves.
+    """
+    source = dict(command or {})
+    action = str(source.get("action") or "")
+    payload = source.get("payload") if isinstance(source.get("payload"), dict) else {}
+    payload = dict(payload)
+    summary = describe_command(action, payload)
+    stored = {
+        key: value
+        for key, value in source.items()
+        if key != "model_text"
+    }
+    stored["action"] = action
+    stored["payload"] = payload
+    stored["explanation"] = summary
+    note = _model_note(
+        action,
+        summary,
+        source.get("model_text"),
+        source.get("explanation"),
+    )
+    if note:
+        stored["model_text"] = note
+    return stored
+
+
+def _model_note(action: str, summary: str, model_text: Any, explanation: Any) -> Optional[str]:
+    """The model's own sentence, when it is not the card text and not a stub."""
+    for candidate in (model_text, explanation):
+        text = str(candidate or "").strip()
+        if not text or text == summary or _is_generic_model_text(text, action):
+            continue
         return text
-    return describe_command(action, payload)
+    return None
 
 
 def _is_generic_model_text(text: str, action: str) -> bool:

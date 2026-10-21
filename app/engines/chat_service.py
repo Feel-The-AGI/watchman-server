@@ -42,7 +42,7 @@ from app.engines.day_status import (
     schedule_question_date,
     status_from_stored,
 )
-from app.engines.proposal_effects import explanation_for
+from app.engines.proposal_effects import card_command
 
 
 # Tool declarations. Claude receives these as input_schema tool definitions.
@@ -780,11 +780,11 @@ class ChatService:
             tool = None
         if tool and tool.get("name"):
             payload = tool.get("input") or {}
-            command = {
+            command = card_command({
                 "action": tool["name"],
                 "payload": payload,
-                "explanation": explanation_for(tool["name"], payload, response_text),
-            }
+                "explanation": response_text,
+            })
 
         result = {
             "user_message": user_message,

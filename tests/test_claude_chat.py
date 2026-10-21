@@ -278,11 +278,13 @@ async def test_missing_key_and_timeout_stay_off_the_user_message(monkeypatch):
     )
     service.command_executor.create_proposal = AsyncMock(return_value={"id": "proposal"})
     ok = await service.send_message("Add leave", auto_execute=False)
-    assert ok["command"] == {
-        "action": "add_leave",
-        "payload": {"name": "Annual", "start_date": "2026-11-01", "end_date": "2026-11-05"},
-        "explanation": "I'll add leave.",
+    assert ok["command"]["action"] == "add_leave"
+    assert ok["command"]["payload"] == {
+        "name": "Annual", "start_date": "2026-11-01", "end_date": "2026-11-05",
     }
+    assert ok["command"]["explanation"] == "Add Annual from Sun 1 Nov to Thu 5 Nov"
+    assert ok["command"]["model_text"] == "I'll add leave."
+    assert ok["response"] == ok["command"]["explanation"]
     assert ok["proposal"]["id"] == "proposal"
     service.command_executor.execute.assert_not_called()
 

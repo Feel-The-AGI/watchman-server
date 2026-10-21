@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from app.engines.calendar_authority import cycle_is_present
-from app.engines.proposal_effects import describe_command, explanation_for
+from app.engines.proposal_effects import describe_command
 
 
 _PROMPT_MARKERS = (
@@ -260,9 +260,6 @@ def _change_summary(proposal: dict) -> str:
     command = proposal.get("command") if isinstance(proposal.get("command"), dict) else {}
     action = str(command.get("action") or "")
     payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
-    text = explanation_for(action, payload, command.get("explanation")) if action else ""
-    if text:
-        return text
     return describe_command(action, payload) if action else ""
 
 

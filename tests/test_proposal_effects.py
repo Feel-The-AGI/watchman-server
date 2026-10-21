@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from app.engines.proposal_effects import describe_command, explanation_for
+from app.engines.proposal_effects import card_command, describe_command, explanation_for
 
 DENTIST = {
     "name": "Dentist appointment",
@@ -27,12 +27,53 @@ def test_empty_tool_text_describes_the_dentist_appointment():
     assert "Executing" not in summary
 
 
-def test_a_real_model_sentence_is_kept():
-    assert explanation_for(
-        "add_leave",
-        {"name": "Annual", "start_date": "2026-11-01", "end_date": "2026-11-05"},
-        "I'll add leave.",
-    ) == "I'll add leave."
+def test_a_model_sentence_does_not_replace_the_payload_dates():
+    payload = {
+        "name": "Dentist appointment",
+        "type": "personal",
+        "start_date": "2026-10-27",
+        "end_date": "2026-10-27",
+        "time_start": "10:00",
+        "time_end": "11:00",
+    }
+    original = dict(payload)
+    card = card_command({
+        "action": "add_commitment",
+        "payload": payload,
+        "explanation": "I'll add the dentist on Fri 6 Nov.",
+    })
+    assert payload == original
+    assert card["payload"] == original
+    assert card["explanation"] == "Add Dentist appointment on Tue 27 Oct, 10\u201311am"
+    assert "Fri" not in card["explanation"]
+    assert "6 Nov" not in card["explanation"]
+    assert card["model_text"] == "I'll add the dentist on Fri 6 Nov."
+
+
+def test_multi_day_leave_card_uses_the_payload_range():
+    card = card_command({
+        "action": "add_leave",
+        "payload": {
+            "type": "annual",
+            "start_date": "2026-11-24",
+            "end_date": "2026-11-26",
+        },
+        "explanation": "I'll book Fri 6 Nov off.",
+    })
+    assert card["explanation"] == "Mark Tue 24 Nov to Thu 26 Nov as leave"
+    assert card["payload"]["start_date"] == "2026-11-24"
+    assert card["payload"]["end_date"] == "2026-11-26"
+    assert card["model_text"] == "I'll book Fri 6 Nov off."
+
+
+def test_a_commitment_card_shows_the_payload_times():
+    card = card_command({
+        "action": "add_commitment",
+        "payload": DENTIST,
+        "explanation": "Executing add_commitment",
+    })
+    assert card["explanation"] == "Add Dentist appointment on Tue 27 Oct, 3\u20134pm"
+    assert "model_text" not in card
 
 
 def test_leave_with_type_other_is_described_from_the_date():
