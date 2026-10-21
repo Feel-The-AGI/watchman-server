@@ -11,6 +11,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from loguru import logger
 
+from app.billing import access_expired
 from app.config import get_settings
 from app.database import Database
 from app.services.email_service import get_email_service
@@ -223,7 +224,7 @@ async def get_current_user(
         except Exception as e:
             logger.warning(f"[AUTH] Failed to update last_active: {e}")
 
-    return user
+    return await _expire_lapsed_pro(db, user)
 
 
 async def get_optional_user(
@@ -243,14 +244,27 @@ async def get_optional_user(
         return None
 
 
+async def _expire_lapsed_pro(db: Database, user: dict) -> dict:
+    """Treat a finished paid period as free for this request and persist it."""
+    if not access_expired(user):
+        return user
+    user["tier"] = "free"
+    try:
+        await db.update_user(user["id"], {"tier": "free"})
+        subscription = await db.get_subscription(user["id"])
+        if subscription and subscription.get("id") and subscription.get("status") != "expired":
+            await db.update_subscription(subscription["id"], {"status": "expired"})
+    except Exception as e:
+        logger.warning(f"[AUTH] Failed to persist expired Pro downgrade: {e}")
+    return user
+
+
 async def require_pro_tier(
     user: dict = Depends(get_current_user)
 ) -> dict:
-    """Dependency to require Pro tier or higher"""
-    tier = user.get("tier", "free")
-    
-    if tier not in ["pro", "admin"]:
-        logger.info(f"Pro feature blocked for user {user.get('id')} (tier: {tier})")
+    """Dependency to require current Pro access. Trial and lapsed Pro are excluded."""
+    if get_effective_tier(user) not in ["pro", "admin"]:
+        logger.info(f"Pro feature blocked for user {user.get('id')} (tier: {user.get('tier')})")
         raise HTTPException(
             status_code=403,
             detail="This feature is part of the Pro plan. Upgrade to unlock intelligent parsing and full statistics."
@@ -313,13 +327,24 @@ def is_in_trial(user: dict) -> bool:
 
 def get_effective_tier(user: dict) -> str:
     """
-    Get the effective tier for a user, considering trial status.
+    Get the effective tier for a user, considering trial status and paid expiry.
     Returns 'trial' if user is in trial period, otherwise their actual tier.
+    A Pro user whose paid period has ended is free (or trial, if still inside it).
+    Complimentary Pro with no expiry stays Pro.
     """
-    actual_tier = user.get("tier", "free")
+    actual_tier = user.get("tier") or "free"
 
-    if actual_tier in ["pro", "admin"]:
-        return actual_tier
+    if actual_tier == "admin":
+        return "admin"
+
+    if actual_tier == "pro" and not access_expired(user):
+        return "pro"
+
+    if actual_tier == "pro" and is_in_trial({**user, "tier": "free"}):
+        return "trial"
+
+    if actual_tier == "pro":
+        return "free"
 
     if is_in_trial(user):
         return "trial"

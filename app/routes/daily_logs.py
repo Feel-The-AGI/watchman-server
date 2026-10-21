@@ -14,7 +14,7 @@ import io
 import time
 
 from app.database import Database
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, require_pro_tier
 
 router = APIRouter()
 
@@ -66,9 +66,9 @@ async def export_daily_logs(
     start_date: str = Query(...),
     end_date: str = Query(...),
     format: str = Query("csv"),
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(require_pro_tier)
 ):
-    """Export daily logs as CSV or PDF"""
+    """Export daily logs as CSV or PDF. Pro access required; trial is excluded."""
     start_time = time.time()
     logger.info(f"[DAILY_LOGS] === EXPORT DAILY LOGS ===")
     logger.info(f"[DAILY_LOGS] User: {user['id']}")

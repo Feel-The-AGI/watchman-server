@@ -14,7 +14,7 @@ import io
 import time
 
 from app.database import Database
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, require_pro_tier
 from app.services.email_service import get_email_service
 
 router = APIRouter()
@@ -117,9 +117,9 @@ async def export_incidents(
     start_date: str = Query(...),
     end_date: str = Query(...),
     format: str = Query("csv"),
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(require_pro_tier)
 ):
-    """Export incidents as CSV or PDF"""
+    """Export incidents as CSV or PDF. Pro access required; trial is excluded."""
     start_time = time.time()
     logger.info(f"[INCIDENTS] === EXPORT INCIDENTS ===")
     logger.info(f"[INCIDENTS] User: {user['id']}")
