@@ -16,7 +16,8 @@ from app.models import (
 
 # CALENDAR ENGINE VERSION - Increment this when calendar generation logic changes
 # This forces regeneration for all users on next fetch
-CALENDAR_ENGINE_VERSION = 2
+# 3: store days before the anchor, and a block_day/shift_badge for D1..N then off.
+CALENDAR_ENGINE_VERSION = 3
 
 
 class CalendarEngine:
@@ -136,11 +137,14 @@ class CalendarEngine:
             )
             
             work_type = self.get_work_type_for_cycle_day(cycle_day, pattern)
+            block_day = block_day_for(cycle_day, pattern)
             
             # Check if this day is a leave day
             is_leave = current_date in leave_dates
             
-            # Build initial state with engine version for staleness detection
+            # Build initial state with engine version for staleness detection.
+            # cycle_day stays the position in the whole rotation. block_day is
+            # 1..N inside the current block, which is the badge (D1..D14, then OFF).
             state = {
                 "commitments": [],
                 "available_hours": self._get_available_hours(work_type, is_leave),
@@ -148,7 +152,9 @@ class CalendarEngine:
                 "is_overloaded": False,
                 "is_leave": is_leave,
                 "tags": [],
-                "engine_version": CALENDAR_ENGINE_VERSION
+                "engine_version": CALENDAR_ENGINE_VERSION,
+                "block_day": block_day,
+                "shift_badge": shift_badge(work_type.value, block_day),
             }
             
             if is_leave:
@@ -419,6 +425,67 @@ class CalendarEngine:
                 errors.append(f"Block {i+1}: Duration must be at least 1 day")
         
         return errors
+
+
+def generation_bounds(anchor: date, today: Optional[date] = None) -> Tuple[date, date]:
+    """Inclusive dates to store for a rotation.
+
+    Starts on 1 Jan of the anchor year, so days before the anchor are the
+    pattern projected backwards (the onboarding preview already does this).
+    Ends on 31 Dec of a later year: at least the year after the anchor, and
+    at least twelve months past today.
+    """
+    today = today or date.today()
+    start = date(anchor.year, 1, 1)
+    rolling = today + timedelta(days=366)
+    end_year = max(anchor.year + 1, today.year + 1, rolling.year)
+    return start, date(end_year, 12, 31)
+
+
+def year_bounds(year: int) -> Tuple[date, date]:
+    """A requested calendar year, including any days before the anchor."""
+    return date(year, 1, 1), date(year, 12, 31)
+
+
+def block_day_for(cycle_day: int, pattern: List[Dict]) -> int:
+    """1-based index inside the pattern block that contains cycle_day."""
+    cursor = 0
+    for block in pattern or []:
+        if not isinstance(block, dict):
+            continue
+        duration = int(block.get("duration") or 0)
+        if duration <= 0:
+            continue
+        if cycle_day <= cursor + duration:
+            return cycle_day - cursor
+        cursor += duration
+    return cycle_day
+
+
+def shift_badge(work_type: str, block_day: int) -> str:
+    """Client badge. Day shifts are D1..N, nights N1..N, and off days are OFF."""
+    if work_type == "work_day":
+        return f"D{block_day}"
+    if work_type == "work_night":
+        return f"N{block_day}"
+    if work_type == "off":
+        return "OFF"
+    return ""
+
+
+def present_calendar_day(day: Optional[dict]) -> Optional[dict]:
+    """Surface block_day and shift_badge next to cycle_day for the client."""
+    if not isinstance(day, dict):
+        return day
+    state = day.get("state_json") or {}
+    if not isinstance(state, dict):
+        return day
+    shown = dict(day)
+    if state.get("block_day") is not None:
+        shown["block_day"] = state["block_day"]
+    if state.get("shift_badge"):
+        shown["shift_badge"] = state["shift_badge"]
+    return shown
 
 
 def create_calendar_engine(user_id: str) -> CalendarEngine:

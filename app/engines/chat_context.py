@@ -128,7 +128,8 @@ def rotation_status(cycle: Optional[dict], calendar: Optional[dict]) -> str:
     cycle_text = describe_cycle(cycle)
     if count:
         span = (
-            f"Calendar days stored: {count} from {summary.get('start')} to {summary.get('end')} "
+            f"Sample of stored days around today, not the end of the schedule: {count} "
+            f"from {summary.get('start')} to {summary.get('end')} "
             f"(day {counts.get('work_day', 0)}, night {counts.get('work_night', 0)}, "
             f"off {counts.get('off', 0)}, blank {counts.get('blank', 0)})."
         )
