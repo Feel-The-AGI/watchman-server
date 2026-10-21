@@ -34,6 +34,10 @@ from app.engines.proposal_effects import (
 
 
 # Command action types
+# A failed commitment delete records ids here until a calendar read finishes the rebuild.
+PENDING_COMMITMENT_REMOVAL = "commitments_pending_removal"
+
+
 VALID_ACTIONS = {
     "update_cycle",
     "add_commitment",
@@ -949,30 +953,62 @@ class CommandExecutor:
         
         raise Exception("Failed to log command")
     
+    async def finish_pending_removals(self) -> bool:
+        """Rebuild for commitment ids a failed delete left behind, then clear them.
+
+        After the table row is gone the user has no delete button to retry.
+        Opening the year is the next read, so it finishes that calendar write.
+        A failed rebuild leaves the ids in place.
+        """
+        current = await self.settings_service.get(self.user_id)
+        settings = current.get("settings") if isinstance(current.get("settings"), dict) else {}
+        pending = [
+            str(item) for item in (settings.get(PENDING_COMMITMENT_REMOVAL) or [])
+            if str(item).strip()
+        ]
+        if not pending:
+            return False
+        wrote = await self._regenerate_calendar()
+        if not wrote:
+            await self._project_saved_events()
+        fresh = await self.settings_service.get(self.user_id)
+        updated = dict(fresh.get("settings") or {})
+        finished = set(pending)
+        updated[PENDING_COMMITMENT_REMOVAL] = [
+            item for item in (updated.get(PENDING_COMMITMENT_REMOVAL) or [])
+            if str(item) not in finished
+        ]
+        await self.settings_service.update(self.user_id, updated, fresh["version"])
+        return True
+
     async def _project_saved_events(self) -> None:
-        """Paint commitment and leave rows onto existing days when no cycle can rebuild them."""
-        commitments = await self.db.get_commitments(self.user_id) or []
-        leaves = await self.db.get_leave_blocks(self.user_id) or []
-        dates = event_dates(commitments, leaves)
+        """Paint saved rows onto existing days when no cycle can rebuild them.
+
+        Commitment and leave reads raise on failure, so a missed read does not
+        look like an empty list and wipe the calendar. A chip whose commitment
+        is gone is dropped.
+        """
+        commitments = await self.db.read_commitments(self.user_id)
+        leaves = await self.db.read_leave_blocks(self.user_id)
+        dates = set(event_dates(commitments, leaves))
+        by_date, chip_days = await self._days_with_commitment_chips(dates)
+        dates.update(chip_days)
         if not dates:
             return
-        start = min(dates).isoformat()
-        end = max(dates).isoformat()
-        existing = await self.db.get_calendar_days(self.user_id, start, end) or []
-        by_date = {_day_key(day.get("date")): day for day in existing}
         updates = []
-        for day in dates:
+        for day in sorted(dates):
             key = day.isoformat()
             current = by_date.get(key) or {}
-            base = current.get("state_json") or {
-                "commitments": [],
-                "available_hours": 12.0,
-                "used_hours": 0,
-                "is_overloaded": False,
-                "is_leave": False,
-                "tags": [],
-                "engine_version": CALENDAR_ENGINE_VERSION,
-            }
+            base = _without_removed_commitments(current.get("state_json"), commitments)
+            if not current.get("state_json"):
+                base.update({
+                    "available_hours": 12.0,
+                    "used_hours": 0,
+                    "is_overloaded": False,
+                    "is_leave": False,
+                    "tags": [],
+                    "engine_version": CALENDAR_ENGINE_VERSION,
+                })
             updates.append({
                 "user_id": self.user_id,
                 "date": key,
@@ -984,6 +1020,29 @@ class CommandExecutor:
         saved = await self.db.upsert_calendar_days(updates)
         if not saved:
             raise RuntimeError("Calendar was not updated")
+
+    async def _days_with_commitment_chips(self, event_days: set):
+        """Stored days that already show a commitment, so a deleted one can be cleared."""
+        today = date.today()
+        years = set(range((today - timedelta(days=400)).year, (today + timedelta(days=800)).year + 1))
+        for day in event_days:
+            years.add(day.year)
+        by_date = {}
+        found = set()
+        for year in sorted(years):
+            rows = await self.db.read_calendar_days(
+                self.user_id, date(year, 1, 1).isoformat(), date(year, 12, 31).isoformat()
+            )
+            for row in rows or []:
+                key = _day_key(row.get("date"))
+                by_date[key] = row
+                state = row.get("state_json") or {}
+                if not state.get("commitments"):
+                    continue
+                parsed = _parse_day(key)
+                if parsed is not None:
+                    found.add(parsed)
+        return by_date, found
 
     async def _regenerate_calendar(self) -> bool:
         """Rebuild from 1 Jan of the anchor year through the next year."""
@@ -1165,6 +1224,33 @@ class CommandExecutor:
             rows.extend(batch or [])
             year += 1
         return rows
+
+
+def _without_removed_commitments(state, commitments: list) -> dict:
+    base = dict(state or {})
+    current_ids = {
+        item.get("id") for item in commitments or []
+        if isinstance(item, dict) and item.get("id")
+    }
+    kept = []
+    for chip in base.get("commitments") or []:
+        if not isinstance(chip, dict):
+            continue
+        chip_id = chip.get("commitment_id")
+        if chip_id and chip_id not in current_ids:
+            continue
+        kept.append(chip)
+    base["commitments"] = kept
+    return base
+
+
+def _parse_day(value: str):
+    if len(value or "") < 10:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
 
 
 def _day_key(value) -> str:

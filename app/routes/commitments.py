@@ -9,7 +9,7 @@ from typing import Optional, List
 from datetime import date
 
 from app.database import Database
-from app.engines.command_executor import create_command_executor
+from app.engines.command_executor import PENDING_COMMITMENT_REMOVAL, create_command_executor
 from app.engines.master_settings_service import MasterSettingsService
 from app.middleware.auth import get_current_user
 from loguru import logger
@@ -18,8 +18,8 @@ from loguru import logger
 router = APIRouter()
 
 # Ids removed from the stamped list but not yet rebuilt. A failed rebuild
-# leaves the id here so a retry can finish the calendar write.
-_PENDING_REMOVAL = "commitments_pending_removal"
+# leaves the id here so a later calendar read can finish the write.
+_PENDING_REMOVAL = PENDING_COMMITMENT_REMOVAL
 
 
 class CommitmentConstraintsSchema(BaseModel):

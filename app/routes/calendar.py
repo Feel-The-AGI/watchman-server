@@ -95,6 +95,18 @@ async def get_year(
 
     # Check if data is missing OR stale (generated with older engine version)
     needs_regeneration = _is_calendar_stale(days) or _year_is_incomplete(days, year)
+    # A failed delete leaves ids here after the row is gone. Finish that
+    # rebuild before serving the year, and leave the ids if it fails again.
+    try:
+        executor = create_command_executor(db, user["id"])
+        if await executor.finish_pending_removals():
+            days = await db.get_calendar_days(user["id"], start_date, end_date)
+            needs_regeneration = _is_calendar_stale(days) or _year_is_incomplete(days, year)
+    except Exception:
+        logger.exception(
+            f"Pending commitment removal was not finished for user {user['id']}; "
+            "the ids stay until the next calendar read"
+        )
     if needs_regeneration:
         logger.info(f"[CALENDAR] Calendar needs regeneration (stale or empty) for user {user['id']}, year {year}")
 
