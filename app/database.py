@@ -203,24 +203,24 @@ class Database:
             logger.error(f"[DB] Error creating cycle: {e}")
             return None
 
-    async def update_cycle(self, cycle_id: str, data: dict) -> dict:
+    async def update_cycle(self, cycle_id: str, data: dict, user_id: str) -> dict:
         """Update a cycle"""
         logger.info(f"[DB] update_cycle: {cycle_id} - fields: {list(data.keys())}")
         try:
-            result = self.client.table("cycles").update(data).eq("id", cycle_id).execute()
+            result = self.client.table("cycles").update(data).eq("id", cycle_id).eq("user_id", user_id).execute()
             logger.debug(f"[DB] Cycle updated: {cycle_id}")
             return result.data[0] if result.data else None
         except Exception as e:
             logger.error(f"[DB] Error updating cycle: {e}")
             return None
 
-    async def delete_cycle(self, cycle_id: str) -> bool:
+    async def delete_cycle(self, cycle_id: str, user_id: str) -> bool:
         """Delete a cycle"""
         logger.info(f"[DB] delete_cycle: {cycle_id}")
         try:
-            self.client.table("cycles").delete().eq("id", cycle_id).execute()
+            result = self.client.table("cycles").delete().eq("id", cycle_id).eq("user_id", user_id).execute()
             logger.debug(f"[DB] Cycle deleted: {cycle_id}")
-            return True
+            return bool(result.data)
         except Exception as e:
             logger.error(f"[DB] Error deleting cycle: {e}")
             return False
@@ -300,22 +300,22 @@ class Database:
             logger.error(f"[DB] Error creating default constraints: {e}")
             return []
 
-    async def update_constraint(self, constraint_id: str, data: dict) -> dict:
+    async def update_constraint(self, constraint_id: str, data: dict, user_id: str) -> dict:
         """Update a constraint"""
         logger.info(f"[DB] update_constraint: {constraint_id}")
         try:
-            result = self.client.table("constraints").update(data).eq("id", constraint_id).execute()
+            result = self.client.table("constraints").update(data).eq("id", constraint_id).eq("user_id", user_id).execute()
             return result.data[0] if result.data else None
         except Exception as e:
             logger.error(f"[DB] Error updating constraint: {e}")
             return None
 
-    async def delete_constraint(self, constraint_id: str) -> bool:
+    async def delete_constraint(self, constraint_id: str, user_id: str) -> bool:
         """Delete a constraint"""
         logger.info(f"[DB] delete_constraint: {constraint_id}")
         try:
-            self.client.table("constraints").delete().eq("id", constraint_id).execute()
-            return True
+            result = self.client.table("constraints").delete().eq("id", constraint_id).eq("user_id", user_id).execute()
+            return bool(result.data)
         except Exception as e:
             logger.error(f"[DB] Error deleting constraint: {e}")
             return False
@@ -425,12 +425,12 @@ class Database:
             logger.error(f"[DB] Error updating leave block: {e}")
             return None
 
-    async def delete_leave_block(self, leave_id: str) -> bool:
+    async def delete_leave_block(self, leave_id: str, user_id: str) -> bool:
         """Delete a leave block"""
         logger.info(f"[DB] delete_leave_block: {leave_id}")
         try:
-            self.client.table("leave_blocks").delete().eq("id", leave_id).execute()
-            return True
+            result = self.client.table("leave_blocks").delete().eq("id", leave_id).eq("user_id", user_id).execute()
+            return bool(result.data)
         except Exception as e:
             logger.error(f"[DB] Error deleting leave block: {e}")
             return False

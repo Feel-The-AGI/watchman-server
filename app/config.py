@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Paystack
     paystack_secret_key: str = ""  # Set via PAYSTACK_SECRET_KEY env var
     paystack_public_key: str = ""  # Set via PAYSTACK_PUBLIC_KEY env var
-    paystack_webhook_secret: str = ""  # Optional: for webhook signature verification
+    paystack_webhook_secret: str = ""  # Legacy setting; signatures use paystack_secret_key
     
     # Exchange Rate API (for USD to GHS conversion)
     exchange_rate_api_key: str = ""  # Set via EXCHANGE_RATE_API_KEY env var
