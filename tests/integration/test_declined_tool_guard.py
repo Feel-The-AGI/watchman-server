@@ -29,13 +29,13 @@ def test_stored_declined_leave_is_not_reproposed_until_asked(db):
     )
     row = db.execute(
         """
-        SELECT status::text, command
+        SELECT status::text, command, created_at
         FROM proposals
         WHERE user_id = %s
         """,
         (user_id,),
     ).fetchone()
-    proposal = {"status": row[0], "command": row[1]}
+    proposal = {"status": row[0], "command": row[1], "reviewed_at": row[2]}
     tool = {"type": "other", "start_date": "2026-10-27", "end_date": "2026-10-27"}
 
     assert repeats_declined_proposal(

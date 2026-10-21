@@ -10,6 +10,7 @@ from app.engines import chat_service
 from app.engines.chat_context import (
     annotate_closed_proposals,
     closed_proposal_note,
+    declined_again_reply,
     repeats_declined_proposal,
 )
 from app.engines.chat_service import SYSTEM_PROMPT, ChatService
@@ -160,11 +161,14 @@ async def test_later_turn_is_sent_with_the_declined_note(monkeypatch):
     assert "leave" not in result["command"]["action"]
 
 
+DECLINED_AT = datetime(2026, 10, 21, 18, 0, tzinfo=timezone.utc)
+NOW = DECLINED_AT + timedelta(hours=2)
 DECLINED_OCT_27 = {
     "id": "proposal-oct-27",
     "message_id": "m-leave-27",
     "status": "declined",
-    "created_at": "2026-10-21T18:00:00+00:00",
+    "created_at": "2026-10-20T12:00:00+00:00",
+    "reviewed_at": DECLINED_AT.isoformat(),
     "command": {
         "action": "add_leave",
         "payload": {"type": "other", "date": "2026-10-27"},
@@ -174,23 +178,27 @@ DECLINED_OCT_27 = {
 
 
 def test_same_action_and_dates_match_a_single_day_or_a_range():
+    leave = {"start_date": "2026-10-27", "end_date": "2026-10-27", "type": "other"}
     assert repeats_declined_proposal(
         "Add a dentist appointment next Wednesday",
         "add_leave",
-        {"start_date": "2026-10-27", "end_date": "2026-10-27", "type": "other"},
+        leave,
         [DECLINED_OCT_27],
+        now=NOW,
     )
     assert not repeats_declined_proposal(
         "Add a dentist appointment next Wednesday",
         "add_commitment",
         {"name": "Dentist", "type": "personal", "start_date": "2026-10-27", "end_date": "2026-10-27"},
         [DECLINED_OCT_27],
+        now=NOW,
     )
     assert not repeats_declined_proposal(
         "Please mark 27 Oct as leave again",
         "add_leave",
         {"date": "2026-10-27"},
         [DECLINED_OCT_27],
+        now=NOW,
     )
     approved = {**DECLINED_OCT_27, "status": "approved"}
     assert not repeats_declined_proposal(
@@ -198,6 +206,69 @@ def test_same_action_and_dates_match_a_single_day_or_a_range():
         "add_leave",
         {"date": "2026-10-27"},
         [approved],
+        now=NOW,
+    )
+
+
+def test_a_cue_word_lets_a_relative_date_through():
+    tool = {"type": "other", "date": "2026-10-27"}
+    for message in (
+        "mark next Tuesday as leave",
+        "leave on the 27th",
+        "day off 27/10",
+    ):
+        assert not repeats_declined_proposal(
+            message, "add_leave", tool, [DECLINED_OCT_27], now=NOW
+        ), message
+    assert repeats_declined_proposal(
+        "What about next Tuesday?",
+        "add_leave",
+        tool,
+        [DECLINED_OCT_27],
+        now=NOW,
+    )
+
+
+def test_only_declines_from_the_last_48_hours_are_blocked():
+    tool = {"date": "2026-10-27"}
+    assert repeats_declined_proposal(
+        "Add a dentist appointment next Wednesday",
+        "add_leave",
+        tool,
+        [DECLINED_OCT_27],
+        now=DECLINED_AT + timedelta(hours=48),
+    )
+    assert not repeats_declined_proposal(
+        "Add a dentist appointment next Wednesday",
+        "add_leave",
+        tool,
+        [DECLINED_OCT_27],
+        now=DECLINED_AT + timedelta(hours=48, seconds=1),
+    )
+    old = {
+        **DECLINED_OCT_27,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "reviewed_at": (DECLINED_AT - timedelta(days=3)).isoformat(),
+    }
+    assert not repeats_declined_proposal(
+        "Add a dentist appointment next Wednesday",
+        "add_leave",
+        tool,
+        [old],
+        now=NOW,
+    )
+
+
+def test_the_refusal_tells_the_user_how_to_ask_again():
+    assert declined_again_reply(
+        "add_leave", {"type": "other", "date": "2026-10-27"}
+    ) == "You declined that change. If you still want it, say 'mark 27 Oct as leave'."
+    assert declined_again_reply(
+        "add_commitment",
+        {"name": "Dentist appointment", "start_date": "2026-10-27", "end_date": "2026-10-27"},
+    ) == (
+        "You declined that change. If you still want it, say "
+        "'add Dentist appointment on 27 Oct'."
     )
 
 
@@ -228,7 +299,11 @@ async def test_declined_leave_is_dropped_unless_the_latest_message_asks(monkeypa
             return self
 
         def execute(self):
-            return SimpleNamespace(data=[DECLINED_OCT_27])
+            reviewed = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            return SimpleNamespace(data=[{
+                **DECLINED_OCT_27,
+                "reviewed_at": reviewed,
+            }])
 
     service.db = SimpleNamespace(client=SimpleNamespace(table=lambda name: Proposals()))
 
@@ -260,7 +335,9 @@ async def test_declined_leave_is_dropped_unless_the_latest_message_asks(monkeypa
     assert unrelated["proposal"] is None
     assert unrelated["is_command"] is False
     assert unrelated["command"] is None
-    assert "didn't propose it again" in unrelated["response"]
+    assert unrelated["response"] == (
+        "You declined that change. If you still want it, say 'mark 27 Oct as leave'."
+    )
     assert "command" not in created
 
     asked = await service.send_message(

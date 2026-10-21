@@ -20,6 +20,7 @@ from app.engines.chat_context import (
     INTERNAL_PARSE_SYSTEM,
     annotate_closed_proposals,
     empty_calendar,
+    declined_again_reply,
     repeats_declined_proposal,
     is_hidden_chat_message,
     is_internal_chat_content,
@@ -707,7 +708,7 @@ class ChatService:
                 f"[CHAT] Dropped {tool['name']} for {self.user_id}: "
                 "it repeats a declined proposal"
             )
-            response_text = "You declined that change, so I didn't propose it again."
+            response_text = declined_again_reply(tool["name"], tool.get("input") or {})
             tool = None
         if tool and tool.get("name"):
             payload = tool.get("input") or {}
@@ -773,7 +774,7 @@ class ChatService:
             return []
         try:
             result = client.table("proposals").select(
-                "id, message_id, status, command, expires_at, created_at"
+                "id, message_id, status, command, expires_at, created_at, reviewed_at"
             ).eq("user_id", self.user_id).order(
                 "created_at", desc=True
             ).limit(30).execute()
