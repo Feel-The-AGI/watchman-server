@@ -165,6 +165,49 @@ def _day(payload, day):
 
 
 @pytest.mark.asyncio
+async def test_failed_rebuild_returns_the_stored_days(monkeypatch):
+    stored = [{
+        "user_id": "user-1",
+        "date": "2026-01-01",
+        "cycle_id": "cycle-1",
+        "cycle_day": 20,
+        "work_type": "blank",
+        "state_json": {
+            "manual_override": True,
+            "engine_version": 2,
+            "is_leave": False,
+            "commitments": [],
+            "tags": [],
+        },
+    }]
+
+    class StoredDays:
+        def __init__(self, use_admin=False):
+            pass
+
+        async def get_calendar_days(self, user_id, start, end):
+            return list(stored)
+
+    async def fail_rebuild(self, start_date, end_date):
+        raise RuntimeError("upsert failed")
+
+    monkeypatch.setattr("app.routes.calendar.Database", StoredDays)
+    monkeypatch.setattr(
+        "app.engines.command_executor.CommandExecutor.rebuild_calendar",
+        fail_rebuild,
+    )
+    result = await get_year(2026, {"id": "user-1"})
+    assert result["success"] is True
+    assert result["year"] == 2026
+    assert result["count"] == 1
+    day = result["data"][0]
+    assert day["date"] == "2026-01-01"
+    assert day["work_type"] == "blank"
+    assert day["state_json"]["manual_override"] is True
+    assert day["state_json"]["engine_version"] == 2
+
+
+@pytest.mark.asyncio
 async def test_v2_year_keeps_document_leave_override_and_commitment(monkeypatch):
     monkeypatch.setattr("app.routes.calendar.Database", FakeDatabase)
     first = await get_year(2026, {"id": "user-1"})

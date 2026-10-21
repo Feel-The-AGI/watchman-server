@@ -105,12 +105,19 @@ async def get_year(
             logger.info(f"No calendar data for user {user['id']} year {year}, auto-generating...")
         # Same path as an approved chat change: document leave and
         # leave_blocks are merged, commitments are stamped, overrides stay.
-        # A failed read or upsert raises. Nothing was deleted first.
-        start_gen, end_gen = year_bounds(year)
-        executor = create_command_executor(db, user["id"])
-        await executor.rebuild_calendar(start_gen, end_gen)
-        days = await db.get_calendar_days(user["id"], start_date, end_date)
-        logger.info(f"Rebuilt {len(days or [])} days for year {year}")
+        # Nothing is deleted first. If this load fails, return the days already
+        # stored and try again on the next request.
+        try:
+            start_gen, end_gen = year_bounds(year)
+            executor = create_command_executor(db, user["id"])
+            await executor.rebuild_calendar(start_gen, end_gen)
+            days = await db.get_calendar_days(user["id"], start_date, end_date)
+            logger.info(f"Rebuilt {len(days or [])} days for year {year}")
+        except Exception:
+            logger.exception(
+                f"Calendar rebuild failed for user {user['id']} year {year}; "
+                "returning the stored days"
+            )
     
     shown = [present_calendar_day(day) for day in (days or [])]
     return {
