@@ -5,6 +5,7 @@ Handles command history, undo, and redo
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 from datetime import datetime, timezone
@@ -91,8 +92,24 @@ class ExecuteCommandRequest(BaseModel):
     explanation: Optional[str] = None
 
 
+# Production proposal_status is pending, approved, declined, expired.
+# The chat client posts decision "reject". "rejected" is not an enum label.
+DECISION_APPROVE = {"approve", "approved"}
+DECISION_DECLINE = {"reject", "rejected", "decline", "declined"}
+
+
+def proposal_status_for_decision(decision: str) -> str:
+    """Map a review action onto the proposal_status value stored in Postgres."""
+    value = (decision or "").strip().lower()
+    if value in DECISION_APPROVE:
+        return "approved"
+    if value in DECISION_DECLINE:
+        return "declined"
+    raise ValueError(f"Unsupported review decision: {decision}")
+
+
 class ReviewProposalRequest(BaseModel):
-    decision: Literal["approve", "reject"]
+    decision: Literal["approve", "approved", "reject", "rejected", "decline", "declined"]
 
 
 @router.get("/proposals/pending")
@@ -115,18 +132,22 @@ async def review_proposal(
     """Review an owned proposal; execute only its stored command, once."""
     db = Database(use_admin=True)
     now = datetime.now(timezone.utc).isoformat()
-    status = "approved" if request.decision == "approve" else "rejected"
+    status = proposal_status_for_decision(request.decision)
     # Atomic compare-and-set prevents duplicate clicks and concurrent reviews
     # from executing the same proposal twice. Never trust a client command body.
-    result = db.client.table("proposals").update({
-        "status": status, "reviewed_at": now,
-    }).eq("id", str(proposal_id)).eq("user_id", user["id"]).eq(
-        "status", "pending"
-    ).or_(unexpired_proposal_filter()).execute()
+    try:
+        result = db.client.table("proposals").update({
+            "status": status, "reviewed_at": now,
+        }).eq("id", str(proposal_id)).eq("user_id", user["id"]).eq(
+            "status", "pending"
+        ).or_(unexpired_proposal_filter()).execute()
+    except APIError as exc:
+        logger.error(f"[COMMANDS] Proposal {proposal_id} could not be marked {status}: {exc}")
+        raise _review_failed(request.decision) from exc
     if not result.data:
         raise HTTPException(status_code=409, detail="Proposal unavailable or already reviewed")
     proposal = result.data[0]
-    if request.decision == "reject":
+    if status == "declined":
         return {"success": True, "proposal_id": str(proposal_id), "status": status}
     command = proposal.get("command")
     if not isinstance(command, dict):
@@ -134,22 +155,47 @@ async def review_proposal(
         raise HTTPException(status_code=409, detail="Stored proposal command is invalid")
     executor = create_command_executor(db, user["id"])
     # Revalidate against the current calendar and constraints at approval time.
-    # Validation failures write nothing, so the proposal can be reviewed again.
-    # An action that fails after it has started to write stays claimed.
+    # A failed write, including a database error, puts the proposal back to
+    # pending and returns an error. The client must not show Done.
     try:
         outcome = await executor.execute(
-            command, source="api", message_id=proposal.get("message_id")
+            command,
+            source="api",
+            message_id=proposal.get("message_id"),
+            proposal_id=str(proposal_id),
         )
     except ValueError:
         _restore_pending_proposal(db, proposal_id, user["id"])
         raise HTTPException(status_code=422, detail="Command could not be applied")
-    if isinstance(outcome, dict) and outcome.get("success") is False and "validation" in outcome:
+    except Exception as exc:
+        logger.exception(f"[COMMANDS] Proposal {proposal_id} failed while saving: {exc}")
         _restore_pending_proposal(db, proposal_id, user["id"])
-        raise HTTPException(
-            status_code=422,
-            detail=outcome.get("error") or "Command failed validation",
+        raise _review_failed(request.decision) from exc
+    if not isinstance(outcome, dict) or outcome.get("success") is False:
+        _restore_pending_proposal(db, proposal_id, user["id"])
+        if isinstance(outcome, dict) and "validation" in outcome:
+            raise HTTPException(
+                status_code=422,
+                detail=outcome.get("error") or "Command failed validation",
+            )
+        logger.error(
+            f"[COMMANDS] Proposal {proposal_id} was not saved: "
+            f"{outcome.get('error') if isinstance(outcome, dict) else outcome}"
         )
+        raise _review_failed(request.decision)
     return outcome
+
+
+def _review_failed(decision: str) -> HTTPException:
+    try:
+        declined = proposal_status_for_decision(decision) == "declined"
+    except ValueError:
+        declined = False
+    if declined:
+        detail = "The change could not be declined. It is still waiting for review."
+    else:
+        detail = "The change could not be saved. It is still waiting for review."
+    return HTTPException(status_code=500, detail=detail)
 
 
 @router.post("/execute")

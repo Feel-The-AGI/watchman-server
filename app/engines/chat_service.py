@@ -30,6 +30,7 @@ from app.engines.claude_chat import (
     complete_chat,
     history_to_messages,
 )
+from app.engines.proposal_effects import explanation_for
 
 
 # Tool declarations. Claude receives these as input_schema tool definitions.
@@ -689,10 +690,11 @@ class ChatService:
 
         command = None
         if tool and tool.get("name"):
+            payload = tool.get("input") or {}
             command = {
                 "action": tool["name"],
-                "payload": tool.get("input") or {},
-                "explanation": response_text or f"Executing {tool['name']}"
+                "payload": payload,
+                "explanation": explanation_for(tool["name"], payload, response_text),
             }
 
         result = {

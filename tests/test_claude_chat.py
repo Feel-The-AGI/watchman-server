@@ -163,3 +163,55 @@ async def test_missing_key_and_timeout_stay_off_the_user_message(monkeypatch):
     }
     assert ok["proposal"]["id"] == "proposal"
     service.command_executor.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_empty_tool_text_is_not_shown_as_executing(monkeypatch):
+    service = ChatService.__new__(ChatService)
+    service.user_id = "user"
+    service.db = SimpleNamespace()
+    service.settings_service = SimpleNamespace(get_snapshot=AsyncMock(return_value={"constraints": []}))
+    created = {}
+
+    async def create_proposal(command, message_id=None):
+        created["command"] = command
+        return {"id": "proposal", "command": command}
+
+    service.command_executor = SimpleNamespace(
+        create_proposal=create_proposal,
+        execute=AsyncMock(),
+    )
+
+    async def save(role, content, command_id=None):
+        return {"id": "message", "role": role, "content": content}
+
+    service._save_message = save
+    service._get_calendar_snapshot = AsyncMock(return_value={
+        "text": "calendar", "count": 0, "start": None, "end": None, "counts": {},
+    })
+    service._get_logs_and_incidents = AsyncMock(return_value="logs")
+    service.get_history = AsyncMock(return_value=[{"role": "user", "content": "Dentist"}])
+    monkeypatch.setattr(chat_service, "projection_for_user", AsyncMock(return_value={
+        "cycle": None, "constraints": [], "leave_blocks": [],
+    }))
+    monkeypatch.setattr(
+        chat_service,
+        "complete_chat",
+        AsyncMock(return_value=("", {
+            "name": "add_commitment",
+            "input": {
+                "name": "Dentist appointment",
+                "type": "personal",
+                "start_date": "2026-10-27",
+                "end_date": "2026-10-27",
+                "time_start": "15:00",
+                "time_end": "16:00",
+                "days_of_week": ["tuesday"],
+            },
+        })),
+    )
+    result = await service.send_message("Block out Tuesday", auto_execute=False)
+    summary = "Add Dentist appointment on Tue 27 Oct, 3\u20134pm"
+    assert created["command"]["explanation"] == summary
+    assert result["response"] == summary
+    assert "Executing" not in result["response"]

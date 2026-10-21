@@ -10,12 +10,18 @@ from loguru import logger
 
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
-from app.engines.calendar_engine import create_calendar_engine
+from app.engines.calendar_engine import CALENDAR_ENGINE_VERSION, create_calendar_engine
 from app.engines.calendar_authority import (
     commitment_is_study,
     effective_constraints,
     is_night_study_rule,
     night_shift_dates,
+)
+from app.engines.proposal_effects import (
+    commitment_record,
+    event_dates,
+    leave_record,
+    stamp_day_state,
 )
 
 
@@ -131,7 +137,8 @@ class CommandExecutor:
         command: Dict[str, Any],
         source: str = "chat",
         message_id: Optional[str] = None,
-        skip_validation: bool = False
+        skip_validation: bool = False,
+        proposal_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute a command and log it.
@@ -148,6 +155,7 @@ class CommandExecutor:
         action = command.get("action")
         payload = command.get("payload", {})
         explanation = command.get("explanation", "")
+        self._proposal_id = proposal_id
         
         if action not in VALID_ACTIONS:
             raise ValueError(f"Unknown action: {action}")
@@ -175,31 +183,65 @@ class CommandExecutor:
                 "error": str(e)
             }
         
+        # Project onto calendar_days before recording success. A failed write
+        # must not look applied: the review route turns that into an error and
+        # puts the proposal back to pending. Drop a row inserted in this call
+        # so a failed calendar write does not leave an orphan.
+        try:
+            if action != "override_days":
+                wrote = await self._regenerate_calendar()
+                if not wrote:
+                    await self._project_saved_events()
+            else:
+                logger.info("Skipping calendar regeneration for override_days (manual override should persist)")
+        except Exception as e:
+            logger.error(f"Calendar projection failed: {e}")
+            await self._drop_inserted_row(result)
+            return {
+                "success": False,
+                "error": str(e),
+            }
+
         # Get after state
         after_state = await self.settings_service.get_snapshot(self.user_id)
         
         # Log the command
-        command_log = await self._log_command(
-            action=action,
-            payload=payload,
-            before_state=before_state,
-            after_state=after_state,
-            source=source,
-            message_id=message_id,
-            explanation=explanation
-        )
-
-        # Regenerate calendar (but NOT for override_days - those are manual overrides that should persist)
-        if action != "override_days":
-            await self._regenerate_calendar()
-        else:
-            logger.info(f"Skipping calendar regeneration for override_days (manual override should persist)")
+        try:
+            command_log = await self._log_command(
+                action=action,
+                payload=payload,
+                before_state=before_state,
+                after_state=after_state,
+                source=source,
+                message_id=message_id,
+                explanation=explanation,
+            )
+        except Exception as e:
+            logger.error(f"Command log failed after the change was saved: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+            }
 
         return {
             "success": True,
             "command_id": command_log["id"],
             "result": result
         }
+
+    async def _drop_inserted_row(self, result: Any) -> None:
+        """Remove the commitment or leave inserted by a command whose calendar write failed."""
+        if not isinstance(result, dict):
+            return
+        commitment_id = result.get("inserted_commitment_id")
+        leave_id = result.get("inserted_leave_id")
+        try:
+            if commitment_id:
+                await self.db.delete_commitment(commitment_id, self.user_id)
+            if leave_id:
+                await self.db.delete_leave_block(leave_id, self.user_id)
+        except Exception as exc:
+            logger.error(f"Could not remove orphan row after a failed calendar write: {exc}")
     
     async def _execute_action(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a specific action type"""
@@ -302,50 +344,94 @@ class CommandExecutor:
         return {"cycle": cycle_data}
     
     async def _action_add_commitment(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Add a new commitment"""
-        commitment = {
-            "id": payload.get("id", str(uuid4())),
-            "name": payload.get("name"),
-            "type": payload.get("type", "personal"),
-            "schedule": payload.get("schedule", {}),
-            "constraints": payload.get("constraints", {}),
-            "status": "active",
-            "created_at": datetime.utcnow().isoformat()
-        }
-        
-        await self.settings_service.add_to_list(self.user_id, "commitments", commitment)
-        return {"commitment": commitment}
+        """Insert a commitment row and keep the settings document in step."""
+        record = commitment_record(
+            self.user_id,
+            payload,
+            payload.get("id") or str(uuid4()),
+            proposal_id=getattr(self, "_proposal_id", None),
+        )
+        saved = await self._matching_commitment(record)
+        inserted_id = None
+        if saved is None:
+            saved = await self.db.create_commitment(record)
+            if saved:
+                inserted_id = saved.get("id")
+        if not saved:
+            raise RuntimeError(f"Commitment {record['name']!r} was not saved")
+        await self.settings_service.add_to_list(self.user_id, "commitments", saved)
+        return {"commitment": saved, "inserted_commitment_id": inserted_id}
+
+    async def _matching_commitment(self, record: Dict[str, Any]) -> Optional[dict]:
+        rows = await self.db.get_commitments(self.user_id) or []
+        source = record.get("source_text")
+        start = str(record.get("start_date") or "")[:10]
+        for row in rows:
+            if source and str(row.get("source_text") or "") == str(source):
+                return row
+            if (
+                row.get("name") == record.get("name")
+                and str(row.get("start_date") or "")[:10] == start
+                and row.get("type") == record.get("type")
+            ):
+                return row
+        return None
     
     async def _action_remove_commitment(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Remove a commitment"""
         commitment_id = payload.get("id")
         if not commitment_id:
             raise ValueError("Commitment ID required")
-        
+
+        deleted = await self.db.delete_commitment(commitment_id, self.user_id)
+        if deleted is False:
+            raise RuntimeError("Commitment could not be removed")
         await self.settings_service.remove_from_list(self.user_id, "commitments", commitment_id)
         return {"removed_id": commitment_id}
     
     async def _action_add_leave(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Add a leave block"""
-        leave = {
-            "id": payload.get("id", str(uuid4())),
-            "name": payload.get("name", "Leave"),
-            "type": payload.get("type", "annual"),
-            "start_date": payload.get("start_date"),
-            "end_date": payload.get("end_date"),
-            "notes": payload.get("notes", ""),
-            "created_at": datetime.utcnow().isoformat()
-        }
-        
-        await self.settings_service.add_to_list(self.user_id, "leave_blocks", leave)
-        return {"leave": leave}
+        """Insert a leave_blocks row. Payload type stays in effects, not commitments.type."""
+        record = leave_record(
+            self.user_id,
+            payload,
+            payload.get("id") or str(uuid4()),
+            proposal_id=getattr(self, "_proposal_id", None),
+        )
+        saved = await self._matching_leave(record)
+        inserted_id = None
+        if saved is None:
+            saved = await self.db.create_leave_block(record)
+            if saved:
+                inserted_id = saved.get("id")
+        if not saved:
+            raise RuntimeError("Leave was not saved")
+        await self.settings_service.add_to_list(self.user_id, "leave_blocks", saved)
+        return {"leave": saved, "inserted_leave_id": inserted_id}
+
+    async def _matching_leave(self, record: Dict[str, Any]) -> Optional[dict]:
+        rows = await self.db.get_leave_blocks(self.user_id) or []
+        proposal_id = (record.get("effects") or {}).get("proposal_id")
+        for row in rows:
+            effects = row.get("effects") or {}
+            if proposal_id and effects.get("proposal_id") == proposal_id:
+                return row
+            if (
+                row.get("name") == record.get("name")
+                and str(row.get("start_date") or "")[:10] == record.get("start_date")
+                and str(row.get("end_date") or "")[:10] == record.get("end_date")
+            ):
+                return row
+        return None
     
     async def _action_remove_leave(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Remove a leave block"""
         leave_id = payload.get("id")
         if not leave_id:
             raise ValueError("Leave ID required")
-        
+
+        deleted = await self.db.delete_leave_block(leave_id, self.user_id)
+        if deleted is False:
+            raise RuntimeError("Leave could not be removed")
         await self.settings_service.remove_from_list(self.user_id, "leave_blocks", leave_id)
         return {"removed_id": leave_id}
     
@@ -846,13 +932,54 @@ class CommandExecutor:
         
         raise Exception("Failed to log command")
     
-    async def _regenerate_calendar(self):
-        """Regenerate calendar days from current settings, preserving manual overrides"""
+    async def _project_saved_events(self) -> None:
+        """Paint commitment and leave rows onto existing days when no cycle can rebuild them."""
+        commitments = await self.db.get_commitments(self.user_id) or []
+        leaves = await self.db.get_leave_blocks(self.user_id) or []
+        dates = event_dates(commitments, leaves)
+        if not dates:
+            return
+        start = min(dates).isoformat()
+        end = max(dates).isoformat()
+        existing = await self.db.get_calendar_days(self.user_id, start, end) or []
+        by_date = {_day_key(day.get("date")): day for day in existing}
+        updates = []
+        for day in dates:
+            key = day.isoformat()
+            current = by_date.get(key) or {}
+            base = current.get("state_json") or {
+                "commitments": [],
+                "available_hours": 12.0,
+                "used_hours": 0,
+                "is_overloaded": False,
+                "is_leave": False,
+                "tags": [],
+                "engine_version": CALENDAR_ENGINE_VERSION,
+            }
+            updates.append({
+                "user_id": self.user_id,
+                "date": key,
+                "cycle_id": current.get("cycle_id"),
+                "cycle_day": current.get("cycle_day"),
+                "work_type": current.get("work_type") or "off",
+                "state_json": stamp_day_state(base, day, commitments, leaves),
+            })
+        saved = await self.db.upsert_calendar_days(updates)
+        if not saved:
+            raise RuntimeError("Calendar was not updated")
+
+    async def _regenerate_calendar(self) -> bool:
+        """Regenerate calendar days from current settings, preserving manual overrides.
+
+        Returns True when days were written. Returns False when there is no
+        cycle to project, so the caller can stamp saved events onto days that
+        already exist.
+        """
         settings = await self.settings_service.get_snapshot(self.user_id)
         cycle = settings.get("cycle")
 
         if not cycle:
-            return  # No cycle defined yet
+            return False
 
         # Handle both formats: {anchor: {date, cycle_day}} or {anchor_date, anchor_cycle_day}
         anchor_date_str = None
@@ -869,7 +996,7 @@ class CommandExecutor:
 
         if not anchor_date_str:
             logger.warning(f"No anchor date for user {self.user_id}, skipping calendar regeneration")
-            return
+            return False
 
         anchor_date = date.fromisoformat(anchor_date_str)
 
@@ -898,78 +1025,90 @@ class CommandExecutor:
             "pattern": engine_pattern
         }
 
-        # Get leave blocks
-        leave_blocks = [
-            {"start_date": lb["start_date"], "end_date": lb["end_date"]}
-            for lb in settings.get("leave_blocks", [])
-        ]
+        table_leaves = await self.db.get_leave_blocks(self.user_id) or []
+        leave_blocks = _merge_leave_blocks(settings.get("leave_blocks") or [], table_leaves)
+        commitments = await self.db.get_commitments(self.user_id) or []
 
         constraints = await effective_constraints(
             self.db, self.user_id, settings.get("constraints", [])
         )
 
-        # Generate calendar from anchor date onward
-        try:
-            days = engine.generate_range(
-                start_date, end_date, cycle_for_engine, leave_blocks, constraints
-            )
+        # Generate calendar from anchor date onward. Failures propagate so the
+        # approval is not reported as applied when the calendar write did not happen.
+        days = engine.generate_range(
+            start_date, end_date, cycle_for_engine, leave_blocks, constraints
+        )
 
-            # IMPORTANT: Fetch existing days that have manual_override flag to preserve them
-            existing_result = self.db.client.table("calendar_days").select("date, state_json, work_type").eq(
-                "user_id", self.user_id
-            ).gte("date", start_date.isoformat()).execute()
+        existing_days = await self.db.get_calendar_days(
+            self.user_id, start_date.isoformat(), end_date.isoformat()
+        ) or []
+        manual_override_days = {}
+        for existing_day in existing_days:
+            state = existing_day.get("state_json") or {}
+            if state.get("manual_override"):
+                manual_override_days[_day_key(existing_day.get("date"))] = existing_day
 
-            # Build map of manually overridden days to preserve
-            manual_override_days = {}
-            for existing_day in (existing_result.data or []):
-                state = existing_day.get("state_json", {})
-                if state.get("manual_override"):
-                    manual_override_days[existing_day["date"]] = existing_day
-                    logger.debug(f"Preserving manual override for date {existing_day['date']}")
+        if manual_override_days:
+            logger.info(f"Preserving {len(manual_override_days)} manually overridden days during regeneration")
 
-            if manual_override_days:
-                logger.info(f"Preserving {len(manual_override_days)} manually overridden days during regeneration")
+        days_data = []
+        for d in days:
+            date_str = d.date.isoformat()
+            override = manual_override_days.get(date_str)
+            if override:
+                base_state = override.get("state_json") or {}
+                work_type = override.get("work_type") or d.work_type.value
+            else:
+                base_state = d.state_json
+                work_type = d.work_type.value
+            days_data.append({
+                "user_id": self.user_id,
+                "date": date_str,
+                "cycle_id": d.cycle_id,
+                "cycle_day": d.cycle_day,
+                "work_type": work_type,
+                "state_json": stamp_day_state(base_state, d.date, commitments, leave_blocks),
+            })
 
-            # Convert to dict for upsert, but preserve manual overrides
-            days_data = []
-            for d in days:
-                date_str = d.date.isoformat()
+        deleted = await self.db.delete_calendar_days(
+            self.user_id, start_date.isoformat(), end_date.isoformat()
+        )
+        if deleted is False:
+            raise RuntimeError("Calendar could not be rebuilt")
+        if days_data:
+            saved = await self.db.upsert_calendar_days(days_data)
+            if not saved:
+                raise RuntimeError("Calendar was not updated")
 
-                # Check if this day has a manual override
-                if date_str in manual_override_days:
-                    # Keep the manually overridden version
-                    override = manual_override_days[date_str]
-                    days_data.append({
-                        "user_id": self.user_id,
-                        "date": date_str,
-                        "cycle_id": d.cycle_id,
-                        "cycle_day": d.cycle_day,  # Update cycle_day for reference
-                        "work_type": override["work_type"],  # Keep overridden work_type
-                        "state_json": override["state_json"]  # Keep overridden state
-                    })
-                else:
-                    # Use freshly generated day
-                    days_data.append({
-                        "user_id": self.user_id,
-                        "date": date_str,
-                        "cycle_id": d.cycle_id,
-                        "cycle_day": d.cycle_day,
-                        "work_type": d.work_type.value,
-                        "state_json": d.state_json
-                    })
+        logger.info(
+            f"Regenerated {len(days_data)} calendar days for user {self.user_id} "
+            f"from {start_date} (preserved {len(manual_override_days)} manual overrides)"
+        )
+        return True
 
-            # Delete from anchor forward only
-            self.db.client.table("calendar_days").delete().eq(
-                "user_id", self.user_id
-            ).gte("date", start_date.isoformat()).execute()
 
-            # Insert new days (including preserved manual overrides)
-            if days_data:
-                self.db.client.table("calendar_days").upsert(days_data).execute()
+def _day_key(value) -> str:
+    if hasattr(value, "isoformat"):
+        return value.isoformat()[:10]
+    return str(value or "")[:10]
 
-            logger.info(f"Regenerated {len(days_data)} calendar days for user {self.user_id} from {start_date} (preserved {len(manual_override_days)} manual overrides)")
-        except Exception as e:
-            logger.error(f"Failed to regenerate calendar: {e}")
+
+def _merge_leave_blocks(document_leaves: list, table_leaves: list) -> list:
+    merged = []
+    seen = set()
+    for block in list(document_leaves or []) + list(table_leaves or []):
+        if not isinstance(block, dict):
+            continue
+        start = _day_key(block.get("start_date") or block.get("date"))
+        end = _day_key(block.get("end_date")) or start
+        if not start:
+            continue
+        key = (start, end, str(block.get("id") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append({**block, "start_date": start, "end_date": end})
+    return merged
 
 
 def create_command_executor(db: Database, user_id: str) -> CommandExecutor:

@@ -260,7 +260,7 @@ async def delete_commitment(
     if existing.get("user_id") != user["id"]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    await db.delete_commitment(commitment_id)
+    await db.delete_commitment(commitment_id, user["id"])
     
     return {
         "success": True,

@@ -96,8 +96,8 @@ CODE_COLUMNS = {
 
 ENUMS = {
     "work_type": {"work_day", "work_night", "off", "blank"},
-    "proposal_status": {"pending", "approved", "rejected", "expired"},
-    "commitment_type": {"work", "education", "personal", "leave", "study", "sleep"},
+    "proposal_status": {"pending", "approved", "rejected", "declined", "expired"},
+    "commitment_type": {"work", "education", "personal", "leave", "study", "sleep", "other"},
     "commitment_status": {"active", "queued", "completed", "paused"},
     "user_tier": {"free", "pro", "admin"},
     "command_status": {"applied", "undone", "redone"},
