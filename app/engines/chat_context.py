@@ -7,7 +7,8 @@ API, not only a master-settings document that is still empty.
 """
 
 import json
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from app.engines.calendar_authority import cycle_is_present
@@ -272,6 +273,203 @@ def _is_past(value: Any, now: Optional[datetime]) -> bool:
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return expires <= current.astimezone(timezone.utc)
+
+
+_ACTION_CUES = {
+    "add_leave": ("leave", "vacation", "sick", "day off", "time off"),
+    "remove_leave": ("leave", "vacation", "sick", "day off", "time off"),
+    "update_leave": ("leave", "vacation", "sick", "day off", "time off"),
+    "add_commitment": ("commitment", "appointment", "event"),
+    "remove_commitment": ("commitment", "appointment", "event"),
+    "update_commitment": ("commitment", "appointment", "event"),
+    "override_days": ("shift", "override", "work day", "night", "blank"),
+    "update_cycle": ("rotation", "cycle", "pattern", "anchor"),
+}
+_MONTH_NAMES = (
+    ("january", "jan"),
+    ("february", "feb"),
+    ("march", "mar"),
+    ("april", "apr"),
+    ("may", "may"),
+    ("june", "jun"),
+    ("july", "jul"),
+    ("august", "aug"),
+    ("september", "sep"),
+    ("october", "oct"),
+    ("november", "nov"),
+    ("december", "dec"),
+)
+
+
+# A decline older than this is no longer blocked. The user can be offered it again.
+DECLINE_GUARD = timedelta(hours=48)
+_SHORT_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def repeats_declined_proposal(
+    message: str,
+    action: str,
+    payload: Optional[dict],
+    proposals: Optional[list],
+    now: Optional[datetime] = None,
+) -> bool:
+    """True when this tool call repeats a decline from the last 48 hours.
+
+    Same action and the same start/end dates. The tool stands when the latest
+    message contains that change's cue ('leave', 'day off', and so on), including
+    when the date is relative ('next Tuesday', 'the 27th', '27/10').
+    """
+    span = command_span(payload)
+    if span is None or explicitly_requests(message, action, payload):
+        return False
+    for proposal in proposals or []:
+        if not _declined_within_guard(proposal, now):
+            continue
+        command = _command(proposal)
+        if str(command.get("action") or "") != action:
+            continue
+        body = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        if command_span(body) == span:
+            return True
+    return False
+
+
+def explicitly_requests(message: str, action: str, payload: Optional[dict]) -> bool:
+    """True when the latest message uses this change's cue word.
+
+    The cue is enough on its own. 'mark next Tuesday as leave' and 'day off
+    27/10' ask for leave again even though those dates are not absolute.
+    """
+    lowered = (message or "").lower()
+    return any(cue in lowered for cue in _cues(action, payload))
+
+
+def declined_again_reply(action: str, payload: Optional[dict]) -> str:
+    """Tell the user the phrase that asks for this declined change again."""
+    return (
+        "You declined that change. If you still want it, say "
+        f"'{_retry_phrase(action, payload)}'."
+    )
+
+
+def command_span(payload: Optional[dict]) -> Optional[tuple]:
+    """Inclusive start and end for a tool payload. None when it has no date."""
+    if not isinstance(payload, dict):
+        return None
+    start = _day(payload.get("start_date") or payload.get("date"))
+    end = _day(payload.get("end_date")) or start
+    if start is None or end is None:
+        return None
+    if end < start:
+        end = start
+    return (start.isoformat(), end.isoformat())
+
+
+def _declined_within_guard(proposal: dict, now: Optional[datetime]) -> bool:
+    """A decline counts only for about 48 hours after it was reviewed."""
+    if proposal_outcome(proposal) != "declined":
+        return False
+    when = _as_datetime(proposal.get("reviewed_at") or proposal.get("created_at"))
+    if when is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc) - when <= DECLINE_GUARD
+
+
+def _cues(action: str, payload: Optional[dict]) -> list:
+    cues = list(_ACTION_CUES.get(action, ()))
+    name = str((payload or {}).get("name") or "").strip().lower()
+    if len(name) >= 3 and name not in {"leave", "other"}:
+        cues.append(name)
+    return cues
+
+
+def _retry_phrase(action: str, payload: Optional[dict]) -> str:
+    when = _span_phrase(payload)
+    name = str((payload or {}).get("name") or "").strip()
+    if action in {"add_leave", "update_leave"}:
+        return f"mark {when} as leave" if when else "mark that date as leave"
+    if action == "remove_leave":
+        return f"remove the leave on {when}" if when else "remove that leave"
+    if action in {"add_commitment", "update_commitment"}:
+        label = name or "that event"
+        return f"add {label} on {when}" if when else f"add {label}"
+    if action == "remove_commitment":
+        label = name or "that event"
+        return f"remove {label}" + (f" on {when}" if when else "")
+    if action == "override_days":
+        kind = str((payload or {}).get("work_type") or "that shift").replace("_", " ")
+        return f"set {when} to {kind}" if when else f"set those days to {kind}"
+    if action == "update_cycle":
+        return "update the rotation"
+    text = (action or "that change").replace("_", " ")
+    return f"{text} on {when}" if when else text
+
+
+def _span_phrase(payload: Optional[dict]) -> str:
+    span = command_span(payload)
+    if span is None:
+        return ""
+    start = date.fromisoformat(span[0])
+    end = date.fromisoformat(span[1])
+    if start == end:
+        return _spoken_day(start)
+    return f"{_spoken_day(start)} to {_spoken_day(end)}"
+
+
+def _spoken_day(day: date) -> str:
+    return f"{day.day} {_SHORT_MONTHS[day.month - 1]}"
+
+
+def _mentions_span(message: str, span: tuple) -> bool:
+    start = date.fromisoformat(span[0])
+    end = date.fromisoformat(span[1])
+    if not _mentions_day(message, start):
+        return False
+    return start == end or _mentions_day(message, end)
+
+
+def _mentions_day(message: str, day: date) -> bool:
+    if day.isoformat() in (message or ""):
+        return True
+    lowered = (message or "").lower()
+    full, short = _MONTH_NAMES[day.month - 1]
+    number = rf"{day.day}(?:st|nd|rd|th)?"
+    patterns = (
+        rf"\b{number}\s+{full}\b",
+        rf"\b{number}\s+{short}\b",
+        rf"\b{full}\s+{number}\b",
+        rf"\b{short}\s+{number}\b",
+    )
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def _command(proposal: dict) -> dict:
+    command = proposal.get("command")
+    if isinstance(command, str):
+        try:
+            command = json.loads(command)
+        except json.JSONDecodeError:
+            return {}
+    return command if isinstance(command, dict) else {}
+
+
+def _day(value: Any) -> Optional[date]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def _as_datetime(value: Any) -> Optional[datetime]:
