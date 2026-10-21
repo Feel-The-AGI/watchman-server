@@ -9,6 +9,7 @@ from typing import Optional, List
 from datetime import date
 
 from app.database import Database
+from app.engines.command_executor import create_command_executor
 from app.middleware.auth import get_current_user
 from loguru import logger
 
@@ -259,9 +260,23 @@ async def delete_commitment(
         raise HTTPException(status_code=404, detail="Commitment not found")
     if existing.get("user_id") != user["id"]:
         raise HTTPException(status_code=403, detail="Not authorized")
-    
-    await db.delete_commitment(commitment_id, user["id"])
-    
+
+    # Same path as chat remove: drop the table row, the settings-document
+    # copy, and rebuild the calendar. Leaving the document copy would stamp
+    # the commitment back onto the days.
+    executor = create_command_executor(db, user["id"])
+    result = await executor.execute(
+        {
+            "action": "remove_commitment",
+            "payload": {"id": commitment_id},
+            "explanation": f"Remove {existing.get('name') or 'commitment'}",
+        },
+        source="api",
+    )
+    if not result.get("success"):
+        logger.error(f"[COMMITMENTS] Delete failed for {commitment_id}: {result.get('error')}")
+        raise HTTPException(status_code=500, detail="Commitment could not be removed")
+
     return {
         "success": True,
         "message": "Commitment deleted"
