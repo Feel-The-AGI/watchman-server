@@ -3,9 +3,9 @@ Chat API Routes
 Handles conversation with the agent
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Literal
 from loguru import logger
 from datetime import datetime
 
@@ -22,7 +22,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 class SendMessageRequest(BaseModel):
     content: str
-    auto_execute: bool = True  # Execute commands directly without proposal (proposals table has issues)
+    auto_execute: Literal[False] = False
 
 
 class MessageResponse(BaseModel):
@@ -42,8 +42,7 @@ async def send_message(
     Send a message to the agent and get a response.
 
     If the agent's response contains a command:
-    - If auto_execute=True: Command is executed immediately
-    - If auto_execute=False: A proposal is created for user approval
+    A command is saved as a proposal and requires explicit user approval.
 
     Free users: Limited to 100 messages per month
     Pro users: Unlimited messages
@@ -118,7 +117,7 @@ async def send_message(
 
 @router.get("/history")
 async def get_history(
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     user: dict = Depends(get_current_user)
 ):
     """
@@ -142,8 +141,8 @@ async def get_history(
 
     return {
         "messages": history,
-        "tier": tier,
-        "history_limit": FREE_HISTORY_LIMIT if tier == "free" else None
+        "tier": effective_tier,
+        "history_limit": FREE_HISTORY_LIMIT if effective_tier == "free" else None
     }
 
 
