@@ -1045,10 +1045,12 @@ class CommandExecutor:
             "pattern": engine_pattern
         }
 
-        table_leaves = await self.db.get_leave_blocks(self.user_id) or []
+        # These reads raise. A swallowed empty list would look like "nothing
+        # saved" and the write below would clear chips and leave.
+        table_leaves = await self.db.read_leave_blocks(self.user_id)
         leave_blocks = _merge_leave_blocks(settings.get("leave_blocks") or [], table_leaves)
-        table_commitments = await self.db.get_commitments(self.user_id) or []
-        commitments = _merge_records(settings.get("commitments") or [], table_commitments)
+        table_commitments = await self.db.read_commitments(self.user_id)
+        commitments = _commitments_to_stamp(settings.get("commitments") or [], table_commitments)
 
         constraints = await effective_constraints(
             self.db, self.user_id, settings.get("constraints", [])
@@ -1082,13 +1084,19 @@ class CommandExecutor:
                 base_state = dict(override.get("state_json") or {})
                 work_type = override.get("work_type") or d.work_type.value
                 cycle_day = override.get("cycle_day") if override.get("cycle_day") is not None else d.cycle_day
+                previous_chips = base_state.get("commitments") or []
             else:
                 base_state = dict(d.state_json)
                 previous = (existing_by_date.get(date_str) or {}).get("state_json") or {}
-                if previous.get("commitments"):
-                    base_state["commitments"] = list(previous.get("commitments") or [])
+                previous_chips = previous.get("commitments") or []
                 work_type = d.work_type.value
                 cycle_day = d.cycle_day
+            # Chips with an id are re-stamped from the current commitment list.
+            # A removed commitment therefore leaves the day. Chips with no id stay.
+            base_state["commitments"] = [
+                chip for chip in previous_chips
+                if isinstance(chip, dict) and not chip.get("commitment_id")
+            ]
             state = stamp_day_state(base_state, d.date, commitments, leave_blocks)
             block_day = block_day_for(d.cycle_day, engine_pattern)
             state["engine_version"] = CALENDAR_ENGINE_VERSION
@@ -1158,6 +1166,25 @@ def _day_key(value) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()[:10]
     return str(value or "")[:10]
+
+
+def _commitments_to_stamp(document_rows: list, table_rows: list) -> list:
+    """Merge both copies. A status stored on the table row wins for that id."""
+    statuses = {}
+    for row in table_rows or []:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        status = row.get("status")
+        if status is not None and str(status).strip() != "":
+            statuses[str(row["id"])] = status
+    merged = []
+    for row in _merge_records(document_rows, table_rows):
+        row = dict(row)
+        known = statuses.get(str(row.get("id") or ""))
+        if known is not None:
+            row["status"] = known
+        merged.append(row)
+    return merged
 
 
 def _merge_records(document_rows: list, table_rows: list) -> list:
