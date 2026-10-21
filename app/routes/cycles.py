@@ -11,7 +11,7 @@ from datetime import date
 from app.database import Database
 from app.middleware.auth import get_current_user
 from app.engines.calendar_engine import create_calendar_engine
-from app.engines.master_settings_service import MasterSettingsService
+from app.engines.calendar_authority import engine_cycle, projection_for_user, remember_cycle
 from loguru import logger
 
 
@@ -132,39 +132,36 @@ async def create_cycle(
     # Create the new cycle
     cycle = await db.create_cycle(cycle_data)
     
-    # SYNC TO MASTER SETTINGS - critical for frontend to see the cycle
-    try:
-        ms_service = MasterSettingsService(db)
-        cycle_for_settings = {
-            "id": cycle["id"],
-            "name": cycle["name"],
-            "pattern": cycle["pattern"],
-            "anchor_date": cycle["anchor_date"],
-            "anchor_cycle_day": cycle["anchor_cycle_day"],
-            "total_days": cycle["cycle_length"]
-        }
-        await ms_service.update_section(user["id"], "cycle", cycle_for_settings)
-        logger.info(f"Synced cycle to master_settings for user {user['id']}")
-    except Exception as e:
-        logger.error(f"Failed to sync cycle to master_settings: {e}")
+    # Master Settings is the source. This write is skipped when the document
+    # already tracks a different cycle, so a stale row cannot replace it.
+    await remember_cycle(db, user["id"], cycle)
+    projection = await projection_for_user(db, user["id"])
+    source = projection.get("cycle") or cycle
+    prepared = engine_cycle(source)
     
-    # AUTO-GENERATE CALENDAR from anchor date forward only
+    # AUTO-GENERATE CALENDAR from the Master Settings cycle
     from datetime import date as date_module
-    anchor_date = data.anchor_date
+    anchor_value = prepared.get("anchor_date") or data.anchor_date
+    anchor_date = anchor_value if not isinstance(anchor_value, str) else date_module.fromisoformat(anchor_value[:10])
     start_date = anchor_date
     end_date = date_module(anchor_date.year, 12, 31)
     
     logger.info(f"Auto-generating calendar from {start_date} to {end_date}")
     
     try:
-        leave_blocks = await db.get_leave_blocks(user["id"])
-        days = engine.generate_range(start_date, end_date, cycle, leave_blocks)
+        days = engine.generate_range(
+            start_date,
+            end_date,
+            prepared,
+            projection.get("leave_blocks") or [],
+            projection.get("constraints") or [],
+        )
         
         days_data = [
             {
                 "user_id": user["id"],
                 "date": d.date.isoformat(),
-                "cycle_id": cycle["id"],
+                "cycle_id": prepared.get("id") or cycle["id"],
                 "cycle_day": d.cycle_day,
                 "work_type": d.work_type.value,
                 "state_json": d.state_json
@@ -249,29 +246,18 @@ async def update_cycle(
     if not cycle:
         raise HTTPException(status_code=404, detail="Cycle not found")
     
-    # SYNC TO MASTER SETTINGS
-    if cycle:
-        try:
-            ms_service = MasterSettingsService(db)
-            cycle_for_settings = {
-                "id": cycle["id"],
-                "name": cycle["name"],
-                "pattern": cycle["pattern"],
-                "anchor_date": cycle["anchor_date"],
-                "anchor_cycle_day": cycle["anchor_cycle_day"],
-                "total_days": cycle["cycle_length"]
-            }
-            await ms_service.update_section(user["id"], "cycle", cycle_for_settings)
-            logger.info(f"Synced updated cycle to master_settings for user {user['id']}")
-        except Exception as e:
-            logger.error(f"Failed to sync cycle to master_settings: {e}")
+    await remember_cycle(db, user["id"], cycle)
     
-    # AUTO-REGENERATE CALENDAR if pattern/anchor changed
+    # AUTO-REGENERATE CALENDAR if pattern/anchor changed.
+    # Regeneration reads Master Settings, not the relational row, so a different
+    # saved cycle cannot be overwritten by this update.
     if needs_regeneration and cycle:
-        anchor_date_str = cycle.get("anchor_date")
+        projection = await projection_for_user(db, user["id"])
+        prepared = engine_cycle(projection.get("cycle") or cycle)
+        anchor_date_str = prepared.get("anchor_date")
         if anchor_date_str:
             from datetime import date as date_module
-            anchor_date = date_module.fromisoformat(anchor_date_str) if isinstance(anchor_date_str, str) else anchor_date_str
+            anchor_date = date_module.fromisoformat(str(anchor_date_str)[:10])
             
             # Generate from anchor date forward only
             start_date = anchor_date
@@ -280,14 +266,19 @@ async def update_cycle(
             logger.info(f"Regenerating calendar from {start_date} to {end_date} after cycle update")
             
             try:
-                leave_blocks = await db.get_leave_blocks(user["id"])
-                days = engine.generate_range(start_date, end_date, cycle, leave_blocks)
+                days = engine.generate_range(
+                    start_date,
+                    end_date,
+                    prepared,
+                    projection.get("leave_blocks") or [],
+                    projection.get("constraints") or [],
+                )
                 
                 days_data = [
                     {
                         "user_id": user["id"],
                         "date": d.date.isoformat(),
-                        "cycle_id": cycle["id"],
+                        "cycle_id": prepared.get("id") or cycle["id"],
                         "cycle_day": d.cycle_day,
                         "work_type": d.work_type.value,
                         "state_json": d.state_json

@@ -11,6 +11,12 @@ from loguru import logger
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_engine import create_calendar_engine
+from app.engines.calendar_authority import (
+    commitment_is_study,
+    effective_constraints,
+    is_night_study_rule,
+    night_shift_dates,
+)
 
 
 # Command action types
@@ -726,36 +732,33 @@ class CommandExecutor:
         violations = []
         warnings = []
         
-        constraints = current_settings.get("constraints", [])
+        constraints = await effective_constraints(
+            self.db, self.user_id, current_settings.get("constraints", [])
+        )
         
         # For add_commitment, check against constraints
-        if action == "add_commitment":
-            schedule = payload.get("schedule", {})
-            
-            for constraint in constraints:
-                if not constraint.get("active", True):
-                    continue
-                
-                rule = constraint.get("rule")
-                constraint_type = constraint.get("type", "soft")
-                
-                # Example: no_study_on_night_shift
-                if rule == "no_study_on_night_shift" and payload.get("type") == "education":
-                    # Would need to check actual calendar days - for now just warn
-                    if constraint_type == "hard":
-                        violations.append({
-                            "constraint_id": constraint.get("id"),
-                            "rule": rule,
-                            "message": "Cannot schedule study on night shift days",
-                            "type": "hard"
-                        })
-                    else:
-                        warnings.append({
-                            "constraint_id": constraint.get("id"),
-                            "rule": rule,
-                            "message": "This may conflict with night shifts",
-                            "type": "soft"
-                        })
+        if action == "add_commitment" and commitment_is_study(payload):
+            night_rule = next((item for item in constraints if is_night_study_rule(item)), None)
+            if night_rule:
+                nights = night_shift_dates(current_settings.get("cycle"), payload)
+                if nights:
+                    shown = ", ".join(nights[:5])
+                    if len(nights) > 5:
+                        shown = f"{shown} and {len(nights) - 5} more"
+                    violations.append({
+                        "constraint_id": night_rule.get("id"),
+                        "rule": "no_activity_on",
+                        "message": f"Study is not allowed on night shifts ({shown})",
+                        "type": "hard",
+                        "dates": nights,
+                    })
+                else:
+                    warnings.append({
+                        "constraint_id": night_rule.get("id"),
+                        "rule": "no_activity_on",
+                        "message": "Study stays off night shifts. This commitment is not placed on those days.",
+                        "type": "soft",
+                    })
         
         # For add_leave, check for overlaps
         if action == "add_leave":
@@ -901,9 +904,15 @@ class CommandExecutor:
             for lb in settings.get("leave_blocks", [])
         ]
 
+        constraints = await effective_constraints(
+            self.db, self.user_id, settings.get("constraints", [])
+        )
+
         # Generate calendar from anchor date onward
         try:
-            days = engine.generate_range(start_date, end_date, cycle_for_engine, leave_blocks)
+            days = engine.generate_range(
+                start_date, end_date, cycle_for_engine, leave_blocks, constraints
+            )
 
             # IMPORTANT: Fetch existing days that have manual_override flag to preserve them
             existing_result = self.db.client.table("calendar_days").select("date, state_json, work_type").eq(

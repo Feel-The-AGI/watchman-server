@@ -18,7 +18,7 @@ settings = get_settings()
 
 
 def require_admin(user: dict = Depends(get_current_user)):
-    """Middleware to require admin tier"""
+    """Admin routes require tier='admin'. Role is not the live source of admin."""
     if user.get("tier") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user

@@ -10,6 +10,7 @@ Merge order before the first production deploy:
 4. `cursor/entitlements-expiry-ea99`
 5. `cursor/test-suite-triage-ea99`
 6. `cursor/deploy-readiness-ea99` (this file and `docs/LAUNCH_DECISIONS.md`)
+7. `cursor/master-settings-calendar-ea99` (Master Settings calendar source and the night-shift rule)
 
 ## 1. Secrets
 
@@ -47,8 +48,9 @@ Stop after reviewing each statement. None of these statements were run against p
 - `001` through `008` are the existing schema. Skip a file only when that migration is already present.
 - `009_billing_authority.sql` revokes browser writes to `users.tier`, subscriptions, payments, admin stats, and direct calendar-share writes. It does not delete rows. Profile edits go through `PATCH /api/auth/me`, which uses the service role. Confirm with a disposable account that a logged-in user can still read their profile and cannot `update users set tier = 'admin'`.
 - `010_pro_access_period.sql` adds `users.pro_expires_at` and `payments.access_until`. For each existing `tier = 'pro'` user who has a paid payment, it sets expiry to the later of (latest payment + 30 days) and (now + 7 days). Complimentary Pro with no payment is left with a null expiry and keeps access. Admin rows are not changed. Users whose paid period is already over get 7 days from the migration, then the API treats them as free on the next request. The unique index on `paystack_reference` fails the migration if duplicate references already exist; inspect those rows before retrying.
+- `011_master_settings_source.sql` copies an active cycle, active constraints, and leave blocks into Master Settings only when that section is empty. Apply it before launch so existing accounts already have one calendar document. The API also reads those tables when the document section is empty, so a short delay does not drop data. Running it twice does not replace a section that was already filled.
 
-Take a database backup before 009 and 010.
+Take a database backup before 009, 010, and 011.
 
 ## 3. Render
 

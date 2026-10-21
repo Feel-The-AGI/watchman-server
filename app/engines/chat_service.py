@@ -15,6 +15,7 @@ from google.genai import types
 
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
+from app.engines.calendar_authority import effective_constraints
 from app.engines.command_executor import CommandExecutor
 
 
@@ -585,6 +586,10 @@ class ChatService:
 
         # Get full context
         master_settings = await self.settings_service.get_snapshot(self.user_id)
+        master_settings = dict(master_settings)
+        master_settings["constraints"] = await effective_constraints(
+            self.db, self.user_id, master_settings.get("constraints")
+        )
         calendar_snapshot = await self._get_calendar_snapshot()
         logs_and_incidents = await self._get_logs_and_incidents()
         chat_history = await self.get_history(limit=10)

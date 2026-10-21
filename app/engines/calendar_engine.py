@@ -80,7 +80,8 @@ class CalendarEngine:
         self,
         year: int,
         cycle: Dict,
-        leave_blocks: Optional[List[Dict]] = None
+        leave_blocks: Optional[List[Dict]] = None,
+        constraints: Optional[List[Dict]] = None,
     ) -> List[CalendarDayCreate]:
         """
         Generate a full year of calendar days based on cycle definition.
@@ -96,14 +97,15 @@ class CalendarEngine:
         start_date = date(year, 1, 1)
         end_date = date(year, 12, 31)
         
-        return self.generate_range(start_date, end_date, cycle, leave_blocks)
+        return self.generate_range(start_date, end_date, cycle, leave_blocks, constraints)
     
     def generate_range(
         self,
         start_date: date,
         end_date: date,
         cycle: Dict,
-        leave_blocks: Optional[List[Dict]] = None
+        leave_blocks: Optional[List[Dict]] = None,
+        constraints: Optional[List[Dict]] = None,
     ) -> List[CalendarDayCreate]:
         """
         Generate calendar days for a date range.
@@ -151,6 +153,9 @@ class CalendarEngine:
             
             if is_leave:
                 state["tags"].append("leave")
+
+            from app.engines.calendar_authority import annotate_night_study
+            state = annotate_night_study(state, work_type.value, constraints)
             
             day = CalendarDayCreate(
                 user_id=self.user_id,
@@ -255,13 +260,14 @@ class CalendarEngine:
                     should_apply = False
                 
                 if should_apply:
-                    # Check system constraints
+                    from app.engines.calendar_authority import constraint_is_active, normalized_rule
                     for constraint in constraints:
-                        rule = constraint.get("rule", {})
-                        if rule.get("type") == "no_activity_on":
-                            if work_type in rule.get("work_types", []):
-                                should_apply = False
-                                break
+                        if not constraint_is_active(constraint):
+                            continue
+                        rule = normalized_rule(constraint) or {}
+                        if rule.get("type") == "no_activity_on" and work_type in (rule.get("work_types") or []):
+                            should_apply = False
+                            break
                 
                 if should_apply:
                     # Add commitment to day

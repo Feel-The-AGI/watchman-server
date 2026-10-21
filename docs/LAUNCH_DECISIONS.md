@@ -56,6 +56,8 @@ Free-tier numbers that are enforced on the server match the client settings tabl
 
 ### Recommendation
 
-Choose **Master Settings as the editable source** and keep `calendar_days` as the projection. The conversational product, proposals, and undo already live there. Do not build the sync layer. A follow-up can move the REST routes onto that document and then stop writing the relational tables. The night-shift rule should be implemented once, against `calendar_days`, using the system rule shape from onboarding (`no_activity_on` / `work_night`), and it should block only the days that are actually night shifts.
+Choose **Master Settings as the editable source** and keep `calendar_days` as the projection. The conversational product, proposals, and undo already live there.
 
-That follow-up is a behavior change for existing calendars. It needs a dry run that compares a user's cycle row with their Master Settings cycle before either side is deleted.
+That read-through is now in place. `POST /api/cycles` and `PATCH /api/cycles/{id}` copy the saved rotation into Master Settings and write `calendar_days` once, which is the only write the client performs. `POST /api/calendar/generate` reads Master Settings and does not replace that cycle with a different row from the cycles table. The night-shift rule saved as `{type: "no_study_on", value: "work_night"}` is read by the agent and by day generation, as are the older string and `no_activity_on` shapes. It blocks study only on dates that are actually night shifts. Migration 011 copies empty document sections once and does not delete rows. The relational tables are still present.
+
+Neither store is deleted. A later cleanup can drop the relational copies only after comparing them with the document.
