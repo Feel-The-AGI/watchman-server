@@ -1,6 +1,6 @@
 """
 Chat Service
-Handles conversation with user and coordinates with Gemini for command execution via tool calling
+Handles conversation with the user and coordinates Claude tool calls.
 """
 
 from typing import Dict, Any, Optional, List
@@ -8,18 +8,22 @@ from datetime import datetime, date, timedelta
 from uuid import uuid4
 from loguru import logger
 import json
-import os
 
-from google import genai
-from google.genai import types
+import anthropic
 
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_authority import effective_constraints
 from app.engines.command_executor import CommandExecutor
+from app.engines.claude_chat import (
+    USER_FACING_MODEL_ERROR,
+    ModelRequestError,
+    complete_chat,
+    history_to_messages,
+)
 
 
-# Define tools (function declarations) for Gemini
+# Tool declarations. Claude receives these as input_schema tool definitions.
 WATCHMAN_TOOLS = [
     {
         "name": "override_days",
@@ -460,21 +464,13 @@ Remember: You're here to help shift workers take control of their chaotic schedu
 
 
 class ChatService:
-    """Service for handling chat with Gemini using tool calling"""
+    """Service for handling chat with Claude using tool calling."""
 
     def __init__(self, db: Database, user_id: str):
         self.db = db
         self.user_id = user_id
         self.settings_service = MasterSettingsService(db)
         self.command_executor = CommandExecutor(db, user_id)
-
-        # Initialize Gemini client
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not set")
-
-        self.client = genai.Client(api_key=api_key)
-        self.model = "gemini-2.5-pro"
 
     async def _get_calendar_snapshot(self, days_back: int = 30, days_forward: int = 60) -> str:
         """Get a snapshot of the user's calendar for context"""
@@ -606,68 +602,26 @@ class ChatService:
             current_date=datetime.now().strftime("%Y-%m-%d")
         )
 
-        # Build conversation history
-        contents = []
-        for msg in reversed(chat_history[:-1]):
-            role = "user" if msg["role"] == "user" else "model"
-            contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
+        messages = history_to_messages(chat_history, content)
 
-        contents.append(types.Content(role="user", parts=[types.Part(text=content)]))
-
-        # Create tool declarations
-        tools = types.Tool(function_declarations=[
-            types.FunctionDeclaration(
-                name=tool["name"],
-                description=tool["description"],
-                parameters=tool["parameters"]
-            )
-            for tool in WATCHMAN_TOOLS
-        ])
-
-        # Call Gemini with tools
         try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    tools=[tools],
-                    temperature=0.2,
-                    max_output_tokens=8000
-                )
+            response_text, tool = await complete_chat(
+                system=system_prompt,
+                messages=messages,
+                tools=WATCHMAN_TOOLS,
             )
+        except (ModelRequestError, anthropic.APIError) as e:
+            logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")
+            response_text = USER_FACING_MODEL_ERROR
+            tool = None
 
-            # Check for function calls
-            function_call = None
-            response_text = ""
-
-            if response.candidates and len(response.candidates) > 0:
-                candidate = response.candidates[0]
-                if candidate.content and candidate.content.parts:
-                    for part in candidate.content.parts:
-                        if hasattr(part, 'function_call') and part.function_call:
-                            function_call = part.function_call
-                            logger.info(f"[GEMINI] Tool called: {function_call.name}")
-                            logger.info(f"[GEMINI] Tool args: {dict(function_call.args)}")
-                        elif hasattr(part, 'text') and part.text:
-                            response_text = part.text.strip()
-
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            response_text = f"I'm having trouble processing that right now. Error: {str(e)[:100]}"
-            function_call = None
-
-        # Handle function call (tool use)
         command = None
-        if function_call:
+        if tool and tool.get("name"):
             command = {
-                "action": function_call.name,
-                "payload": dict(function_call.args),
-                "explanation": response_text or f"Executing {function_call.name}"
+                "action": tool["name"],
+                "payload": tool.get("input") or {},
+                "explanation": response_text or f"Executing {tool['name']}"
             }
-            logger.info(f"[GEMINI] Command from tool call: {command}")
-        else:
-            logger.info(f"[GEMINI] No tool called - conversational response: {response_text[:200]}...")
 
         result = {
             "user_message": user_message,

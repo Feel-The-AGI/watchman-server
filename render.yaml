@@ -1,14 +1,13 @@
-# Watchman API — Render blueprint for a new web service.
+# Watchman API — Render blueprint for a free web service.
 # Create the service from this file, then paste the secret values in the dashboard.
-# Do not put secret values in this file. autoDeploy is off until the stacked
-# security branches are merged to the branch named below.
+# Do not put secret values in this file.
 
 services:
   - type: web
     name: watchman-api
     runtime: python
     region: oregon
-    plan: starter
+    plan: free
     branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
@@ -29,8 +28,10 @@ services:
         sync: false
       - key: SUPABASE_JWT_SECRET
         sync: false
-      - key: GEMINI_API_KEY
+      - key: ANTHROPIC_API_KEY
         sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-haiku-5-5
       - key: PAYSTACK_SECRET_KEY
         sync: false
       - key: PAYSTACK_PUBLIC_KEY

@@ -19,12 +19,12 @@ python-dateutil
 python-jose[cryptography]
 passlib[bcrypt]
 
-# HTTP Client for Gemini API
+# HTTP client
 httpx
 aiohttp
 
-# Google Generative AI (Gemini) - New unified SDK
-google-genai
+# Anthropic Claude
+anthropic
 
 # Utilities
 python-dotenv

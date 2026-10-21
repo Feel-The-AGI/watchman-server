@@ -25,7 +25,8 @@ def mock_settings():
             supabase_anon_key="test-anon-key",
             supabase_service_key="test-service-key",
             supabase_jwt_secret="test-jwt-secret-at-least-32-characters",
-            gemini_api_key="test-gemini-key",
+            anthropic_api_key="test-anthropic-key",
+            anthropic_model="claude-haiku-5-5",
             cors_origins="http://localhost:3000",
             cors_origins_list=["http://localhost:3000"]
         )

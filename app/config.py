@@ -17,8 +17,9 @@ class Settings(BaseSettings):
     supabase_service_key: str = ""  # Set via SUPABASE_SERVICE_KEY env var
     supabase_jwt_secret: str = ""
 
-    # Gemini AI
-    gemini_api_key: str = ""
+    # Anthropic Claude. Haiku 5.5 is the default chat model.
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-haiku-5-5"
 
     # Paystack. Webhook signatures use paystack_secret_key.
     paystack_secret_key: str = ""  # Set via PAYSTACK_SECRET_KEY env var
