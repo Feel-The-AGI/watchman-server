@@ -5,7 +5,16 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.routes.commitments import delete_commitment
+from app.routes.commitments import (
+    CreateCommitmentRequest,
+    UpdateCommitmentRequest,
+    create_commitment,
+    delete_commitment,
+    get_commitment,
+    list_active_commitments,
+    list_commitments,
+    update_commitment,
+)
 
 
 class _Result:
@@ -49,6 +58,9 @@ class _Table:
             return _Result([row])
         matched = [row for row in rows if all(row.get(key) == value for key, value in self.filters)]
         if self.op == "update":
+            if self.store.fail_updates:
+                self.store.fail_updates -= 1
+                raise RuntimeError("settings write failed")
             for row in matched:
                 row.update(self.payload)
         return _Result(matched)
@@ -72,9 +84,19 @@ class _Store:
             "cycle_id": "cycle-1",
             "cycle_day": 1,
             "work_type": "off",
-            "state_json": {"commitments": [], "tags": [], "is_leave": False},
+            "state_json": {
+                "commitments": [{
+                    "commitment_id": "commitment-1",
+                    "name": "Dentist appointment",
+                }],
+                "tags": [],
+                "is_leave": False,
+            },
         }]
         self.upserts = 0
+        self.fail_updates = 0
+        self.fail_rebuild = False
+        self.admin_calls = []
         self.tables = {
             "master_settings": [{
                 "id": "settings-1",
@@ -117,7 +139,13 @@ class _Store:
     async def get_commitments(self, user_id):
         return [row for row in self.commitments if row["user_id"] == user_id]
 
+    async def read_commitments(self, user_id):
+        return await self.get_commitments(user_id)
+
     async def get_leave_blocks(self, user_id):
+        return []
+
+    async def read_leave_blocks(self, user_id):
         return []
 
     async def get_active_constraints(self, user_id):
@@ -127,6 +155,8 @@ class _Store:
         return [day for day in self.days if start <= day["date"] <= end]
 
     async def upsert_calendar_days(self, days):
+        if self.fail_rebuild:
+            raise RuntimeError("rebuild failed")
         self.upserts += 1
         by_date = {day["date"]: day for day in self.days}
         for day in days:
@@ -139,10 +169,18 @@ def _settings(store):
     return store.tables["master_settings"][0]["settings"]
 
 
+def _install(monkeypatch, store):
+    def database(use_admin=False):
+        store.admin_calls.append(use_admin)
+        return store
+
+    monkeypatch.setattr("app.routes.commitments.Database", database)
+
+
 @pytest.mark.asyncio
 async def test_delete_removes_the_settings_copy_and_rebuilds(monkeypatch):
     store = _Store()
-    monkeypatch.setattr("app.routes.commitments.Database", lambda: store)
+    _install(monkeypatch, store)
 
     result = await delete_commitment("commitment-1", {"id": "user-1"})
 
@@ -150,6 +188,68 @@ async def test_delete_removes_the_settings_copy_and_rebuilds(monkeypatch):
     assert store.commitments == []
     assert _settings(store)["commitments"] == []
     assert store.upserts == 1
+    assert store.admin_calls == [True]
+    day = next(row for row in store.days if row["date"] == "2026-10-27")
+    assert day["state_json"]["commitments"] == []
+    assert _settings(store)["commitments_pending_removal"] == []
+
+
+@pytest.mark.asyncio
+async def test_delete_clears_a_settings_copy_when_the_row_is_already_gone(monkeypatch):
+    store = _Store()
+    store.commitments = []
+    _install(monkeypatch, store)
+
+    result = await delete_commitment("commitment-1", {"id": "user-1"})
+
+    assert result["success"] is True
+    assert _settings(store)["commitments"] == []
+    assert store.upserts == 1
+    day = next(row for row in store.days if row["date"] == "2026-10-27")
+    assert day["state_json"]["commitments"] == []
+
+
+@pytest.mark.asyncio
+async def test_settings_write_failure_can_be_retried(monkeypatch):
+    store = _Store()
+    store.fail_updates = 1
+    _install(monkeypatch, store)
+
+    with pytest.raises(HTTPException) as failed:
+        await delete_commitment("commitment-1", {"id": "user-1"})
+    assert failed.value.status_code == 500
+    assert store.commitments
+    assert _settings(store)["commitments"]
+    assert store.upserts == 0
+
+    result = await delete_commitment("commitment-1", {"id": "user-1"})
+
+    assert result["success"] is True
+    assert store.commitments == []
+    assert _settings(store)["commitments"] == []
+    assert store.upserts == 1
+
+
+@pytest.mark.asyncio
+async def test_rebuild_failure_can_be_retried(monkeypatch):
+    store = _Store()
+    store.fail_rebuild = True
+    _install(monkeypatch, store)
+
+    with pytest.raises(HTTPException) as failed:
+        await delete_commitment("commitment-1", {"id": "user-1"})
+    assert failed.value.status_code == 500
+    assert store.commitments == []
+    assert _settings(store)["commitments"] == []
+    assert "commitment-1" in _settings(store)["commitments_pending_removal"]
+    assert store.upserts == 0
+
+    store.fail_rebuild = False
+    result = await delete_commitment("commitment-1", {"id": "user-1"})
+
+    assert result["success"] is True
+    assert store.upserts == 1
+    assert _settings(store)["commitments_pending_removal"] == []
     day = next(row for row in store.days if row["date"] == "2026-10-27")
     assert day["state_json"]["commitments"] == []
 
@@ -157,7 +257,7 @@ async def test_delete_removes_the_settings_copy_and_rebuilds(monkeypatch):
 @pytest.mark.asyncio
 async def test_delete_rejects_a_missing_or_foreign_commitment(monkeypatch):
     store = _Store()
-    monkeypatch.setattr("app.routes.commitments.Database", lambda: store)
+    _install(monkeypatch, store)
 
     with pytest.raises(HTTPException) as missing:
         await delete_commitment("missing", {"id": "user-1"})
@@ -169,3 +269,77 @@ async def test_delete_rejects_a_missing_or_foreign_commitment(monkeypatch):
     assert store.commitments
     assert _settings(store)["commitments"]
     assert store.upserts == 0
+    assert store.admin_calls == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_every_commitment_route_uses_the_admin_client_and_ownership(monkeypatch):
+    flags = []
+    calls = []
+
+    class AdminDB:
+        def __init__(self, use_admin=False):
+            flags.append(use_admin)
+
+        async def get_commitments(self, user_id):
+            calls.append(("list", user_id))
+            return [{
+                "id": "mine",
+                "user_id": user_id,
+                "status": "active",
+                "type": "personal",
+            }]
+
+        async def get_active_commitments(self, user_id):
+            calls.append(("active", user_id))
+            return []
+
+        async def get_commitment(self, commitment_id):
+            calls.append(("get", commitment_id))
+            return {
+                "id": commitment_id,
+                "user_id": "someone-else",
+                "name": "Theirs",
+                "type": "personal",
+                "status": "active",
+            }
+
+        async def create_commitment(self, data):
+            calls.append(("create", data["user_id"]))
+            return dict(data)
+
+        async def update_commitment(self, commitment_id, data):
+            raise AssertionError("must not update another user's commitment")
+
+        async def delete_commitment(self, commitment_id, user_id):
+            raise AssertionError("must not delete another user's commitment")
+
+    monkeypatch.setattr("app.routes.commitments.Database", AdminDB)
+    user = {"id": "user-1", "tier": "pro", "settings": {}}
+
+    listed = await list_commitments(user=user)
+    assert listed["data"][0]["user_id"] == "user-1"
+    active = await list_active_commitments(user=user)
+    assert active["count"] == 0
+
+    with pytest.raises(HTTPException) as got:
+        await get_commitment("theirs", user)
+    assert got.value.status_code == 403
+
+    with pytest.raises(HTTPException) as updated:
+        await update_commitment("theirs", UpdateCommitmentRequest(name="Nope"), user)
+    assert updated.value.status_code == 403
+
+    with pytest.raises(HTTPException) as deleted:
+        await delete_commitment("theirs", user)
+    assert deleted.value.status_code == 403
+
+    created = await create_commitment(
+        CreateCommitmentRequest(name="Mine", type="personal"),
+        user,
+    )
+    assert created["data"]["user_id"] == "user-1"
+    assert flags == [True, True, True, True, True, True]
+    assert ("list", "user-1") in calls
+    assert ("active", "user-1") in calls
+    assert ("create", "user-1") in calls
