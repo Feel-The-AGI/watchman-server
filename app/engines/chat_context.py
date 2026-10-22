@@ -178,6 +178,30 @@ def empty_calendar() -> dict[str, Any]:
 _CLOSED_OUTCOMES = {"declined", "approved", "expired"}
 
 
+# A proposal with no expires_at is treated as created_at plus this lifetime.
+PROPOSAL_TTL = timedelta(days=7)
+
+
+def proposal_is_expired(proposal: Optional[dict], now: Optional[datetime] = None) -> bool:
+    """True when the proposal can no longer be approved.
+
+    A stored expires_at wins. NULL means created_at plus seven days, which is
+    how proposals saved before the column was filled still age out.
+    """
+    if not isinstance(proposal, dict):
+        return True
+    expires = proposal.get("expires_at")
+    if expires not in (None, ""):
+        return _is_past(expires, now)
+    created = _as_datetime(proposal.get("created_at"))
+    if created is None:
+        return True
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return created + PROPOSAL_TTL <= current.astimezone(timezone.utc)
+
+
 def proposal_outcome(proposal: Optional[dict], now: Optional[datetime] = None) -> Optional[str]:
     """Closed outcomes the model must not propose again. Pending stays unmarked."""
     if not isinstance(proposal, dict):
@@ -185,7 +209,7 @@ def proposal_outcome(proposal: Optional[dict], now: Optional[datetime] = None) -
     status = str(proposal.get("status") or "").strip().lower()
     if status == "rejected":
         status = "declined"
-    if status == "pending" and _is_past(proposal.get("expires_at"), now):
+    if status == "pending" and proposal_is_expired(proposal, now):
         return "expired"
     if status in _CLOSED_OUTCOMES:
         return status

@@ -13,6 +13,7 @@ from uuid import UUID
 
 from app.middleware.auth import get_current_user, get_effective_tier
 from app.database import Database
+from app.engines.chat_context import PROPOSAL_TTL, proposal_is_expired
 from app.engines.command_executor import UndoConflict, create_command_executor
 from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 
@@ -23,12 +24,25 @@ router = APIRouter(prefix="/commands", tags=["commands"])
 def unexpired_proposal_filter(now: datetime | None = None) -> str:
     """PostgREST `or` filter for proposals that have not expired.
 
+    A null expires_at is created_at plus seven days, not an open-ended card.
     Values containing `.` or `+` must be double-quoted. An unquoted ISO
     timestamp is split on the fractional-second dot and the query errors.
     """
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
     stamp = current.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return f'expires_at.is.null,expires_at.gt."{stamp}"'
+    born_after = (current - PROPOSAL_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (
+        f'expires_at.gt."{stamp}",'
+        f'and(expires_at.is.null,created_at.gt."{born_after}")'
+    )
+
+
+def _load_owned_proposal(db: Database, proposal_id: UUID, user_id: str):
+    result = db.client.table("proposals").select("*").eq(
+        "id", str(proposal_id)
+    ).eq("user_id", user_id).limit(1).execute()
+    rows = result.data or []
+    return rows[0] if rows else None
 
 
 def _restore_pending_proposal(db: Database, proposal_id: UUID, user_id: str) -> None:
@@ -130,7 +144,19 @@ async def review_proposal(
     request: ReviewProposalRequest,
     user: dict = Depends(get_current_user),
 ):
-    """Review an owned proposal; execute only its stored command, once."""
+    """Review an owned proposal; execute only its stored command, once.
+
+    Response shape, which the client uses instead of treating every 200 as Done:
+
+    - Applied: ``{"success": true, "status": "applied", "changed": true,
+      "message": "Mark Thu 15 Oct 2026 as Off", "command_id": "...", "result": {...}}``
+    - No stored day changed: ``{"success": true, "status": "no_change",
+      "changed": false, "message": "No change: Thu 15 Oct 2025 was already Off",
+      "result": {...}}``. Do not show Done.
+    - Expired, including a null ``expires_at`` older than seven days from
+      ``created_at``: HTTP 410 ``{"detail": "This proposal expired and was not applied."}``.
+      The command is not executed.
+    """
     db = Database(use_admin=True)
     now = datetime.now(timezone.utc).isoformat()
     status = proposal_status_for_decision(request.decision)
@@ -146,6 +172,12 @@ async def review_proposal(
         logger.error(f"[COMMANDS] Proposal {proposal_id} could not be marked {status}: {exc}")
         raise _review_failed(request.decision) from exc
     if not result.data:
+        existing = _load_owned_proposal(db, proposal_id, user["id"])
+        if existing and str(existing.get("status") or "") == "pending" and proposal_is_expired(existing):
+            raise HTTPException(
+                status_code=410,
+                detail="This proposal expired and was not applied.",
+            )
         raise HTTPException(status_code=409, detail="Proposal unavailable or already reviewed")
     proposal = result.data[0]
     if status == "declined":

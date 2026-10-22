@@ -3,6 +3,7 @@ Command Executor Service
 Validates commands, routes through Constraint Engine, creates proposals, executes approved commands
 """
 
+import copy
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, date, timedelta, timezone
 from uuid import uuid4
@@ -37,8 +38,10 @@ from app.prompts.registry import insert_row
 from app.engines.proposal_effects import (
     card_command,
     commitment_record,
+    describe_command,
     event_dates,
     leave_record,
+    no_change_message,
     stamp_day_state,
 )
 
@@ -326,7 +329,10 @@ class CommandExecutor:
                 "success": False,
                 "error": str(e)
             }
-        
+
+        if isinstance(result, dict) and result.get("no_change"):
+            return _outcome("no_change", False, result.get("message") or "No change.", result)
+
         # Project onto calendar_days before recording success. A failed write
         # must not look applied: the review route turns that into an error and
         # puts the proposal back to pending. Drop a row inserted in this call
@@ -358,14 +364,16 @@ class CommandExecutor:
         # Get after state
         after_state = await self.settings_service.get_snapshot(self.user_id)
         
-        # Log the command. Record whether this call inserted a row so undo
-        # can remove that id and nothing else.
+        # Log the command. Inserted row ids and day snapshots stay on the log
+        # so undo can remove or restore them. They are not part of the proposal.
         logged_payload = dict(payload) if isinstance(payload, dict) else {}
         if isinstance(result, dict) and action in ("add_leave", "add_commitment"):
             inserted_key = (
                 "inserted_leave_id" if action == "add_leave" else "inserted_commitment_id"
             )
             logged_payload[inserted_key] = result.get(inserted_key) or ""
+        if isinstance(result, dict) and result.get("previous_days") is not None:
+            logged_payload["_previous_days"] = result["previous_days"]
         try:
             command_log = await self._log_command(
                 action=action,
@@ -383,11 +391,15 @@ class CommandExecutor:
                 "error": str(e),
             }
 
-        return {
-            "success": True,
-            "command_id": command_log["id"],
-            "result": result
-        }
+        message = explanation or ""
+        if not str(message).strip():
+            try:
+                message = describe_command(action, payload if isinstance(payload, dict) else {})
+            except Exception:
+                message = "Changes applied."
+        outcome = _outcome("applied", True, message, result)
+        outcome["command_id"] = command_log["id"]
+        return outcome
 
     async def _drop_inserted_row(self, result: Any) -> None:
         """Remove the commitment or leave inserted by a command whose calendar write failed."""
@@ -709,7 +721,7 @@ class CommandExecutor:
         start_date_str = payload.get("start_date")
         end_date_str = payload.get("end_date")
         work_type_str = payload.get("work_type")
-        preserve_off_days = payload.get("preserve_off_days", True)  # Default to preserving off days
+        preserve_off_days = _bool_flag(payload.get("preserve_off_days", True), default=True)
 
         if not start_date_str or not end_date_str:
             raise ValueError("start_date and end_date are required")
@@ -757,43 +769,73 @@ class CommandExecutor:
         end_date = date.fromisoformat(end_date_str)
 
         updated_days = []
+        previous_days = []
+        unchanged_types = []
         skipped_off_days = 0
         current = start_date
         while current <= end_date:
             date_str = current.isoformat()
             existing = existing_days.get(date_str)
+            existing_type = existing.get("work_type") if existing else None
 
-            # If preserve_off_days is True and this day is currently "off", skip it
-            if preserve_off_days and existing and existing.get("work_type") == "off":
+            # preserve_off_days skips rest days unless the user is setting Off.
+            if preserve_off_days and existing_type == "off" and work_type != "off":
                 logger.debug(f"Preserving off day: {date_str}")
                 skipped_off_days += 1
+                unchanged_types.append("off")
+                current += timedelta(days=1)
+                continue
+            if existing_type == work_type:
+                unchanged_types.append(existing_type)
                 current += timedelta(days=1)
                 continue
 
-            # Build updated day data
-            state_json = existing.get("state_json", {}) if existing else {}
+            previous_days.append(_day_snapshot(date_str, existing))
+            state_json = copy.deepcopy(existing.get("state_json") or {}) if existing else {}
+            block_day = state_json.get("block_day")
+            if not isinstance(block_day, int):
+                block_day = existing.get("cycle_day") if existing and existing.get("cycle_day") else 1
             state_json["available_hours"] = available_hours
             state_json["engine_version"] = CALENDAR_ENGINE_VERSION
-            state_json["manual_override"] = True  # Flag that this was manually set
+            state_json["manual_override"] = True
+            state_json["block_day"] = int(block_day)
+            state_json["shift_badge"] = shift_badge(work_type, int(block_day))
 
-            day_data = {
+            updated_days.append({
                 "user_id": self.user_id,
                 "date": date_str,
                 "cycle_id": existing.get("cycle_id") if existing else None,
                 "cycle_day": existing.get("cycle_day", 1) if existing else 1,
                 "work_type": work_type,
-                "state_json": state_json
-            }
-            updated_days.append(day_data)
+                "state_json": state_json,
+            })
             current += timedelta(days=1)
 
+        if not updated_days:
+            kind = work_type
+            if unchanged_types and all(item == unchanged_types[0] for item in unchanged_types):
+                kind = unchanged_types[0]
+            message = no_change_message(start_date, end_date, kind)
+            logger.info(
+                f"=== OVERRIDE_DAYS NO CHANGE: {message} for user {self.user_id} ==="
+            )
+            return {
+                "no_change": True,
+                "updated_count": 0,
+                "skipped_off_days": skipped_off_days,
+                "start_date": start_date_str,
+                "end_date": end_date_str,
+                "work_type": work_type,
+                "preserve_off_days": preserve_off_days,
+                "message": message,
+            }
+
         # Upsert all updated days (specify conflict columns for unique constraint)
-        if updated_days:
-            result = self.db.client.table("calendar_days").upsert(
-                updated_days,
-                on_conflict="user_id,date"
-            ).execute()
-            logger.info(f"Upsert result: {len(result.data) if result.data else 0} rows affected")
+        result = self.db.client.table("calendar_days").upsert(
+            updated_days,
+            on_conflict="user_id,date"
+        ).execute()
+        logger.info(f"Upsert result: {len(result.data) if result.data else 0} rows affected")
 
         logger.info(f"=== OVERRIDE_DAYS COMPLETE: {len(updated_days)} days updated, {skipped_off_days} off days preserved, from {start_date_str} to {end_date_str} set to {work_type} for user {self.user_id} ===")
 
@@ -803,7 +845,8 @@ class CommandExecutor:
             "start_date": start_date_str,
             "end_date": end_date_str,
             "work_type": work_type,
-            "preserve_off_days": preserve_off_days
+            "preserve_off_days": preserve_off_days,
+            "previous_days": previous_days,
         }
 
     async def _action_create_daily_log(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1083,6 +1126,7 @@ class CommandExecutor:
             raise UndoConflict("Only the latest applied change can be undone.")
         try:
             await self._remove_created_row(command)
+            await self._revert_calendar_effect(command)
             before_state = command.get("before_state")
             if before_state:
                 await self.settings_service.update(self.user_id, before_state)
@@ -1131,6 +1175,9 @@ class CommandExecutor:
             await self.settings_service.update(self.user_id, after_state)
             cycle = after_state.get("cycle") if isinstance(after_state, dict) else None
             await sync_cycle_row(self.db, self.user_id, cycle)
+        reapply = _override_to_reapply(command)
+        if reapply:
+            await self._action_override_days(reapply)
         await self._rebuild_created_span(command)
         return {"redone_command_id": command["id"]}
 
@@ -1179,7 +1226,7 @@ class CommandExecutor:
         if span is None:
             return
         await self.rebuild_calendar(*span)
-    
+
     async def _check_constraints(
         self, 
         action: str, 
@@ -1565,6 +1612,63 @@ class CommandExecutor:
         )
         return True
 
+    async def _revert_calendar_effect(self, command: Dict[str, Any]) -> None:
+        """Put override days back before a rebuild paints the rotation again."""
+        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        previous = payload.get("_previous_days")
+        if previous:
+            await self._write_previous_days(previous)
+            return
+        if command.get("action") == "override_days":
+            await self._clear_manual_overrides(payload)
+
+    async def _write_previous_days(self, previous: list) -> None:
+        for item in previous or []:
+            if not isinstance(item, dict):
+                continue
+            day = str(item.get("date") or "")[:10]
+            if not day:
+                continue
+            if not item.get("existed"):
+                self.db.client.table("calendar_days").delete().eq(
+                    "user_id", self.user_id
+                ).eq("date", day).execute()
+                continue
+            self.db.client.table("calendar_days").upsert([{
+                "user_id": self.user_id,
+                "date": day,
+                "cycle_id": item.get("cycle_id"),
+                "cycle_day": item.get("cycle_day"),
+                "work_type": item.get("work_type") or "off",
+                "state_json": item.get("state_json") or {},
+            }], on_conflict="user_id,date").execute()
+
+    async def _clear_manual_overrides(self, payload: Dict[str, Any]) -> None:
+        """Drop the override flag so the next rebuild can paint the rotation."""
+        start = payload.get("start_date")
+        end = payload.get("end_date") or start
+        if not start or not end:
+            return
+        result = self.db.client.table("calendar_days").select("*").eq(
+            "user_id", self.user_id
+        ).gte("date", start).lte("date", end).execute()
+        updates = []
+        for row in result.data or []:
+            state = dict(row.get("state_json") or {})
+            state.pop("manual_override", None)
+            updates.append({
+                "user_id": self.user_id,
+                "date": str(row.get("date") or "")[:10],
+                "cycle_id": row.get("cycle_id"),
+                "cycle_day": row.get("cycle_day"),
+                "work_type": row.get("work_type") or "off",
+                "state_json": state,
+            })
+        if updates:
+            self.db.client.table("calendar_days").upsert(
+                updates, on_conflict="user_id,date"
+            ).execute()
+
     async def _read_existing_days(self, start_date: date, end_date: date) -> list:
         """Read the range one calendar year at a time.
 
@@ -1583,6 +1687,57 @@ class CommandExecutor:
             rows.extend(batch or [])
             year += 1
         return rows
+
+
+def _outcome(status: str, changed: bool, message: str, result: Any) -> Dict[str, Any]:
+    """Review body. ``status`` is ``applied`` or ``no_change``. Done requires applied."""
+    return {
+        "success": True,
+        "status": status,
+        "changed": changed,
+        "message": message,
+        "result": _public_result(result),
+    }
+
+
+def _public_result(result: Any):
+    if not isinstance(result, dict):
+        return result
+    hidden = {"previous_days", "reapplied_payload", "no_change"}
+    return {key: value for key, value in result.items() if key not in hidden}
+
+
+def _bool_flag(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in {"false", "0", "no", ""}
+    return bool(value)
+
+
+def _day_snapshot(day: str, existing: Optional[dict]) -> dict:
+    if not existing:
+        return {"date": day, "existed": False}
+    return {
+        "date": day,
+        "existed": True,
+        "cycle_id": existing.get("cycle_id"),
+        "cycle_day": existing.get("cycle_day"),
+        "work_type": existing.get("work_type"),
+        "state_json": copy.deepcopy(existing.get("state_json") or {}),
+    }
+
+
+def _override_to_reapply(command: dict) -> Optional[dict]:
+    """The override payload a redo should write again, without log bookkeeping."""
+    payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+    nested = payload.get("_reapplied_payload")
+    source = nested if isinstance(nested, dict) else None
+    if source is None and command.get("action") == "override_days":
+        source = payload
+    if not isinstance(source, dict):
+        return None
+    return {key: value for key, value in source.items() if not str(key).startswith("_")}
 
 
 def _pending_ids(items) -> list:

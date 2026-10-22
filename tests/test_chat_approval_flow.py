@@ -13,7 +13,12 @@ from postgrest.exceptions import APIError
 from app.engines.command_executor import CommandExecutor
 from app.middleware.auth import get_current_user
 from app.routes import chat, commands
+from app.engines.chat_context import proposal_is_expired
 from app.routes.commands import unexpired_proposal_filter
+
+
+def _row_expired(row):
+    return proposal_is_expired(row)
 
 
 @pytest.fixture
@@ -23,6 +28,7 @@ def flow(monkeypatch):
         "id": proposal_id, "user_id": "alice", "status": "pending",
         "command": {"action": "add_leave", "payload": {"name": "Annual leave"}},
         "message_id": None, "expires_at": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }]
 
     seen_filters = []
@@ -56,8 +62,7 @@ def flow(monkeypatch):
                 })
             matched = [row for row in rows if all(
                 row.get(key) == value for key, value in self.filters.items()
-            ) and (not self.expiration_filter or row.get("expires_at") is None
-                   or datetime.fromisoformat(row["expires_at"]) > datetime.now(timezone.utc))]
+            ) and (not self.expiration_filter or not _row_expired(row))]
             for row in matched:
                 if self.values: row.update(self.values)
             return SimpleNamespace(data=deepcopy(matched))
@@ -143,7 +148,20 @@ def test_rejection_is_persisted_and_cannot_be_approved(flow):
 
 def test_expired_proposal_cannot_execute_or_restore(flow):
     flow.rows[0]["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
-    assert review(flow).status_code == 409
+    response = review(flow)
+    assert response.status_code == 410
+    assert response.json()["detail"] == "This proposal expired and was not applied."
+    assert flow.client.get("/api/commands/proposals/pending").json() == {"proposals": []}
+    assert flow.rows[0]["status"] == "pending"
+    flow.executor.execute.assert_not_awaited()
+
+
+def test_null_expiry_older_than_seven_days_is_gone(flow):
+    flow.rows[0]["expires_at"] = None
+    flow.rows[0]["created_at"] = "2025-12-29T00:00:00+00:00"
+    response = review(flow)
+    assert response.status_code == 410
+    assert response.json()["detail"] == "This proposal expired and was not applied."
     assert flow.client.get("/api/commands/proposals/pending").json() == {"proposals": []}
     flow.executor.execute.assert_not_awaited()
 
@@ -177,7 +195,10 @@ def test_unauthenticated_review_is_rejected(flow):
 
 def test_unexpired_filter_quotes_timestamp():
     expression = unexpired_proposal_filter(datetime(2026, 10, 21, 17, 4, 5, 123456, timezone.utc))
-    assert expression == 'expires_at.is.null,expires_at.gt."2026-10-21T17:04:05Z"'
+    assert expression == (
+        'expires_at.gt."2026-10-21T17:04:05Z",'
+        'and(expires_at.is.null,created_at.gt."2026-10-14T17:04:05Z")'
+    )
 
 
 @pytest.mark.asyncio
@@ -207,7 +228,7 @@ def test_expiry_filter_quotes_timestamp_for_postgrest(flow):
     assert flow.filters
     expression = flow.filters[0]
     assert 'expires_at.gt."' in expression
-    assert expression.endswith('"')
+    assert 'created_at.gt."' in expression
     assert "+" not in expression
 
 

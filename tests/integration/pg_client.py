@@ -12,8 +12,9 @@ _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class PgResult:
-    def __init__(self, data):
+    def __init__(self, data, count=None):
         self.data = data
+        self.count = len(data) if count is None and isinstance(data, list) else count
 
 
 class PgClient:
@@ -37,10 +38,12 @@ class PgQuery:
         self.limit_n = None
         self.on_conflict = None
         self.as_single = False
+        self._count = None
 
-    def select(self, columns="*"):
+    def select(self, columns="*", count=None):
         self.op = "select"
         self.columns = columns
+        self._count = count
         return self
 
     def insert(self, data):
@@ -82,6 +85,10 @@ class PgQuery:
         self.ordering = (_ident(column), bool(desc))
         return self
 
+    def or_(self, expression):
+        self.filters.append(_postgrest_or(expression))
+        return self
+
     def limit(self, count):
         self.limit_n = int(count)
         return self
@@ -91,6 +98,11 @@ class PgQuery:
         return self
 
     def execute(self):
+        if self.op == "select" and self._count == "exact":
+            sql = f"SELECT count(*) AS count FROM {self.table}{self._where()}"
+            rows = self._fetch((sql, list(self.params)))
+            count = int(rows[0]["count"]) if rows else 0
+            return PgResult([], count=count)
         if self.op == "select":
             rows = self._fetch(self._select_sql())
         elif self.op == "insert":
@@ -173,6 +185,50 @@ class PgQuery:
             if cursor.description is None:
                 return []
             return [_plain(row) for row in cursor.fetchall()]
+
+
+def _postgrest_or(expression: str) -> str:
+    """The proposal-expiry `or` filter, as SQL. Timestamps are quoted literals."""
+    parts = _split_top(expression)
+    return "(" + " OR ".join(_postgrest_atom(part) for part in parts) + ")"
+
+
+def _split_top(expression: str) -> list:
+    parts = []
+    buf = []
+    depth = 0
+    for char in expression:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(char)
+    if buf:
+        parts.append("".join(buf).strip())
+    return [part for part in parts if part]
+
+
+def _postgrest_atom(part: str) -> str:
+    part = part.strip()
+    if part.startswith("and(") and part.endswith(")"):
+        inner = part[4:-1]
+        return "(" + " AND ".join(_postgrest_atom(item) for item in _split_top(inner)) + ")"
+    match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\.(gt|gte|lt|lte|eq|is)\.(.+)$", part)
+    if not match:
+        raise ValueError(f"unsupported filter {part!r}")
+    column, op, raw = match.groups()
+    if op == "is" and raw == "null":
+        return f"{column} IS NULL"
+    if raw.startswith('"') and raw.endswith('"'):
+        raw = raw[1:-1]
+    if not re.match(r"^[0-9T:Z+\-]+$", raw):
+        raise ValueError(f"unsupported filter value {raw!r}")
+    sql_op = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "eq": "="}[op]
+    return f"{column} {sql_op} '{raw}'"
 
 
 def _ident(name):

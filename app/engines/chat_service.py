@@ -53,6 +53,7 @@ from app.engines.day_status import (
     schedule_question_date,
     status_from_stored,
 )
+from app.engines.missed_shift import calendar_request
 from app.engines.proposal_effects import card_command
 from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 from app.prompts.registry import insert_row, load_version, version_for
@@ -90,7 +91,9 @@ WATCHMAN_TOOLS = [
 - Mark dates as 'blank' when the user's schedule was chaotic/unknown during that period
 IMPORTANT: When user says 'set working days to X' or 'change shifts to X', set preserve_off_days=true to keep off days unchanged.
 Only set preserve_off_days=false when user explicitly wants ALL days changed (including off days).
-Use 'blank' for dates before the user's rotation became stable/consistent.""",
+Use 'blank' for dates before the user's rotation became stable/consistent.
+When the user did not work a day, set work_type to off and preserve_off_days to false. That is a manual override, not a change to the rotation.
+A date with no year uses the user's local today. Past tense uses the most recent past date. Name the full date, for example "Mark Thu 15 Oct 2026 as Off".""",
         "parameters": {
             "type": "object",
             "properties": {
@@ -575,6 +578,8 @@ class ChatService:
             self.command_executor.effective_tier = effective_tier
         if is_internal_chat_content(content):
             return await self._complete_internal(content)
+        self.command_executor.effective_tier = effective_tier or ""
+        today = local_today(timezone_name)
 
         # Only an unfinished signup with no saved rotation, and a message that
         # is nothing but an anchor, skips the model. The reply is a proposal.
@@ -628,7 +633,7 @@ class ChatService:
         )
         master_settings = settings_for_prompt(document, projection)
         master_settings, pattern_pending = with_unsaved_pattern(master_settings, pattern)
-        asked = schedule_question_date(content, date.today())
+        asked = schedule_question_date(content, today)
         if asked is not None:
             answer = await self._answer_about_day(asked, master_settings)
             assistant_message = await self._save_message("assistant", answer)
@@ -644,34 +649,56 @@ class ChatService:
             master_settings.get("cycle"), calendar, pending=pattern_pending
         )
 
-        logger.info(f"[CHAT] User {self.user_id} message: {content[:100]}")
-        logger.info(f"[CHAT] Calendar snapshot length: {len(calendar.get('text') or '')} chars")
-        logger.info(f"[CHAT] Logs/incidents length: {len(logs_and_incidents)} chars")
-
-        # Build system prompt with full context
-        prompt = version_for("chat", self.user_id)
-        self._reply_prompt_version = prompt.id
-        logger.info(f"[CHAT] prompt_version={prompt.id} for user {self.user_id}")
-        system_prompt = prompt.text.format(
-            master_settings=json.dumps(master_settings, indent=2, default=str),
-            calendar_snapshot=calendar.get("text") or "",
-            logs_and_incidents=logs_and_incidents,
-            rotation_status=applied,
-            current_date=datetime.now().strftime("%Y-%m-%d")
-        )
-
-        messages = history_to_messages(chat_history, content)
-
-        try:
-            response_text, tool = await complete_chat(
-                system=system_prompt,
-                messages=messages,
-                tools=_tools_for(prompt),
-            )
-        except (ModelRequestError, anthropic.APIError) as e:
-            logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")
-            response_text = USER_FACING_MODEL_ERROR
+        handled = calendar_request(content, today)
+        if handled is not None:
+            if handled.clarify:
+                assistant_message = await self._save_message("assistant", handled.clarify)
+                return {
+                    "user_message": user_message,
+                    "assistant_message": assistant_message,
+                    "response": handled.clarify,
+                    "is_command": False,
+                    "command": None,
+                    "proposal": None,
+                }
+            response_text = ""
+            tool = {"name": "override_days", "input": handled.payload or {}}
+            prompt = version_for("chat", self.user_id)
+            self._reply_prompt_version = prompt.id
+        else:
+            response_text = None
             tool = None
+            prompt = None
+
+        if handled is None:
+            logger.info(f"[CHAT] User {self.user_id} message: {content[:100]}")
+            logger.info(f"[CHAT] Calendar snapshot length: {len(calendar.get('text') or '')} chars")
+            logger.info(f"[CHAT] Logs/incidents length: {len(logs_and_incidents)} chars")
+
+            # Build system prompt with full context
+            prompt = version_for("chat", self.user_id)
+            self._reply_prompt_version = prompt.id
+            logger.info(f"[CHAT] prompt_version={prompt.id} for user {self.user_id}")
+            system_prompt = prompt.text.format(
+                master_settings=json.dumps(master_settings, indent=2, default=str),
+                calendar_snapshot=calendar.get("text") or "",
+                logs_and_incidents=logs_and_incidents,
+                rotation_status=applied,
+                current_date=today.isoformat(),
+            )
+
+            messages = history_to_messages(chat_history, content)
+
+            try:
+                response_text, tool = await complete_chat(
+                    system=system_prompt,
+                    messages=messages,
+                    tools=_tools_for(prompt),
+                )
+            except (ModelRequestError, anthropic.APIError) as e:
+                logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")
+                response_text = USER_FACING_MODEL_ERROR
+                tool = None
 
         response_text = strip_model_reasoning(
             response_text,
@@ -692,7 +719,7 @@ class ChatService:
             )
 
         if tool and tool.get("name") == "query_calendar":
-            day = date_from_query(tool.get("input") or {}, date.today())
+            day = date_from_query(tool.get("input") or {}, today)
             if day is None:
                 answer = "I need one date, like 2026-12-25, to say whether you are working."
             else:
@@ -781,8 +808,10 @@ class ChatService:
                 )
                 result["execution"] = exec_result
 
-                if exec_result.get("success"):
-                    confirm_text = f"Done! {command.get('explanation', 'Changes applied.')}"
+                if exec_result.get("status") == "no_change" or exec_result.get("changed") is False:
+                    confirm_text = exec_result.get("message") or "No change."
+                elif exec_result.get("success"):
+                    confirm_text = f"Done! {command.get('explanation') or 'Changes applied.'}"
                 else:
                     logger.error(
                         f"[CHAT] Execution failed for user {self.user_id}: {exec_result.get('error')}"
