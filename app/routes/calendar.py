@@ -12,6 +12,7 @@ from app.database import Database
 from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 from app.middleware.auth import get_current_user, get_effective_tier
 from app.engines.calendar_authority import projection_for_user
+from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_engine import (
     CALENDAR_ENGINE_VERSION,
     present_calendar_day,
@@ -386,20 +387,69 @@ async def list_leave_blocks(user: dict = Depends(get_current_user)):
     }
 
 
+def _leave_day(value) -> Optional[date]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value).strip()[:10])
+    except ValueError:
+        return None
+
+
+def _leave_span(row: dict) -> Optional[tuple]:
+    start = _leave_day(row.get("start_date") or row.get("date"))
+    end = _leave_day(row.get("end_date")) or start
+    if start is None or end is None:
+        return None
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
 @router.delete("/leave/{leave_id}")
 async def delete_leave_block(
     leave_id: str,
     user: dict = Depends(get_current_user)
 ):
-    """Delete a leave block"""
+    """Delete a leave block and rebuild the days it covered."""
     db = Database(use_admin=True)
-    leaves = await db.get_leave_blocks(user["id"])
-    if not any(item.get("id") == leave_id for item in leaves):
+    user_id = user["id"]
+    leaves = await db.get_leave_blocks(user_id)
+    existing = next((item for item in leaves if item.get("id") == leave_id), None)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Leave block not found")
-    deleted = await db.delete_leave_block(leave_id, user_id=user["id"])
+    span = _leave_span(existing)
+
+    service = MasterSettingsService(db)
+    try:
+        current = await service.get(user_id)
+        settings = current.get("settings") if isinstance(current.get("settings"), dict) else {}
+        listed = [
+            item for item in (settings.get("leave_blocks") or [])
+            if isinstance(item, dict) and item.get("id") == leave_id
+        ]
+        if listed:
+            await service.remove_from_list(user_id, "leave_blocks", leave_id)
+    except Exception as exc:
+        logger.error(f"[CALENDAR] Settings update failed for leave {leave_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Leave could not be removed") from exc
+
+    deleted = await db.delete_leave_block(leave_id, user_id=user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Leave block not found")
-    
+
+    if span is not None:
+        executor = create_command_executor(db, user_id)
+        try:
+            wrote = await executor.rebuild_calendar(*span)
+        except Exception as exc:
+            logger.error(f"[CALENDAR] Rebuild failed for leave {leave_id}: {exc}")
+            raise HTTPException(status_code=500, detail="Leave could not be removed") from exc
+        if not wrote:
+            logger.warning(f"[CALENDAR] No rotation to rebuild after deleting leave {leave_id}")
+
     return {
         "success": True,
         "message": "Leave block deleted"

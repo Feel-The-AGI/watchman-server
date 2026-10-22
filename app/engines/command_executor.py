@@ -338,11 +338,18 @@ class CommandExecutor:
         # Get after state
         after_state = await self.settings_service.get_snapshot(self.user_id)
         
-        # Log the command
+        # Log the command. Record whether this call inserted a row so undo
+        # can remove that id and nothing else.
+        logged_payload = dict(payload) if isinstance(payload, dict) else {}
+        if isinstance(result, dict) and action in ("add_leave", "add_commitment"):
+            inserted_key = (
+                "inserted_leave_id" if action == "add_leave" else "inserted_commitment_id"
+            )
+            logged_payload[inserted_key] = result.get(inserted_key) or ""
         try:
             command_log = await self._log_command(
                 action=action,
-                payload=payload,
+                payload=logged_payload,
                 before_state=before_state,
                 after_state=after_state,
                 source=source,
@@ -947,7 +954,12 @@ class CommandExecutor:
         }
 
     async def _action_undo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Undo the last command"""
+        """Undo the last command.
+
+        Settings roll back, and a leave or commitment row this command inserted
+        is deleted by that id. The affected days are then rebuilt. Status stays
+        applied until that succeeds, so a failed rebuild can be retried.
+        """
         # Find last applied command
         result = self.db.client.table("command_log").select("*").eq(
             "user_id", self.user_id
@@ -957,6 +969,7 @@ class CommandExecutor:
             return {"message": "Nothing to undo"}
         
         command = result.data[0]
+        await self._remove_created_row(command)
         
         # Restore before state
         before_state = command.get("before_state")
@@ -964,6 +977,7 @@ class CommandExecutor:
             await self.settings_service.update(self.user_id, before_state)
             cycle = before_state.get("cycle") if isinstance(before_state, dict) else None
             await sync_cycle_row(self.db, self.user_id, cycle)
+        await self._rebuild_created_span(command)
         
         # Mark command as undone
         self.db.client.table("command_log").update({
@@ -973,7 +987,11 @@ class CommandExecutor:
         return {"undone_command_id": command["id"]}
     
     async def _action_redo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Redo the last undone command"""
+        """Redo the last undone command.
+
+        A row undo removed is inserted again from the logged snapshot, then
+        the same days are rebuilt.
+        """
         # Find last undone command
         result = self.db.client.table("command_log").select("*").eq(
             "user_id", self.user_id
@@ -983,6 +1001,7 @@ class CommandExecutor:
             return {"message": "Nothing to redo"}
         
         command = result.data[0]
+        await self._restore_created_row(command)
         
         # Restore after state
         after_state = command.get("after_state")
@@ -990,6 +1009,7 @@ class CommandExecutor:
             await self.settings_service.update(self.user_id, after_state)
             cycle = after_state.get("cycle") if isinstance(after_state, dict) else None
             await sync_cycle_row(self.db, self.user_id, cycle)
+        await self._rebuild_created_span(command)
         
         # Mark command as redone
         self.db.client.table("command_log").update({
@@ -997,6 +1017,56 @@ class CommandExecutor:
         }).eq("id", command["id"]).execute()
         
         return {"redone_command_id": command["id"]}
+
+    async def _remove_created_row(self, command: dict) -> None:
+        """Delete the leave or commitment row this command inserted, by id."""
+        kind, row_id = _created_row(command)
+        if not row_id:
+            return
+        if kind == "leave":
+            await self.db.delete_leave_block(row_id, self.user_id)
+            remaining = await self.db.read_leave_blocks(self.user_id)
+        else:
+            await self.db.delete_commitment(row_id, self.user_id)
+            remaining = await self.db.read_commitments(self.user_id)
+        if any(str(row.get("id")) == row_id for row in remaining or [] if isinstance(row, dict)):
+            raise RuntimeError("Created row could not be removed")
+
+    async def _restore_created_row(self, command: dict) -> None:
+        """Insert the row undo removed, using the id and fields from the log."""
+        kind, row_id = _created_row(command)
+        if not row_id:
+            return
+        if kind == "leave":
+            remaining = await self.db.read_leave_blocks(self.user_id)
+        else:
+            remaining = await self.db.read_commitments(self.user_id)
+        if any(str(row.get("id")) == row_id for row in remaining or [] if isinstance(row, dict)):
+            return
+        source = _state_row(command.get("after_state"), _CREATED_SECTIONS[kind], row_id)
+        if not isinstance(source, dict):
+            raise RuntimeError("Created row could not be restored")
+        fields = _LEAVE_INSERT_FIELDS if kind == "leave" else _COMMITMENT_INSERT_FIELDS
+        data = {
+            key: source.get(key)
+            for key in fields
+            if key in source and source.get(key) is not None
+        }
+        data["id"] = row_id
+        data["user_id"] = self.user_id
+        if kind == "leave":
+            saved = await self.db.create_leave_block(data)
+        else:
+            saved = await self.db.create_commitment(data)
+        if not saved:
+            raise RuntimeError("Created row could not be restored")
+
+    async def _rebuild_created_span(self, command: dict) -> None:
+        """Rewrite the days that inserted row covered."""
+        span = _created_span(command)
+        if span is None:
+            return
+        await self.rebuild_calendar(*span)
     
     async def _check_constraints(
         self, 
@@ -1526,6 +1596,129 @@ def _merge_leave_blocks(document_leaves: list, table_leaves: list) -> list:
         seen.add(key)
         merged.append({**block, "start_date": start, "end_date": end})
     return merged
+
+
+_CREATED_SECTIONS = {
+    "leave": "leave_blocks",
+    "commitment": "commitments",
+}
+_CREATED_ACTIONS = {
+    "add_leave": ("leave", "inserted_leave_id"),
+    "add_commitment": ("commitment", "inserted_commitment_id"),
+}
+_LEAVE_INSERT_FIELDS = ("name", "start_date", "end_date", "effects", "notes")
+_COMMITMENT_INSERT_FIELDS = (
+    "name", "type", "status", "priority", "constraints_json",
+    "start_date", "end_date", "recurrence", "source", "source_text", "color",
+)
+
+
+def _snapshot_ids(state, section: str) -> set:
+    if not isinstance(state, dict):
+        return set()
+    found = set()
+    for item in state.get(section) or []:
+        if isinstance(item, dict) and item.get("id"):
+            found.add(str(item["id"]))
+    return found
+
+
+def _state_row(state, section: str, row_id: str):
+    if not isinstance(state, dict):
+        return None
+    for item in state.get(section) or []:
+        if isinstance(item, dict) and str(item.get("id")) == row_id:
+            return item
+    return None
+
+
+def _payload_names_row(row: dict, payload: dict) -> bool:
+    """True when an older log's payload identifies this settings row."""
+    if not isinstance(row, dict) or not isinstance(payload, dict):
+        return False
+    payload_id = str(payload.get("id") or "").strip()
+    if payload_id:
+        return str(row.get("id") or "") == payload_id
+    name = payload.get("name")
+    start = payload.get("start_date") or payload.get("date")
+    if name in (None, "") or start in (None, ""):
+        return False
+    if str(row.get("name") or "") != str(name):
+        return False
+    if str(row.get("start_date") or "")[:10] != str(start)[:10]:
+        return False
+    end = payload.get("end_date") or start
+    row_end = row.get("end_date") or row.get("start_date")
+    return str(row_end or "")[:10] == str(end)[:10]
+
+
+def _created_row(command: dict) -> Tuple[Optional[str], Optional[str]]:
+    """Leave or commitment id this command itself inserted.
+
+    New logs store inserted_leave_id or inserted_commitment_id. An empty value
+    means the command reused a row and undo must not delete it. Older logs
+    have no such key: the id is the single settings id that appeared in
+    after_state and not before_state, and only when the payload names that row.
+    """
+    if not isinstance(command, dict):
+        return None, None
+    spec = _CREATED_ACTIONS.get(command.get("action"))
+    if spec is None:
+        return None, None
+    kind, key = spec
+    section = _CREATED_SECTIONS[kind]
+    payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+    if key in payload:
+        recorded = str(payload.get(key) or "").strip()
+        if not recorded or recorded in _snapshot_ids(command.get("before_state"), section):
+            return kind, None
+        return kind, recorded
+    added = _snapshot_ids(command.get("after_state"), section) - _snapshot_ids(
+        command.get("before_state"), section
+    )
+    if len(added) != 1:
+        return kind, None
+    row_id = next(iter(added))
+    row = _state_row(command.get("after_state"), section, row_id)
+    if not _payload_names_row(row, payload):
+        return kind, None
+    return kind, row_id
+
+
+def _created_span(command: dict) -> Optional[Tuple[date, date]]:
+    """Inclusive dates of the row this command inserted."""
+    kind, row_id = _created_row(command)
+    if not row_id:
+        return None
+    section = _CREATED_SECTIONS[kind]
+    row = _state_row(command.get("after_state"), section, row_id)
+    payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+    start = _iso_day((row or {}).get("start_date") if isinstance(row, dict) else None)
+    end = _iso_day((row or {}).get("end_date") if isinstance(row, dict) else None)
+    if start is None and isinstance(payload, dict):
+        start = _iso_day(payload.get("start_date") or payload.get("date"))
+        end = _iso_day(payload.get("end_date"))
+    if start is None:
+        return None
+    if end is None:
+        end = start
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
+def _iso_day(value) -> Optional[date]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()[:10]
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def create_command_executor(db: Database, user_id: str) -> CommandExecutor:
