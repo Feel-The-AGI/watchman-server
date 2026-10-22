@@ -297,7 +297,7 @@ async def test_empty_tool_text_is_not_shown_as_executing(monkeypatch):
     service.settings_service = SimpleNamespace(get_snapshot=AsyncMock(return_value={"constraints": []}))
     created = {}
 
-    async def create_proposal(command, message_id=None):
+    async def create_proposal(command, message_id=None, prompt_version=None):
         created["command"] = command
         return {"id": "proposal", "command": command}
 

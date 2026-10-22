@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     trial_signup_cutoff: str = "2026-10-22T00:00:00Z"
     trial_end_all: bool = False
 
+    # Prompt versions. Empty means the latest stable version.
+    # CHAT_PROMPT_VERSION=chat-v1 rolls back with no code change.
+    # CHAT_PROMPT_ALLOWLIST is user-id:version pairs, comma separated,
+    # and only those accounts leave the active version.
+    chat_prompt_version: str = ""
+    onboarding_prompt_version: str = ""
+    chat_prompt_allowlist: str = ""
+    onboarding_prompt_allowlist: str = ""
+
     # Application
     app_env: str = "development"
     debug: bool = False

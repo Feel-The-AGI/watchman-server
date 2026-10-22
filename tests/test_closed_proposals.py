@@ -321,7 +321,7 @@ async def test_declined_leave_is_dropped_unless_the_latest_message_asks(monkeypa
     service.settings_service = SimpleNamespace(get_snapshot=AsyncMock(return_value={"constraints": []}))
     created = {}
 
-    async def create_proposal(command, message_id=None):
+    async def create_proposal(command, message_id=None, prompt_version=None):
         created["command"] = command
         return {"id": "new-proposal", "command": command}
 
