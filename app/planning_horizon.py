@@ -1,7 +1,7 @@
-"""Free planning stops on a rolling date six months from today.
+"""Free planning stops on a rolling date a few months from today.
 
 The end date is included. The next day is not. Month ends clamp to the
-last real day of the target month, so 31 Aug plus six months is 28 or 29 Feb.
+last real day of the target month, so 30 Nov plus three months is 28 or 29 Feb.
 """
 
 from calendar import monthrange
@@ -10,6 +10,7 @@ from typing import Iterable, Optional
 
 
 UNLIMITED_TIERS = {"pro", "admin", "trial"}
+FREE_HORIZON_MONTHS = 3
 
 
 def add_months(day: date, months: int) -> date:
@@ -22,7 +23,7 @@ def add_months(day: date, months: int) -> date:
 
 
 def horizon_end(today: Optional[date] = None) -> date:
-    return add_months(today or date.today(), 6)
+    return add_months(today or date.today(), FREE_HORIZON_MONTHS)
 
 
 def parse_day(value) -> Optional[date]:
@@ -49,7 +50,7 @@ def horizon_detail(today: Optional[date] = None) -> dict:
         "code": "free_horizon",
         "horizon_end": end.isoformat(),
         "message": (
-            "The free plan covers 6 months of planning ahead. "
+            f"The free plan covers {FREE_HORIZON_MONTHS} months of planning ahead. "
             "Upgrade to Pro to plan further."
         ),
     }

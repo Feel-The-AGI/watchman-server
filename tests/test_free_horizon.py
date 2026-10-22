@@ -1,4 +1,4 @@
-"""Free planning stops on a rolling date six months from today."""
+"""Free planning stops on a rolling date three months from today."""
 
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from app.engines.chat_service import ChatService
 from app.engines.command_executor import CommandExecutor
 from app.planning_horizon import (
+    FREE_HORIZON_MONTHS,
     add_months,
     clip_range,
     horizon_detail,
@@ -38,10 +39,10 @@ from app.routes.commitments import (
 
 
 TODAY = date(2026, 10, 22)
-HORIZON = date(2027, 4, 22)
-NEXT = date(2027, 4, 23)
+HORIZON = date(2027, 1, 22)
+NEXT = date(2027, 1, 23)
 MESSAGE = (
-    "The free plan covers 6 months of planning ahead. "
+    "The free plan covers 3 months of planning ahead. "
     "Upgrade to Pro to plan further."
 )
 CYCLE = {
@@ -59,7 +60,7 @@ CYCLE = {
 def _pin(monkeypatch):
     def end(today=None):
         if today is not None:
-            return add_months(today, 6)
+            return add_months(today, FREE_HORIZON_MONTHS)
         return HORIZON
 
     monkeypatch.setattr("app.planning_horizon.horizon_end", end)
@@ -67,20 +68,21 @@ def _pin(monkeypatch):
 
 
 def test_add_months_clamps_the_day_at_a_short_month():
-    assert add_months(date(2026, 8, 31), 6) == date(2027, 2, 28)
-    assert add_months(date(2023, 8, 31), 6) == date(2024, 2, 29)
+    assert FREE_HORIZON_MONTHS == 3
+    assert add_months(date(2026, 11, 30), 3) == date(2027, 2, 28)
+    assert add_months(date(2023, 11, 30), 3) == date(2024, 2, 29)
     assert add_months(date(2024, 1, 31), 1) == date(2024, 2, 29)
     assert add_months(date(2023, 1, 31), 1) == date(2023, 2, 28)
-    assert add_months(TODAY, 6) == HORIZON
+    assert add_months(TODAY, FREE_HORIZON_MONTHS) == HORIZON
 
 
 def test_horizon_includes_the_end_day_and_blocks_the_next():
     assert horizon_end(TODAY) == HORIZON
     assert horizon_violation("free", [HORIZON], TODAY) is None
-    assert horizon_violation("free", ["2027-04-22"], TODAY) is None
+    assert horizon_violation("free", ["2027-01-22"], TODAY) is None
     blocked = horizon_violation("free", [NEXT], TODAY)
     assert blocked["code"] == "free_horizon"
-    assert blocked["horizon_end"] == "2027-04-22"
+    assert blocked["horizon_end"] == "2027-01-22"
     assert blocked["message"] == MESSAGE
     assert clip_range(date(2027, 1, 1), date(2027, 12, 31), "free", TODAY) == (
         date(2027, 1, 1),
@@ -119,7 +121,7 @@ def test_anchor_dates_are_not_treated_as_planned_days():
     assert payload_dates({
         "anchor_date": "2030-01-01",
         "shift_by_days": 4,
-        "schedule": {"date": "2027-04-23"},
+        "schedule": {"date": "2027-01-23"},
     }) == [NEXT]
 
 
@@ -168,7 +170,7 @@ async def test_reads_keep_later_rows_and_tell_the_client_where_to_lock(monkeypat
     shown = await get_day(HORIZON.isoformat(), free)
     assert shown["data"]["date"] == HORIZON.isoformat()
     assert shown["free_horizon_end"] == HORIZON.isoformat()
-    month = await get_month(2027, 4, free)
+    month = await get_month(2027, 1, free)
     assert [day["date"] for day in month["data"]] == [HORIZON.isoformat()]
     assert month["free_horizon_end"] == HORIZON.isoformat()
     assert store.days == before
@@ -176,7 +178,7 @@ async def test_reads_keep_later_rows_and_tell_the_client_where_to_lock(monkeypat
     pro = await get_day(NEXT.isoformat(), {"id": "user-1", "tier": "pro"})
     assert pro["data"]["work_type"] == "work_night"
     assert "free_horizon_end" not in pro
-    trial = await get_month(2027, 4, {"id": "user-1", "tier": "trial"})
+    trial = await get_month(2027, 1, {"id": "user-1", "tier": "trial"})
     assert NEXT.isoformat() in [day["date"] for day in trial["data"]]
     assert "free_horizon_end" not in trial
 
@@ -577,7 +579,7 @@ async def test_execute_and_proposal_refuse_a_free_date_past_the_horizon(monkeypa
     assert outcome["success"] is False
     assert outcome["code"] == "free_horizon"
     assert outcome["horizon_end"] == HORIZON.isoformat()
-    with pytest.raises(ValueError, match="6 months"):
+    with pytest.raises(ValueError, match="3 months"):
         await executor.create_proposal({
             "action": "add_leave",
             "payload": {"name": "Holiday", "start_date": NEXT.isoformat(), "end_date": NEXT.isoformat()},
