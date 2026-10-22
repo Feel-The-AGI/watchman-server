@@ -22,7 +22,7 @@ def test_october_27_2026_is_a_tuesday():
 
 
 def test_empty_tool_text_describes_the_dentist_appointment():
-    summary = "Add Dentist appointment every Tue, 27 Oct, 3\u20134pm"
+    summary = "Add Dentist appointment on Tue 27 Oct, 3\u20134pm"
     assert describe_command("add_commitment", DENTIST) == summary
     assert explanation_for("add_commitment", DENTIST, "") == summary
     assert explanation_for("add_commitment", DENTIST, "Executing add_commitment") == summary
@@ -74,7 +74,7 @@ def test_a_commitment_card_shows_the_payload_times():
         "payload": DENTIST,
         "explanation": "Executing add_commitment",
     })
-    assert card["explanation"] == "Add Dentist appointment every Tue, 27 Oct, 3\u20134pm"
+    assert card["explanation"] == "Add Dentist appointment on Tue 27 Oct, 3\u20134pm"
     assert "model_text" not in card
 
 
@@ -90,6 +90,14 @@ def test_a_commitment_card_shows_the_payload_times():
         "work_type": "work_night",
         "preserve_off_days": False,
     }, "Set Mon 2 Nov \u2013 Fri 6 Nov to night shift"),
+    ("override_days", {
+        "start_date": "2026-11-02",
+        "work_type": "untracked",
+    }, "Set Mon 2 Nov to blank, keeping off days"),
+    ("override_days", {
+        "start_date": "2026-11-02",
+        "work_type": "unknown",
+    }, "Set Mon 2 Nov to blank, keeping off days"),
     ("update_cycle", {
         "name": "14/14",
         "pattern": [

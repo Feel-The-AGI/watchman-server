@@ -26,8 +26,7 @@ def commitment_record(
     kind = str(payload.get("type") or "personal").strip().lower()
     if kind not in COMMITMENT_TYPES:
         raise ValueError(f"Commitment type {kind!r} is not supported")
-    start = _as_date(payload.get("start_date") or payload.get("date"))
-    end = _as_date(payload.get("end_date")) or start
+    start, end = _written_span(payload)
     days = _weekdays(payload.get("days_of_week"))
     time_start = _clock_value(payload.get("time_start"))
     time_end = _clock_value(payload.get("time_end"))
@@ -68,8 +67,7 @@ def leave_record(
 ) -> dict:
     """Row for public.leave_blocks. The payload type is stored in effects, not commitments.type."""
     payload = payload or {}
-    start = _as_date(payload.get("start_date") or payload.get("date"))
-    end = _as_date(payload.get("end_date")) or start
+    start, end = _written_span(payload)
     if start is None or end is None:
         raise ValueError("Leave needs a date")
     if end < start:
@@ -232,7 +230,8 @@ def _describe_add_commitment(payload: dict) -> str:
     name = _label(payload.get("name"), "commitment")
     clock = _clock_phrase(payload.get("time_start"), payload.get("time_end"))
     weekdays = _weekdays(payload.get("days_of_week"))
-    if weekdays:
+    # A single day is that day, even when the payload also names a weekday.
+    if weekdays and not _is_one_day(payload):
         text = f"Add {name} {_every_phrase(weekdays)}"
         span = _compact_range(payload)
         if span:
@@ -386,6 +385,8 @@ _SHIFT_NAMES = {
     "off": "off",
     "rest": "off",
     "blank": "blank",
+    "untracked": "blank",
+    "unknown": "blank",
 }
 
 _WEEKDAY_SHORT = {
@@ -463,6 +464,41 @@ def _is_generic_model_text(text: str, action: str) -> bool:
     if lowered.startswith("executing "):
         return True
     return lowered == f"executing {action}".lower()
+
+
+def _written_span(payload: dict):
+    """Dates stored on a row. A present value that is not ISO raises.
+
+    Card text uses the lenient parser and can describe a bad date as absent.
+    Writing the row must not turn 'next tuesday' into a dateless commitment
+    or drop a bad end date back to a single day.
+    """
+    start_raw = payload.get("start_date")
+    if start_raw in (None, "") and payload.get("date") not in (None, ""):
+        start_raw = payload.get("date")
+    start = _strict_date(start_raw, "start_date")
+    end_raw = payload.get("end_date")
+    if end_raw in (None, ""):
+        return start, start
+    return start, _strict_date(end_raw, "end_date")
+
+
+def _strict_date(value: Any, field: str) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 10:
+            return date.fromisoformat(text)
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError as exc:
+        raise ValueError(f"{field} {text!r} is not a YYYY-MM-DD date") from exc
 
 
 def _as_date(value: Any) -> Optional[date]:

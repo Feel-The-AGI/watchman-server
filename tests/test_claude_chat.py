@@ -335,7 +335,7 @@ async def test_empty_tool_text_is_not_shown_as_executing(monkeypatch):
         })),
     )
     result = await service.send_message("Block out Tuesday", auto_execute=False)
-    summary = "Add Dentist appointment every Tue, 27 Oct, 3\u20134pm"
+    summary = "Add Dentist appointment on Tue 27 Oct, 3\u20134pm"
     assert created["command"]["explanation"] == summary
     assert result["response"] == summary
     assert "Executing" not in result["response"]
