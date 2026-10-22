@@ -588,14 +588,15 @@ def _wire_settings(monkeypatch, db, rebuilt=None, service=None):
 async def test_a_no_id_settings_cycle_does_not_overwrite_the_row(monkeypatch):
     row = _fortnight_row()
     before = copy.deepcopy(row)
-    db = _settings_db([row], {"cycle": dict(DEFAULT_CYCLE), "work": {"shift_hours": 12}})
+    unlinked = {**DEFAULT_CYCLE, "anchor_date": ANCHOR, "anchor_cycle_day": 1}
+    db = _settings_db([row], {"cycle": dict(unlinked), "work": {"shift_hours": 12}})
     _wire_settings(monkeypatch, db)
 
     await update_master_settings(
-        UpdateSettingsRequest(settings={"cycle": DEFAULT_CYCLE, "work": {"shift_hours": 8}}),
+        UpdateSettingsRequest(settings={"cycle": unlinked, "work": {"shift_hours": 8}}),
         {"id": "user-1"},
     )
-    await update_section("cycle", UpdateSectionRequest(value=dict(DEFAULT_CYCLE)), {"id": "user-1"})
+    await update_section("cycle", UpdateSectionRequest(value=dict(unlinked)), {"id": "user-1"})
 
     assert db.rows[0]["pattern"] == before["pattern"]
     assert db.rows[0]["cycle_length"] == before["cycle_length"]
@@ -841,3 +842,146 @@ async def test_a_version_mismatch_is_409_and_a_later_sync_error_is_not(monkeypat
     assert result["settings"]["cycle"]["anchor_date"] == SHIFTED
     assert db.document["cycle"]["anchor_date"] == SHIFTED
     assert "changed elsewhere" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_without_a_start_date_is_not_saved(monkeypatch):
+    row = _row(ANCHOR)
+    before_row = copy.deepcopy(row)
+    original = {"cycle": _cycle(ANCHOR), "work": {"shift_hours": 12}}
+    db = _settings_db([row], copy.deepcopy(original))
+    _wire_settings(monkeypatch, db)
+    bare = {
+        "id": "cycle-1",
+        "pattern": [
+            {"label": "work_day", "duration": 5},
+            {"label": "work_night", "duration": 5},
+            {"label": "off", "duration": 10},
+        ],
+        "anchor_date": None,
+        "anchor_cycle_day": 1,
+    }
+
+    with pytest.raises(HTTPException) as put_error:
+        await update_master_settings(
+            UpdateSettingsRequest(settings={"cycle": bare, "work": {"shift_hours": 8}}),
+            {"id": "user-1"},
+        )
+    assert put_error.value.status_code == 422
+    assert put_error.value.detail == "Your rotation needs a start date before it can be saved."
+
+    with pytest.raises(HTTPException) as patch_error:
+        await update_section("cycle", UpdateSectionRequest(value=bare), {"id": "user-1"})
+    assert patch_error.value.status_code == 422
+    assert patch_error.value.detail == put_error.value.detail
+    assert db.document == original
+    assert db.rows[0] == before_row
+    assert db.updated == []
+
+
+@pytest.mark.asyncio
+async def test_a_null_cycle_saves_and_an_anchored_cycle_saves(monkeypatch):
+    row = _row(ANCHOR)
+    db = _settings_db([row], {"cycle": _cycle(ANCHOR), "work": {"shift_hours": 12}})
+    _wire_settings(monkeypatch, db)
+
+    cleared = await update_master_settings(
+        UpdateSettingsRequest(settings={"cycle": None, "work": {"shift_hours": 8}}),
+        {"id": "user-1"},
+    )
+    assert cleared["settings"]["cycle"] is None
+    assert db.rows[0]["pattern"] == row["pattern"]
+    assert db.rows[0]["cycle_length"] == 15
+    assert db.rows[0]["anchor_date"] == ANCHOR
+    assert db.updated == []
+
+    anchored = _cycle(SHIFTED)
+    await update_section("cycle", UpdateSectionRequest(value=anchored), {"id": "user-1"})
+    assert db.document["cycle"]["anchor_date"] == SHIFTED
+    assert db.rows[0]["anchor_date"] == SHIFTED
+
+    await update_master_settings(
+        UpdateSettingsRequest(settings={"cycle": _cycle(ANCHOR), "work": {"shift_hours": 10}}),
+        {"id": "user-1"},
+    )
+    assert db.document["cycle"]["anchor_date"] == ANCHOR
+    assert db.rows[0]["anchor_date"] == ANCHOR
+
+
+def _unanchored(off_days=10):
+    return {
+        "name": "Default",
+        "pattern": [
+            {"label": "work_day", "duration": 5},
+            {"label": "work_night", "duration": 5},
+            {"label": "off", "duration": off_days},
+        ],
+        "anchor_date": None,
+        "anchor_cycle_day": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_cycle_without_an_anchor_still_saves_work_hours(monkeypatch):
+    row = _row(ANCHOR)
+    before_row = copy.deepcopy(row)
+    cycle = _unanchored()
+    db = _settings_db([row], {"cycle": copy.deepcopy(cycle), "work": {"shift_hours": 12}})
+    _wire_settings(monkeypatch, db)
+
+    result = await update_master_settings(
+        UpdateSettingsRequest(settings={"cycle": cycle, "work": {"shift_hours": 8}}),
+        {"id": "user-1"},
+    )
+
+    assert result["settings"]["work"]["shift_hours"] == 8
+    assert db.document["work"]["shift_hours"] == 8
+    assert db.document["cycle"] == cycle
+    assert db.rows[0] == before_row
+    assert db.updated == []
+
+
+@pytest.mark.asyncio
+async def test_a_changed_cycle_without_an_anchor_is_not_saved(monkeypatch):
+    row = _row(ANCHOR)
+    before_row = copy.deepcopy(row)
+    original = {"cycle": _unanchored(), "work": {"shift_hours": 12}}
+    db = _settings_db([row], copy.deepcopy(original))
+    _wire_settings(monkeypatch, db)
+
+    with pytest.raises(HTTPException) as exc:
+        await update_master_settings(
+            UpdateSettingsRequest(settings={"cycle": _unanchored(off_days=3), "work": {"shift_hours": 8}}),
+            {"id": "user-1"},
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "Your rotation needs a start date before it can be saved."
+    assert db.document == original
+    assert db.rows[0] == before_row
+    assert db.updated == []
+
+
+@pytest.mark.asyncio
+async def test_a_missing_stored_cycle_rejects_a_cycle_without_an_anchor(monkeypatch):
+    row = _row(ANCHOR)
+    before_row = copy.deepcopy(row)
+    original = {"cycle": _cycle(ANCHOR), "work": {"shift_hours": 12}}
+    db = _settings_db([row], copy.deepcopy(original))
+
+    class _Unread(_SettingsService):
+        async def get(self, user_id):
+            raise RuntimeError("settings unreadable")
+
+    _wire_settings(monkeypatch, db, service=_Unread(db))
+    with pytest.raises(HTTPException) as exc:
+        await update_master_settings(
+            UpdateSettingsRequest(settings={"cycle": _unanchored(), "work": {"shift_hours": 8}}),
+            {"id": "user-1"},
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "Your rotation needs a start date before it can be saved."
+    assert db.document == original
+    assert db.rows[0] == before_row
+    assert db.updated == []
