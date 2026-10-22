@@ -24,6 +24,7 @@ from app.engines.calendar_authority import (
     night_shift_dates,
 )
 from app.engines.proposal_effects import (
+    card_command,
     commitment_record,
     event_dates,
     leave_record,
@@ -115,6 +116,8 @@ class CommandExecutor:
         Returns:
             The created proposal
         """
+        # The stored card text is the payload summary, not the model's sentence.
+        command = card_command(command)
         # Validate first
         validation = await self.validate_command(command)
         

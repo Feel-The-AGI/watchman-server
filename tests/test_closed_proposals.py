@@ -25,7 +25,7 @@ LEAVE = {
     "command": {
         "action": "add_leave",
         "payload": {"type": "other", "date": "2026-10-31"},
-        "explanation": "Mark Sat Oct 31 as leave",
+        "explanation": "I'll mark Fri 6 Nov as leave",
     },
 }
 
@@ -48,11 +48,11 @@ def test_prompt_proposes_only_the_latest_message():
 
 def test_declined_leave_is_marked_on_the_old_turns_only():
     note = closed_proposal_note(LEAVE)
-    assert note == "The user declined this change (Mark Sat Oct 31 as leave). Do not re-propose it."
+    assert note == "The user declined this change (Mark Sat 31 Oct as leave). Do not re-propose it."
     annotated = annotate_closed_proposals(HISTORY, [LEAVE])
     messages = history_to_messages(annotated, HISTORY[0]["content"])
     earlier = "\n".join(message["content"] for message in messages[:-1])
-    assert "The user declined this change (Mark Sat Oct 31 as leave). Do not re-propose it." in earlier
+    assert "The user declined this change (Mark Sat 31 Oct as leave). Do not re-propose it." in earlier
     assert messages[-1] == {
         "role": "user",
         "content": "Add a dentist appointment next Tuesday Oct 27 from 3pm to 4pm",
@@ -154,7 +154,7 @@ async def test_later_turn_is_sent_with_the_declined_note(monkeypatch):
     result = await service.send_message(dentist, auto_execute=False)
     assert "Propose ONLY what the latest message asks." in captured["system"]
     earlier = "\n".join(message["content"] for message in captured["messages"][:-1])
-    assert "The user declined this change (Mark Sat Oct 31 as leave). Do not re-propose it." in earlier
+    assert "The user declined this change (Mark Sat 31 Oct as leave). Do not re-propose it." in earlier
     assert captured["messages"][-1]["content"] == dentist
     assert result["command"]["action"] == "add_commitment"
     assert result["command"]["payload"]["name"] == "Dentist appointment"

@@ -276,6 +276,48 @@ async def test_add_leave_type_other_is_not_a_commitment_row():
 
 
 @pytest.mark.asyncio
+async def test_add_commitment_with_next_tuesday_fails_at_apply():
+    db = FakeDB()
+    executor = _executor(db, Settings(cycle=True))
+    result = await executor.execute(
+        {
+            "action": "add_commitment",
+            "payload": {
+                "name": "Gym",
+                "type": "personal",
+                "start_date": "next tuesday",
+            },
+            "explanation": "Add gym next tuesday",
+        },
+        source="api",
+    )
+    assert result["success"] is False
+    assert db.commitments == []
+    assert db.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_a_bad_end_date_does_not_collapse_the_range_at_apply():
+    db = FakeDB()
+    executor = _executor(db, Settings(cycle=True))
+    result = await executor.execute(
+        {
+            "action": "add_commitment",
+            "payload": {
+                "name": "Gym",
+                "type": "personal",
+                "start_date": "2026-10-27",
+                "end_date": "sometime",
+            },
+            "explanation": "Add gym",
+        },
+        source="api",
+    )
+    assert result["success"] is False
+    assert db.commitments == []
+
+
+@pytest.mark.asyncio
 async def test_commitment_is_painted_when_there_is_no_cycle_to_regenerate():
     db = FakeDB()
     db.days = [{
