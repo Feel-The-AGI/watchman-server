@@ -206,6 +206,8 @@ async def test_a_picked_preset_is_known_when_the_anchor_is_typed(monkeypatch):
     assert "rotation pattern" not in lowered
     assert "shift blocks" not in lowered
     assert seen == {}
+    assert result["user_message"] is None
+    assert result["assistant_message"] is None
 
     follow = await service.send_message("What should I do next?", pattern=FIVE_FIVE_FIVE)
     system = seen["system"]
@@ -216,6 +218,109 @@ async def test_a_picked_preset_is_known_when_the_anchor_is_typed(monkeypatch):
     assert "No rotation is stored" not in system
     assert "no cycle" not in follow["response"].lower()
     assert "rotation pattern" not in follow["response"].lower()
+
+
+class _ChatTable:
+    """In-memory chat_messages. Newest row first, matching get_history."""
+
+    def __init__(self):
+        self.rows = []
+        self._result = []
+
+    def insert(self, data):
+        self.rows.append(dict(data))
+        self._result = [self.rows[-1]]
+        return self
+
+    def select(self, *args, **kwargs):
+        self._result = list(reversed(self.rows))
+        return self
+
+    def eq(self, *args, **kwargs):
+        return self
+
+    def order(self, *args, **kwargs):
+        return self
+
+    def limit(self, *args, **kwargs):
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=list(self._result))
+
+
+class _EmptyTable:
+    def insert(self, data):
+        return self
+
+    def select(self, *args, **kwargs):
+        return self
+
+    def eq(self, *args, **kwargs):
+        return self
+
+    def order(self, *args, **kwargs):
+        return self
+
+    def limit(self, *args, **kwargs):
+        return self
+
+    def execute(self):
+        return SimpleNamespace(data=[])
+
+
+@pytest.mark.asyncio
+async def test_the_anchor_shortcut_is_left_out_of_dashboard_history(monkeypatch):
+    """Live signup: the typed anchor and its apply-reply must not be stored."""
+    service = _service()
+    table = _ChatTable()
+    empty = _EmptyTable()
+    service.db = SimpleNamespace(
+        client=SimpleNamespace(table=lambda name: table if name == "chat_messages" else empty)
+    )
+    service._save_message = ChatService._save_message.__get__(service, ChatService)
+    service.get_history = ChatService.get_history.__get__(service, ChatService)
+    monkeypatch.setattr(chat_service, "projection_for_user", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        chat_service,
+        "complete_chat",
+        AsyncMock(return_value=("Your rotation is ready to use.", None)),
+    )
+
+    shortcut = await service.send_message(
+        LIVE_ANCHOR, pattern=FIVE_FIVE_FIVE, onboarding_completed=False,
+    )
+    corrected = await service.send_message(
+        "Oct 22 is day 40",
+        pattern=[{"label": "work_day", "duration": 14}, {"label": "off", "duration": 14}],
+        onboarding_completed=False,
+    )
+    assert table.rows == []
+    assert shortcut["user_message"] is None
+    assert shortcut["assistant_message"] is None
+    assert shortcut["response"] == (
+        "Use Oct 22, 2026 as day 1 (5 day shifts, 5 night shifts, 5 days off). "
+        "Apply that anchor, then choose the rules to keep."
+    )
+    assert shortcut["anchor"] == {"date": "2026-10-22", "cycle_day": 1}
+    assert corrected["user_message"] is None
+    assert "28-day" in corrected["response"]
+
+    follow = await service.send_message(
+        "What should I do next?", pattern=FIVE_FIVE_FIVE, onboarding_completed=False,
+    )
+    history = await service.get_history(limit=10)
+    stored = [row["content"] for row in history]
+    assert stored == ["Your rotation is ready to use.", "What should I do next?"]
+    assert LIVE_ANCHOR not in stored
+    assert shortcut["response"] not in stored
+    assert corrected["response"] not in stored
+    assert follow["user_message"]["content"] == "What should I do next?"
+    assert follow["assistant_message"]["content"] == "Your rotation is ready to use."
+    sent = chat_service.complete_chat.await_args.kwargs["messages"]
+    blob = " ".join(message.get("content") or "" for message in sent)
+    assert "Apply that anchor" not in blob
+    assert LIVE_ANCHOR not in blob
 
 
 @pytest.mark.asyncio

@@ -710,18 +710,19 @@ class ChatService:
             anchor = sole_anchor_statement(content, local_today(timezone_name))
             stored = await self._stored_cycle() if anchor is not None else None
             if anchor is not None and stored is None:
+                # The reply is a setup instruction the client applies from
+                # response.anchor. Leave both turns out of chat_messages so
+                # the dashboard history cannot show a bubble with no button.
                 cycle = picked
                 length = cycle_length(cycle)
-                user_message = await self._save_message("user", content)
                 if length and anchor["cycle_day"] > length:
                     reply = anchor_day_correction(anchor, length)
                     anchor = None
                 else:
                     reply = anchor_acknowledgement(anchor, cycle)
-                assistant_message = await self._save_message("assistant", reply)
                 result = {
-                    "user_message": user_message,
-                    "assistant_message": assistant_message,
+                    "user_message": None,
+                    "assistant_message": None,
                     "response": reply,
                     "is_command": False,
                     "command": None,
