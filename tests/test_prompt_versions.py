@@ -76,7 +76,11 @@ def test_chat_v2_states_that_a_positive_shift_moves_each_shift_later():
     v2 = load_version("chat-v2").text
     assert v2 != v1
     assert "each shift happens that many days later" in v2
+    assert "do not propose a shift yet" in v2
+    assert "what shift it is" in v2
     assert 'User: "I\'m a day behind."' in v2
+    assert "No concrete date" in v2
+    assert "They confirmed the date" in v2
     assert "shift_by_days=1" in v2
     assert 'User: "I\'m a day ahead."' in v2
     assert "shift_by_days=-1" in v2
