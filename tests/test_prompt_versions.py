@@ -13,7 +13,7 @@ from postgrest.exceptions import APIError
 from app.config import Settings
 from app.engines.chat_service import SYSTEM_PROMPT, WATCHMAN_TOOLS, ChatService, _tools_for
 from app.engines.command_executor import CommandExecutor
-from app.prompts.registry import latest_stable, load_version, version_for
+from app.prompts.registry import VERSIONS, latest_stable, load_version, version_for
 from app.engines import chat_service
 
 
@@ -53,7 +53,7 @@ def test_config_defaults_to_the_latest_stable_version(monkeypatch):
     assert Settings.model_fields["chat_prompt_version"].default == ""
     assert Settings.model_fields["onboarding_prompt_version"].default == ""
     assert latest_stable("chat").id == "chat-v1"
-    assert load_version("chat-v2").stable is False
+    assert "chat-v2" not in {item.id for item in VERSIONS.values()}
     monkeypatch.setattr("app.prompts.registry.get_settings", lambda: _settings())
     assert version_for("chat").id == "chat-v1"
     assert version_for("onboarding").id == "onboarding-v1"
@@ -62,17 +62,26 @@ def test_config_defaults_to_the_latest_stable_version(monkeypatch):
 def test_env_switch_selects_the_requested_version(monkeypatch):
     monkeypatch.setattr(
         "app.prompts.registry.get_settings",
-        lambda: _settings(chat_prompt_version="chat-v2"),
+        lambda: _settings(chat_prompt_version="chat-v1"),
     )
     selected = version_for("chat")
-    assert selected.id == "chat-v2"
+    assert selected.id == "chat-v1"
+    assert selected.text == load_version("chat-v1").text
     assert "stay filled from the pattern" in selected.text
-    assert "mark those days as 'blank'" not in selected.text
-    assert _placeholders(selected.text) == _placeholders(load_version("chat-v1").text)
-    tools = _tools_for(selected)
-    update = next(tool for tool in tools if tool["name"] == "update_cycle")
-    assert "Days BEFORE the anchor can be marked as 'blank'" not in update["description"]
-    assert _tools_for(load_version("chat-v1")) is WATCHMAN_TOOLS
+    assert _tools_for(selected) is WATCHMAN_TOOLS
+
+
+def test_every_later_version_differs_from_v1_and_has_a_changelog():
+    by_family = {}
+    for item in VERSIONS.values():
+        by_family.setdefault(item.family, []).append(item)
+    for versions in by_family.values():
+        base = next(item for item in versions if item.number == 1)
+        for item in versions:
+            if item.number == 1:
+                continue
+            assert item.text != base.text
+            assert item.changelog.strip()
 
 
 def test_unknown_version_falls_back_and_warns(monkeypatch):
@@ -97,9 +106,9 @@ def test_unknown_version_falls_back_and_warns(monkeypatch):
 def test_allowlist_selects_a_version_for_one_account(monkeypatch):
     monkeypatch.setattr(
         "app.prompts.registry.get_settings",
-        lambda: _settings(chat_prompt_allowlist="user-test:chat-v2, user-other:chat-v9"),
+        lambda: _settings(chat_prompt_allowlist="user-test:chat-v1, user-other:chat-v9"),
     )
-    assert version_for("chat", "user-test").id == "chat-v2"
+    assert version_for("chat", "user-test").id == "chat-v1"
     assert version_for("chat", "user-live").id == "chat-v1"
     assert version_for("chat", "user-other").id == "chat-v1"
 

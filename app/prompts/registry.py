@@ -53,9 +53,7 @@ def _version(
     )
 
 
-# v1 is the prompt that was in code when versioning shipped.
-# chat-v2 is the onboarding wording that does not blank days before the
-# anchor. It is not stable, so it is not the default.
+# Only v1 is registered. A later version must be a real text change.
 _VERSIONS = (
     _version(
         "chat-v1",
@@ -65,16 +63,6 @@ _VERSIONS = (
         "2026-10-22",
         True,
         "chat/v1.md",
-    ),
-    _version(
-        "chat-v2",
-        "chat",
-        2,
-        "Do not blank days before the anchor unless the user explicitly asks.",
-        "2026-10-22",
-        False,
-        "chat/v2.md",
-        "chat/v2_update_cycle.txt",
     ),
     _version(
         "onboarding-v1",
