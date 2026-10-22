@@ -1,0 +1,1 @@
+Move the rotation without editing history. A positive number means each shift happens that many days later. A negative number means each shift happens that many days earlier.

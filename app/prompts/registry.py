@@ -25,10 +25,17 @@ class PromptVersion:
     stable: bool
     text: str
     update_cycle_description: Optional[str] = None
+    shift_by_days_description: Optional[str] = None
 
 
 def _read(relative: str) -> str:
     return (_ROOT / relative).read_text(encoding="utf-8")
+
+
+def _tool_text(relative: Optional[str]) -> Optional[str]:
+    if not relative:
+        return None
+    return _read(relative).strip()
 
 
 def _version(
@@ -40,6 +47,7 @@ def _version(
     stable: bool,
     path: str,
     tool_path: Optional[str] = None,
+    shift_path: Optional[str] = None,
 ) -> PromptVersion:
     return PromptVersion(
         id=version_id,
@@ -49,7 +57,8 @@ def _version(
         created=created,
         stable=stable,
         text=_read(path),
-        update_cycle_description=_read(tool_path) if tool_path else None,
+        update_cycle_description=_tool_text(tool_path),
+        shift_by_days_description=_tool_text(shift_path),
     )
 
 
@@ -72,6 +81,8 @@ _VERSIONS = (
         "2026-10-22",
         False,
         "chat/v2.md",
+        tool_path="chat/v2_update_cycle.txt",
+        shift_path="chat/v2_shift_by_days.txt",
     ),
     _version(
         "onboarding-v1",

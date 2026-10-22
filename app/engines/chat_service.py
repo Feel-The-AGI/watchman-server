@@ -61,14 +61,19 @@ SYSTEM_PROMPT = load_version("chat-v1").text
 
 
 def _tools_for(prompt) -> list:
-    """v1 keeps the tool list in this module. A later version may replace one description."""
-    override = prompt.update_cycle_description
-    if not override:
+    """v1 keeps the shared tool list. A later version may replace update_cycle text."""
+    description = prompt.update_cycle_description
+    shift = prompt.shift_by_days_description
+    if not description and not shift:
         return WATCHMAN_TOOLS
     tools = copy.deepcopy(WATCHMAN_TOOLS)
     for tool in tools:
-        if tool["name"] == "update_cycle":
-            tool["description"] = override
+        if tool["name"] != "update_cycle":
+            continue
+        if description:
+            tool["description"] = description
+        if shift:
+            tool["parameters"]["properties"]["shift_by_days"]["description"] = shift
     return tools
 
 
@@ -114,7 +119,7 @@ Use 'blank' for dates before the user's rotation became stable/consistent.""",
 - Set up a new rotation pattern (e.g., 5 days, 5 nights, 5 off)
 - Change the anchor date (which date corresponds to which cycle day)
 - Regenerate calendar from the current pattern
-- Handle "off by one day" scenarios with shift_by_days. A positive number means each shift happens that many days later. A negative number means each shift happens that many days earlier.
+- Handle "off by one day" scenarios by adjusting anchor_cycle_day
 
 IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
 - The anchor_date is when the user's STABLE ROTATION began, not their employment start date
@@ -156,7 +161,7 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
                 },
                 "shift_by_days": {
                     "type": "integer",
-                    "description": "Move the rotation without editing history. A positive number means each shift happens that many days later. A negative number means each shift happens that many days earlier."
+                    "description": "Alternative way to shift the rotation: positive = forward, negative = backward. Use this for 'off by one day' fixes."
                 }
             },
             "required": []
