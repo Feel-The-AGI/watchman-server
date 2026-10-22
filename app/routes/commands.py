@@ -301,6 +301,8 @@ async def redo_command(
     try:
         result = await executor.execute(command, source="api", skip_validation=True)
         return result
+    except UndoConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as e:
         logger.exception(f"[COMMANDS] Redo failed for user {user['id']}: {e}")
         raise HTTPException(status_code=500, detail="That action could not be completed. Please try again.")

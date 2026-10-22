@@ -1,5 +1,6 @@
 """Undo removes the leave row a command created, and leave DELETE rebuilds."""
 
+import asyncio
 import copy
 
 import pytest
@@ -7,7 +8,7 @@ from fastapi import HTTPException
 
 from app.engines.command_executor import CommandExecutor
 from app.routes.calendar import delete_leave_block
-from app.routes.commands import UndoRequest, undo_command
+from app.routes.commands import RedoRequest, UndoRequest, redo_command, undo_command
 
 
 ANCHOR = "2026-01-05"
@@ -509,3 +510,154 @@ async def test_delete_leave_rebuilds_the_day_back_to_the_rotation(monkeypatch):
     assert restored["state_json"]["is_leave"] is False
     assert restored["work_type"] == "work_day"
     assert restored["state_json"]["commitments"] == []
+
+
+def _settings_leave_ids(store):
+    settings = store.tables["master_settings"][0]["settings"]
+    return {row.get("id") for row in settings.get("leave_blocks") or []}
+
+
+def _wire(monkeypatch, store):
+    monkeypatch.setattr("app.routes.commands.Database", lambda use_admin=False: store)
+
+
+@pytest.mark.asyncio
+async def test_a_second_undo_does_not_restore_a_settings_only_leave():
+    store = _Store()
+    executor = _executor(store)
+    approved = await executor.execute({
+        "action": "add_leave",
+        "payload": {"name": "Sick", "type": "sick", "date": SICK_DAY},
+        "explanation": "Sick day",
+    })
+    leave_id = approved["result"]["inserted_leave_id"]
+    first = await executor.execute({"action": "undo", "payload": {}, "explanation": "Undo"})
+    assert first["success"] is True
+    assert leave_id not in _leave_ids(store)
+    assert leave_id not in _settings_leave_ids(store)
+
+    second = await executor.execute({"action": "undo", "payload": {}, "explanation": "Undo"})
+
+    assert second["result"]["message"] == "Nothing to undo"
+    assert leave_id not in _leave_ids(store)
+    assert leave_id not in _settings_leave_ids(store)
+    assert not any(row.get("action") in ("undo", "redo") for row in store.tables["command_log"])
+
+
+@pytest.mark.asyncio
+async def test_redo_then_undo_of_a_reused_form_row_keeps_that_row():
+    form = {
+        "id": "form-leave",
+        "user_id": "user-1",
+        "name": "Sick",
+        "start_date": SICK_DAY,
+        "end_date": SICK_DAY,
+        "effects": {"type": "sick"},
+        "notes": "",
+    }
+    store = _Store(leaves=[form])
+    before = copy.deepcopy(store.tables["master_settings"][0]["settings"])
+    before["leave_blocks"] = []
+    after = copy.deepcopy(before)
+    after["leave_blocks"] = [copy.deepcopy(form)]
+    store.tables["master_settings"][0]["settings"] = copy.deepcopy(after)
+    store.tables["command_log"] = [{
+        "id": "cmd-reuse",
+        "user_id": "user-1",
+        "action": "add_leave",
+        "status": "applied",
+        "created_at": "2026-01-05T12:00:00+00:00",
+        "payload": {"name": "Sick", "type": "sick", "inserted_leave_id": ""},
+        "before_state": before,
+        "after_state": after,
+        "source": "api",
+        "message_id": None,
+        "explanation": "Reuse the form row",
+    }]
+    executor = _executor(store)
+
+    await executor.execute({"action": "undo", "payload": {}, "explanation": "Undo"})
+    await executor.execute({"action": "redo", "payload": {}, "explanation": "Redo"})
+    await executor.execute({"action": "undo", "payload": {}, "explanation": "Undo"})
+
+    assert _leave_ids(store) == {"form-leave"}
+    assert "form-leave" not in _settings_leave_ids(store)
+
+
+@pytest.mark.asyncio
+async def test_undo_after_redo_by_id(monkeypatch):
+    store = _Store()
+    _wire(monkeypatch, store)
+    executor = _executor(store)
+    approved = await executor.execute({
+        "action": "add_leave",
+        "payload": {"name": "Sick", "type": "sick", "date": SICK_DAY},
+        "explanation": "Sick day",
+    })
+    command_id = approved["command_id"]
+    leave_id = approved["result"]["inserted_leave_id"]
+    await undo_command(UndoRequest(), {"id": "user-1"})
+    await redo_command(RedoRequest(), {"id": "user-1"})
+
+    undone = await undo_command(UndoRequest(command_id=command_id), {"id": "user-1"})
+
+    assert undone["success"] is True
+    assert leave_id not in _leave_ids(store)
+    status = next(row["status"] for row in store.tables["command_log"] if row["id"] == command_id)
+    assert status == "undone"
+
+
+@pytest.mark.asyncio
+async def test_a_second_concurrent_undo_is_refused(monkeypatch):
+    store = _Store()
+    _wire(monkeypatch, store)
+    executor = _executor(store)
+    approved = await executor.execute({
+        "action": "add_leave",
+        "payload": {"name": "Sick", "type": "sick", "date": SICK_DAY},
+        "explanation": "Sick day",
+    })
+    command_id = approved["command_id"]
+    leave_id = approved["result"]["inserted_leave_id"]
+
+    async def once():
+        return await undo_command(UndoRequest(command_id=command_id), {"id": "user-1"})
+
+    outcomes = await asyncio.gather(once(), once(), return_exceptions=True)
+    successes = [item for item in outcomes if isinstance(item, dict) and item.get("success")]
+    conflicts = [item for item in outcomes if isinstance(item, HTTPException)]
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert conflicts[0].status_code == 409
+    assert leave_id not in _leave_ids(store)
+
+
+@pytest.mark.asyncio
+async def test_redo_refuses_when_a_newer_command_was_applied(monkeypatch):
+    store = _Store()
+    _wire(monkeypatch, store)
+    executor = _executor(store)
+    leave = await executor.execute({
+        "action": "add_leave",
+        "payload": {"name": "Sick", "type": "sick", "date": SICK_DAY},
+        "explanation": "Sick day",
+    })
+    await undo_command(UndoRequest(), {"id": "user-1"})
+    added = await executor.execute({
+        "action": "add_commitment",
+        "payload": {"name": "Gym", "type": "personal", "start_date": OTHER_DAY, "end_date": OTHER_DAY},
+        "explanation": "Gym",
+    })
+    assert added["success"] is True
+
+    with pytest.raises(HTTPException) as exc:
+        await redo_command(RedoRequest(command_id=leave["command_id"]), {"id": "user-1"})
+
+    assert exc.value.status_code == 409
+    assert "newer" in str(exc.value.detail).lower()
+    assert leave["result"]["inserted_leave_id"] not in _leave_ids(store)
+    assert added["result"]["inserted_commitment_id"] in {
+        row["id"] for row in store.tables["commitments"]
+    }
+    status = next(row["status"] for row in store.tables["command_log"] if row["id"] == leave["command_id"])
+    assert status == "undone"

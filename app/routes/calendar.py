@@ -422,6 +422,10 @@ async def delete_leave_block(
         raise HTTPException(status_code=404, detail="Leave block not found")
     span = _leave_span(existing)
 
+    deleted = await db.delete_leave_block(leave_id, user_id=user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Leave block not found")
+
     service = MasterSettingsService(db)
     try:
         current = await service.get(user_id)
@@ -435,10 +439,6 @@ async def delete_leave_block(
     except Exception as exc:
         logger.error(f"[CALENDAR] Settings update failed for leave {leave_id}: {exc}")
         raise HTTPException(status_code=500, detail="Leave could not be removed") from exc
-
-    deleted = await db.delete_leave_block(leave_id, user_id=user_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Leave block not found")
 
     if span is not None:
         executor = create_command_executor(db, user_id)
