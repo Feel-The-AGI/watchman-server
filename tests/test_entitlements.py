@@ -116,6 +116,8 @@ class MemoryDB:
         self.users = {}
         self.payments = {}
         self.subs = {}
+        self.founding_claimed = 0
+        self.force_over_cap = False
 
     async def get_payment_by_reference(self, reference):
         row = self.payments.get(reference)
@@ -167,6 +169,15 @@ class MemoryDB:
     async def create_payment_record(self, data):
         self.payments[data["paystack_reference"]] = dict(data)
         return dict(data)
+
+    async def count_founding_claims(self):
+        return self.founding_claimed
+
+    async def claim_founding_seat(self, user_id, reference):
+        if self.force_over_cap or self.founding_claimed >= 100:
+            return "over_cap"
+        self.founding_claimed += 1
+        return "claimed"
 
 
 def verified_charge(amount=18000):

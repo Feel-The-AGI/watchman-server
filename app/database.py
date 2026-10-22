@@ -230,6 +230,45 @@ class Database:
             logger.error(f"[DB] Error updating payment {reference}: {e}")
             return None
 
+    async def count_founding_claims(self) -> Optional[int]:
+        """Paid founding seats. None when the table is not there yet."""
+        try:
+            result = self.client.table("founding_claims").select(
+                "user_id", count="exact"
+            ).execute()
+            return result.count or 0
+        except Exception as e:
+            logger.error(f"[DB] Could not count founding claims: {e}")
+            return None
+
+    async def claim_founding_seat(self, user_id: str, reference: str) -> str:
+        """Insert one founding seat. over_cap still means the charge must grant Pro."""
+        try:
+            self.client.table("founding_claims").insert({
+                "user_id": user_id,
+                "payment_reference": reference,
+            }).execute()
+            return "claimed"
+        except Exception as e:
+            text = " ".join(
+                str(part) for part in (
+                    e,
+                    getattr(e, "code", ""),
+                    getattr(e, "message", ""),
+                    getattr(e, "details", ""),
+                )
+            ).lower()
+            if "founding_cap" in text or "check_violation" in text or "23514" in text:
+                logger.error(
+                    f"[PAYMENTS] Founding cap exceeded for user {user_id} "
+                    f"reference {reference}. Pro access is still granted."
+                )
+                return "over_cap"
+            if "23505" in text or "duplicate" in text:
+                return "exists"
+            logger.error(f"[DB] Founding seat was not recorded for {user_id}: {e}")
+            return "unavailable"
+
     async def get_payment_history(self, user_id: str) -> list:
         """Get user's payment history"""
         logger.debug(f"[DB] get_payment_history: {user_id}")
