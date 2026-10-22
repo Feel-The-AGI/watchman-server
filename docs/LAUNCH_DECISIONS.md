@@ -6,7 +6,7 @@ Two designs were not rewritten. Each one is verified against the current code, w
 
 ### What is true today
 
-Checkout calls Paystack `POST /transaction/initialize`. That is a one-off charge in GHS, not a Paystack plan or subscription. The amount is `$12 * live USD→GHS rate`. If the rate cannot be fetched, checkout and the pricing endpoint return 503. There is no hardcoded charge rate.
+Checkout calls Paystack `POST /transaction/initialize`. That is a one-off charge in GHS, not a Paystack plan or subscription. The amount is a fixed plan price: monthly GHS 70 for 30 days, yearly GHS 560 for 365 days. USD figures are display only and are never charged. Checkout does not use a live exchange rate.
 
 A `charge.success` webhook grants Pro only when all of these hold:
 
@@ -15,7 +15,7 @@ A `charge.success` webhook grants Pro only when all of these hold:
 - the reference was stored by our checkout as `pending`;
 - the charged currency is GHS and the pesewa amount matches the stored price.
 
-The grant is 30 days from the later of now and the current `users.pro_expires_at`. The same reference does not extend the period again. Daily-log export, incident export, and the existing stats export require current Pro. Admin accounts are not counted in MRR.
+The grant is that plan's days, or 30 days when a legacy checkout has no plan, from the later of now and the current `users.pro_expires_at`. The same reference does not extend the period again. Daily-log export, incident export, and the existing stats export require current Pro. Admin accounts are not counted in MRR.
 
 Cancellation of a paid period sets `cancel_at_period_end` and leaves access until `pro_expires_at`. A Paystack `subscription.disable` event does the same. Failed renewal marks the subscription `past_due` and does not cut off a period that was already paid.
 

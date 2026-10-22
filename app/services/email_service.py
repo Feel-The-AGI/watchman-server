@@ -417,7 +417,7 @@ class EmailService:
                     <div style="background-color: #0a0a0f; border-radius: 12px; padding: 20px; margin: 24px 0;">
                         <p style="margin: 8px 0; color: #e5e5e5;"><strong style="color: #ffffff;">Name:</strong> {subscriber_name}</p>
                         <p style="margin: 8px 0; color: #e5e5e5;"><strong style="color: #ffffff;">Email:</strong> {subscriber_email}</p>
-                        <p style="margin: 8px 0; color: #e5e5e5;"><strong style="color: #ffffff;">Amount:</strong> ${int(amount_usd)}/month</p>
+                        <p style="margin: 8px 0; color: #e5e5e5;"><strong style="color: #ffffff;">Display price:</strong> ${amount_usd:g} USD (charged in GHS)</p>
                     </div>
                     
                     <p style="color: #10b981; font-size: 24px; text-align: center;">💰</p>
