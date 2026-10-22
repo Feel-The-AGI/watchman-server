@@ -474,6 +474,53 @@ async def test_completing_onboarding_saves_no_default_rules(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_completing_onboarding_copies_rules_when_the_flag_is_already_true(monkeypatch):
+    saved = {}
+    completed = []
+    rule = {
+        "id": "rule-1",
+        "name": "No study on night shifts",
+        "is_active": True,
+        "rule": {
+            "type": "no_activity_on",
+            "activity": "study",
+            "work_types": ["work_night"],
+        },
+    }
+
+    class DB:
+        def __init__(self, use_admin=False):
+            pass
+
+        async def get_active_constraints(self, user_id):
+            return [rule]
+
+        async def complete_onboarding(self, user_id):
+            completed.append(user_id)
+
+    class Settings:
+        def __init__(self, db):
+            pass
+
+        async def get(self, user_id):
+            return {"user_id": user_id, "settings": {"constraints": []}, "version": 3}
+
+        async def update(self, user_id, settings, version):
+            saved["user_id"] = user_id
+            saved["settings"] = settings
+            saved["version"] = version
+
+    monkeypatch.setattr("app.routes.auth.Database", DB)
+    monkeypatch.setattr("app.engines.calendar_authority.MasterSettingsService", Settings)
+    result = await complete_onboarding({"id": "user-1", "onboarding_completed": True})
+    assert result["message"] == "Onboarding already completed"
+    assert completed == []
+    assert saved["user_id"] == "user-1"
+    assert saved["version"] == 3
+    assert saved["settings"]["constraints"] == [rule]
+
+
+@pytest.mark.asyncio
 async def test_create_default_constraints_writes_nothing():
     database = Database.__new__(Database)
     assert await database.create_default_constraints("user-1") == []
