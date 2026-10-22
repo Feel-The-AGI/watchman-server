@@ -279,3 +279,54 @@ async def test_missing_plan_column_still_stores_the_checkout(monkeypatch):
     ]
     assert "plan" not in saved
     assert period_days_for_payment(saved) == 365
+
+
+@pytest.mark.asyncio
+async def test_prepaid_copy_names_the_plan_and_does_not_promise_renewal(monkeypatch):
+    from app.services.email_service import EmailService
+
+    service = EmailService()
+    captured = {}
+
+    async def capture(to, subject, html, text=None):
+        captured["html"] = html
+        return True
+
+    service.send_email = capture
+    ends = datetime(2027, 1, 22, tzinfo=timezone.utc)
+    await service.send_pro_upgrade_email(
+        "ada@example.com", "Ada", plan_name="yearly", ends_on=ends,
+    )
+    html = captured["html"]
+    assert "Yearly, through 22 Jan 2027." in html
+    for feature in (
+        "Unlimited rotations and commitments",
+        "Planning beyond 3 months",
+        "Leave planning",
+        "Unlimited chat and full history",
+        "Calendar sharing",
+        "CSV and PDF exports",
+    ):
+        assert feature in html
+    assert "Weighted Constraints" not in html
+    assert "Priority Support" not in html
+    assert "Manage your subscription" not in html
+
+    user = {
+        "id": "alice",
+        "tier": "pro",
+        "pro_expires_at": ends.isoformat(),
+        "paystack_subscription_code": None,
+    }
+    db = MemoryDB()
+    db.users["alice"] = dict(user)
+    monkeypatch.setattr(payments, "Database", lambda **kwargs: db)
+    cancelled = await payments.cancel_subscription(user)
+    assert cancelled["message"] == "Pro is prepaid and ends on 22 Jan 2027. Nothing will be charged again."
+    assert "renew" not in cancelled["message"].lower()
+    managed = await payments.get_manage_subscription_link(user)
+    assert managed["message"] == cancelled["message"]
+    from app.middleware.auth import require_pro_tier
+    with pytest.raises(HTTPException) as exc:
+        await require_pro_tier({"id": "free", "tier": "free"})
+    assert exc.value.detail == "This is a Pro feature. Upgrade to Pro to use it."

@@ -299,7 +299,7 @@ async def _save_subscription_period(db: Database, user_id: str, until: datetime,
             **fields,
         })
     if not saved:
-        raise HTTPException(status_code=500, detail="Could not record subscription period")
+        raise HTTPException(status_code=500, detail="Could not record the Pro period")
 
 
 async def _grant_access(
@@ -311,6 +311,7 @@ async def _grant_access(
     notify: bool = False,
     email: str = None,
     usd_amount: float = None,
+    plan_name: str = None,
 ) -> None:
     updates = {"tier": "pro", "pro_expires_at": until.isoformat()}
     if customer_code:
@@ -327,7 +328,12 @@ async def _grant_access(
     user_name = user.get("name") or (recipient.split("@")[0] if recipient else "there")
     if recipient:
         try:
-            await email_service.send_pro_upgrade_email(to=recipient, user_name=user_name)
+            await email_service.send_pro_upgrade_email(
+                to=recipient,
+                user_name=user_name,
+                plan_name=plan_name,
+                ends_on=until,
+            )
         except Exception as e:
             logger.warning(f"[PAYMENTS] Failed to send Pro upgrade email: {e}")
     try:
@@ -418,6 +424,7 @@ async def apply_successful_charge(db: Database, reference: str, verified: dict) 
         notify=not was_active,
         email=customer.get("email") or user.get("email"),
         usd_amount=payment.get("amount"),
+        plan_name=payment.get("plan"),
     )
     logger.info(f"[PAYMENTS] User {user['id']} Pro access until {until.isoformat()}")
     return {"status": "success", "access_until": until.isoformat()}
@@ -449,7 +456,7 @@ async def _store_paystack_subscription(db: Database, data: dict, *, grant_access
 
 
 async def _mark_subscription_cancelled(db: Database, data: dict) -> None:
-    """Stop renewal. Access already paid for lasts until pro_expires_at."""
+    """An old provider notice. Prepaid access already paid for is left as it is."""
     user = await _find_paystack_user(db, data)
     if not user:
         return
@@ -460,7 +467,7 @@ async def _mark_subscription_cancelled(db: Database, data: dict) -> None:
             "cancel_at_period_end": True,
             "status": "active" if not access_expired(user) else "cancelled",
         })
-    logger.info(f"[PAYMENTS] Renewal stopped for user {user['id']}; paid access is unchanged")
+    logger.info(f"[PAYMENTS] Provider notice for user {user['id']}; paid access is unchanged")
 
 
 async def _mark_renewal_failed(db: Database, data: dict) -> None:
@@ -473,7 +480,12 @@ async def _mark_renewal_failed(db: Database, data: dict) -> None:
     subscription = await db.get_subscription(user["id"])
     if subscription and subscription.get("id"):
         await db.update_subscription(subscription["id"], {"status": "past_due"})
-    logger.warning(f"[PAYMENTS] Renewal payment failed for user {user['id']}; current period stays")
+    logger.warning(f"[PAYMENTS] Provider billing notice failed for user {user['id']}; the paid period stays")
+
+
+def _prepaid_message(expires: datetime) -> str:
+    end = f"{expires.day} {expires.strftime('%b %Y')}"
+    return f"Pro is prepaid and ends on {end}. Nothing will be charged again."
 
 
 def _current_paid_expiry(user: dict):
@@ -565,8 +577,8 @@ async def paystack_webhook(request: Request):
         return {"status": "success"}
 
     if event_type == "invoice.update" and data.get("paid"):
-        # A renewal only extends access when it matches a server-created checkout.
-        # Unsolicited invoices are logged and do not grant Pro.
+        # An invoice extends access only when it matches a server-created checkout.
+        # Anything else is logged and does not grant Pro.
         reference = data.get("reference") or (data.get("transaction") or {}).get("reference")
         logger.info(f"[PAYMENTS] Invoice paid reference={reference}; access changes only via a stored checkout")
         if reference:
@@ -620,19 +632,21 @@ async def get_subscription_status(user: dict = Depends(get_current_user)):
         "tier": get_effective_tier(user),
         "current_period_end": expires.isoformat() if expires else None,
         "cancel_at_period_end": bool(subscription and subscription.get("cancel_at_period_end")),
-        "message": "Pro access is active" if active else "No active Pro period",
+        "message": _prepaid_message(expires) if active and expires else (
+            "Pro is active." if active else "No active Pro period. Nothing is scheduled to be charged."
+        ),
     }
 
 
 @router.post("/cancel-subscription")
 async def cancel_subscription(user: dict = Depends(get_current_user)):
-    """Stop renewal. Access already paid for lasts until the period ends."""
+    """Kept for older clients. Pro is prepaid, so this does not stop a renewal."""
     if user.get("tier") == "admin":
-        raise HTTPException(status_code=400, detail="Admin access is not a Paystack subscription")
+        raise HTTPException(status_code=400, detail="Admin access is not a paid plan")
     expires = _current_paid_expiry(user)
     subscription_code = user.get("paystack_subscription_code")
     if expires is None and not subscription_code:
-        raise HTTPException(status_code=400, detail="No active Pro period to cancel")
+        raise HTTPException(status_code=400, detail="No active Pro period")
 
     if subscription_code:
         if not settings.paystack_secret_key:
@@ -641,7 +655,7 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
             result = await paystack_request("GET", f"/subscription/{subscription_code}")
             email_token = (result.get("data") or {}).get("email_token")
             if not email_token:
-                raise HTTPException(status_code=400, detail="Could not retrieve subscription details")
+                raise HTTPException(status_code=400, detail="Could not update billing")
             await paystack_request("POST", "/subscription/disable", {
                 "code": subscription_code,
                 "token": email_token,
@@ -650,18 +664,18 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
             raise
         except Exception as e:
             logger.error(f"[PAYMENTS] Error cancelling Paystack subscription: {e}")
-            raise HTTPException(status_code=500, detail="Failed to cancel subscription")
+            raise HTTPException(status_code=500, detail="Could not update the Pro period")
 
     db = Database(use_admin=True)
     if expires is not None:
         await db.update_user(user["id"], {"paystack_subscription_code": None})
         await _save_subscription_period(db, user["id"], expires, cancelled=True)
-        logger.info(f"[PAYMENTS] Renewal cancelled for user {user['id']}")
+        logger.info(f"[PAYMENTS] Prepaid period left unchanged for user {user['id']}")
         return {
             "status": "cancelled",
             "tier": "pro",
             "access_until": expires.isoformat(),
-            "message": "Renewal is cancelled. Pro access lasts until the end of the paid period.",
+            "message": _prepaid_message(expires),
         }
 
     # A Paystack subscription with no recorded period was the old indefinite grant.
@@ -672,13 +686,13 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
         "paystack_subscription_code": None,
     })
     if not updated:
-        raise HTTPException(status_code=500, detail="Failed to cancel subscription")
-    logger.info(f"[PAYMENTS] Indefinite subscription ended for user {user['id']}")
+        raise HTTPException(status_code=500, detail="Could not update the Pro period")
+    logger.info(f"[PAYMENTS] Open-ended Pro access ended for user {user['id']}")
     return {
         "status": "cancelled",
         "tier": "free",
         "access_until": now.isoformat(),
-        "message": "Subscription cancelled.",
+        "message": "Pro has ended. Nothing will be charged again.",
     }
 
 
@@ -692,23 +706,18 @@ async def get_payment_history(user: dict = Depends(get_current_user)):
 
 @router.get("/manage-subscription")
 async def get_manage_subscription_link(user: dict = Depends(get_current_user)):
-    """
-    Get a link for the user to manage their subscription.
-    Paystack sends users to their hosted portal via email.
-    """
+    """Kept for older clients. There is no renewal to manage."""
     expires = parse_timestamp(user.get("pro_expires_at"))
     if not _period_is_active(user):
         return {
             "has_subscription": False,
-            "message": "No active Pro period. Subscribe to Pro to manage billing."
+            "message": "No active Pro period. Nothing is scheduled to be charged.",
         }
 
-    # One-off charges have no Paystack billing portal. Cancellation keeps the
-    # paid period and stops a future renewal if a Paystack subscription exists.
     return {
         "has_subscription": True,
         "tier": get_effective_tier(user),
         "current_period_end": expires.isoformat() if expires else None,
-        "message": "Pro access lasts until the end of the paid period. Cancel to stop renewal.",
+        "message": _prepaid_message(expires) if expires else "Pro is prepaid. Nothing will be charged again.",
         "cancel_url": "/api/payments/cancel-subscription",
     }
