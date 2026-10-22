@@ -1288,23 +1288,51 @@ def _commitments_to_stamp(document_rows: list, table_rows: list) -> list:
     return merged
 
 
+def _dated_record(row: dict) -> dict:
+    start = _day_key(row.get("start_date") or row.get("date"))
+    end = _day_key(row.get("end_date")) or start
+    if start:
+        return {**row, "start_date": start, "end_date": end}
+    return dict(row)
+
+
 def _merge_records(document_rows: list, table_rows: list) -> list:
-    """Document rows first, then table rows that are not the same id or span."""
-    merged = []
-    seen = set()
-    for row in list(document_rows or []) + list(table_rows or []):
-        if not isinstance(row, dict):
-            continue
+    """One row per id. The table copy replaces the document copy.
+
+    A date edit used to leave both spans, because the old key included the
+    dates and the name. Rows with no id are still deduped by span and name.
+    """
+    by_id = {}
+    order = []
+    anonymous = []
+    seen_anonymous = set()
+
+    def take_identified(row: dict, overwrite: bool) -> bool:
+        row_id = str(row.get("id") or "")
+        if not row_id:
+            return False
+        if row_id not in by_id:
+            order.append(row_id)
+        if row_id not in by_id or overwrite:
+            by_id[row_id] = _dated_record(row)
+        return True
+
+    def take_anonymous(row: dict) -> None:
         start = _day_key(row.get("start_date") or row.get("date"))
         end = _day_key(row.get("end_date")) or start
-        key = (str(row.get("id") or ""), start, end, str(row.get("name") or ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        if start:
-            row = {**row, "start_date": start, "end_date": end}
-        merged.append(row)
-    return merged
+        key = (start, end, str(row.get("name") or ""))
+        if key in seen_anonymous:
+            return
+        seen_anonymous.add(key)
+        anonymous.append(_dated_record(row))
+
+    for row in document_rows or []:
+        if isinstance(row, dict) and not take_identified(row, overwrite=False):
+            take_anonymous(row)
+    for row in table_rows or []:
+        if isinstance(row, dict) and not take_identified(row, overwrite=True):
+            take_anonymous(row)
+    return [by_id[row_id] for row_id in order] + anonymous
 
 
 def _merge_leave_blocks(document_leaves: list, table_leaves: list) -> list:

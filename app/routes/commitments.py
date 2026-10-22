@@ -3,11 +3,13 @@ Watchman Commitments Routes
 Endpoints for managing commitments (education, personal, etc.)
 """
 
+import hashlib
+import json
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import date
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from app.database import Database
 from app.engines.command_executor import (
@@ -133,6 +135,8 @@ async def create_commitment(
     logger.info(f"User {user['id']} creating commitment: {data.name} ({data.type})")
     if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         idempotency_key = None
+    supplied_id = _canonical_uuid(data.id)
+    fingerprint = _request_fingerprint(data) if idempotency_key else None
 
     commitment_data = {
         "user_id": user["id"],
@@ -157,9 +161,11 @@ async def create_commitment(
     }
 
     existing_rows = await db.read_commitments(user["id"])
-    reused = _reusable_commitment(existing_rows, user["id"], data.id, idempotency_key)
-    if reused is None and data.id:
-        other = await db.get_commitment(data.id)
+    reused = _reusable_commitment(
+        existing_rows, user["id"], supplied_id, idempotency_key, fingerprint
+    )
+    if reused is None and supplied_id:
+        other = await db.get_commitment(supplied_id)
         if other and other.get("user_id") != user["id"]:
             raise HTTPException(status_code=403, detail="Not authorized")
     tier = user.get("tier", "free")
@@ -186,13 +192,15 @@ async def create_commitment(
     if reused is not None:
         commitment = reused
     else:
-        commitment_data["id"] = data.id or str(uuid4())
+        commitment_data["id"] = supplied_id or str(uuid4())
         if idempotency_key:
-            commitment_data["source_text"] = f"idempotency:{idempotency_key}"
+            commitment_data["source_text"] = f"idempotency:{idempotency_key}:{fingerprint}"
         commitment = await db.create_commitment(commitment_data)
     if not commitment:
         raise HTTPException(status_code=500, detail="Commitment could not be saved")
-    calendar_pending = not await _publish_commitment(db, user["id"], commitment)
+    outcome = await _publish_commitment(db, user["id"], commitment)
+    if outcome == "unrecorded":
+        raise HTTPException(status_code=500, detail="Commitment could not be saved")
 
     logger.info(f"Commitment created: {commitment.get('id')} for user {user['id']}")
 
@@ -200,7 +208,7 @@ async def create_commitment(
         "success": True,
         "message": "Commitment created",
         "data": commitment,
-        "calendar_pending": calendar_pending,
+        "calendar_pending": outcome == "pending",
     }
 
 
@@ -271,16 +279,15 @@ async def update_commitment(
     if not commitment:
         raise HTTPException(status_code=500, detail="Commitment could not be saved")
     saved = {**existing, **commitment}
-    try:
-        await _publish_commitment(db, user["id"], saved)
-    except Exception as exc:
-        logger.error(f"[COMMITMENTS] Update was not fully saved for {commitment_id}: {exc}")
-        raise HTTPException(status_code=500, detail="Commitment could not be saved") from exc
+    outcome = await _publish_commitment(db, user["id"], saved)
+    if outcome == "unrecorded":
+        raise HTTPException(status_code=500, detail="Commitment could not be saved")
 
     return {
         "success": True,
         "message": "Commitment updated",
-        "data": saved
+        "data": saved,
+        "calendar_pending": outcome == "pending",
     }
 
 
@@ -343,13 +350,48 @@ async def delete_commitment(
     }
 
 
-def _reusable_commitment(rows: list, user_id: str, supplied_id: Optional[str], idempotency_key: Optional[str]):
+def _canonical_uuid(value: Optional[str]) -> Optional[str]:
+    """A client-supplied id must be a UUID. None means the server chooses one."""
+    if value is None:
+        return None
+    try:
+        return str(UUID(str(value).strip()))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="Commitment id must be a UUID")
+
+
+def _request_fingerprint(data: CreateCommitmentRequest) -> str:
+    """Stable hash of the create body, so a reused key cannot change the row."""
+    payload = data.model_dump(mode="json")
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _reusable_commitment(
+    rows: list,
+    user_id: str,
+    supplied_id: Optional[str],
+    idempotency_key: Optional[str],
+    fingerprint: Optional[str],
+):
     """An existing row this POST may finish. Never a name or date match."""
     if idempotency_key:
-        marker = f"idempotency:{idempotency_key}"
+        prefix = f"idempotency:{idempotency_key}:"
         for row in rows or []:
-            if isinstance(row, dict) and row.get("user_id") == user_id and row.get("source_text") == marker:
-                return row
+            if not isinstance(row, dict) or row.get("user_id") != user_id:
+                continue
+            source = row.get("source_text")
+            if not isinstance(source, str) or not source.startswith(prefix):
+                continue
+            digest = source[len(prefix):]
+            if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                continue
+            if digest != fingerprint:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Idempotency-Key was already used for a different request",
+                )
+            return row
     if supplied_id:
         for row in rows or []:
             if isinstance(row, dict) and str(row.get("id") or "") == supplied_id and row.get("user_id") == user_id:
@@ -357,10 +399,17 @@ def _reusable_commitment(rows: list, user_id: str, supplied_id: Optional[str], i
     return None
 
 
-async def _publish_commitment(db: Database, user_id: str, saved: dict) -> bool:
-    """Write the settings copy and rebuild. False leaves a pending add for GET /year."""
+async def _publish_commitment(db: Database, user_id: str, saved: dict) -> str:
+    """Copy the commitment into settings and rebuild the calendar.
+
+    "unrecorded" means the pending id was not saved. The caller returns 500
+    so a retry can finish the job. "pending" means the id was saved and a
+    later calendar read can finish the rebuild. "ready" means it is already
+    on the calendar.
+    """
     service = MasterSettingsService(db)
     saved_id = str(saved.get("id") or "")
+    recorded = False
     try:
         current = await service.get(user_id)
         settings = dict(current.get("settings") or {})
@@ -379,18 +428,24 @@ async def _publish_commitment(db: Database, user_id: str, saved: dict) -> bool:
         pending.append(saved_id)
         settings[PENDING_COMMITMENT_ADD] = pending
         await service.update(user_id, settings, current["version"])
+        recorded = True
     except Exception as exc:
         logger.error(f"[COMMITMENTS] Settings update failed for {saved_id}: {exc}")
-        return False
 
+    rebuilt = False
     executor = create_command_executor(db, user_id)
     try:
         wrote = await executor._regenerate_calendar()
         if not wrote:
             await executor._project_saved_events()
+        rebuilt = True
     except Exception as exc:
         logger.error(f"[COMMITMENTS] Rebuild failed for {saved_id}: {exc}")
-        return False
+
+    if not recorded:
+        return "unrecorded"
+    if not rebuilt:
+        return "pending"
 
     try:
         fresh = await service.get(user_id)
@@ -401,8 +456,8 @@ async def _publish_commitment(db: Database, user_id: str, saved: dict) -> bool:
         await service.update(user_id, cleared, fresh["version"])
     except Exception as exc:
         logger.error(f"[COMMITMENTS] Could not clear pending add for {saved_id}: {exc}")
-        return False
-    return True
+        return "pending"
+    return "ready"
 
 
 def _listed(items, commitment_id: str) -> bool:

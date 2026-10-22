@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from loguru import logger
 from postgrest.exceptions import APIError
 
@@ -11,6 +12,7 @@ from app.database import Database
 from datetime import date, timedelta
 
 from app.engines.calendar_engine import CALENDAR_ENGINE_VERSION
+from app.engines.command_executor import create_command_executor
 from app.routes.calendar import get_day, get_year
 from app.routes.commitments import CreateCommitmentRequest, UpdateCommitmentRequest, create_commitment, update_commitment
 
@@ -220,31 +222,84 @@ async def test_a_new_create_does_not_change_a_paused_row(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_idempotency_key_reuses_the_row_without_updating_it(monkeypatch):
+async def test_a_failed_settings_write_returns_500_and_the_same_key_finishes(monkeypatch):
     store = _Store()
     store.fail_updates = 1
     _install(monkeypatch, store)
-    first_body = CreateCommitmentRequest(
+    body = CreateCommitmentRequest(
         name="Gym", type="personal", start_date="2026-10-27", end_date="2026-10-27",
     )
 
-    first = await create_commitment(first_body, USER, idempotency_key="abc")
-    assert first["calendar_pending"] is True
+    with pytest.raises(HTTPException) as failed:
+        await create_commitment(body, USER, idempotency_key="abc")
+
+    assert failed.value.status_code == 500
     assert len(store.commitments) == 1
     assert store.settings_row["settings"]["commitments"] == []
+    assert store.settings_row["settings"].get("commitments_pending_add") in (None, [])
 
-    second = await create_commitment(
+    finished = await create_commitment(body, USER, idempotency_key="abc")
+    assert finished["calendar_pending"] is False
+    assert finished["data"]["name"] == "Gym"
+    assert finished["data"]["id"] == store.commitments[0]["id"]
+    assert len(store.commitments) == 1
+    assert _names((await get_day("2026-10-27", USER))["data"]) == ["Gym"]
+    assert store.settings_row["settings"].get("commitments_pending_add") == []
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_idempotency_key_with_a_different_body_is_rejected(monkeypatch):
+    store = _Store()
+    _install(monkeypatch, store)
+    first = await create_commitment(
         CreateCommitmentRequest(
-            name="Renamed", type="personal", start_date="2026-11-01", end_date="2026-11-01",
+            name="Gym", type="personal", start_date="2026-10-27", end_date="2026-10-27",
         ),
         USER,
         idempotency_key="abc",
     )
-    assert second["data"]["id"] == first["data"]["id"]
-    assert second["data"]["name"] == "Gym"
-    assert second["calendar_pending"] is False
+
+    with pytest.raises(HTTPException) as rejected:
+        await create_commitment(
+            CreateCommitmentRequest(
+                name="Renamed", type="personal", start_date="2026-11-01", end_date="2026-11-01",
+            ),
+            USER,
+            idempotency_key="abc",
+        )
+
+    assert rejected.value.status_code == 422
     assert len(store.commitments) == 1
-    assert _names((await get_day("2026-10-27", USER))["data"]) == ["Gym"]
+    assert store.commitments[0]["id"] == first["data"]["id"]
+    assert store.commitments[0]["name"] == "Gym"
+
+
+@pytest.mark.asyncio
+async def test_a_client_id_must_be_a_uuid(monkeypatch):
+    store = _Store()
+    _install(monkeypatch, store)
+
+    with pytest.raises(HTTPException) as rejected:
+        await create_commitment(
+            CreateCommitmentRequest(id="not-a-uuid", name="Gym", type="personal"),
+            USER,
+        )
+
+    assert rejected.value.status_code == 422
+    assert store.commitments == []
+
+    created = await create_commitment(
+        CreateCommitmentRequest(
+            id=str(uuid4()),
+            name="Gym",
+            type="personal",
+            start_date="2026-10-27",
+            end_date="2026-10-27",
+        ),
+        USER,
+    )
+    assert created["success"] is True
+    assert len(store.commitments) == 1
 
 
 def _fill_year(store):
@@ -294,6 +349,84 @@ async def test_a_failed_create_rebuild_is_finished_by_the_year(monkeypatch):
     october = next(day for day in year["data"] if day["date"] == "2026-10-27")
     assert _names(october) == ["Dentist appointment"]
     assert store.settings_row["settings"]["commitments_pending_add"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_update_rebuild_is_finished_by_the_year(monkeypatch):
+    store = _Store()
+    _fill_year(store)
+    _install(monkeypatch, store)
+    created = await create_commitment(
+        CreateCommitmentRequest(
+            name="Dentist appointment",
+            type="personal",
+            start_date="2026-10-27",
+            end_date="2026-10-27",
+        ),
+        USER,
+    )
+    assert created["calendar_pending"] is False
+
+    store.fail_rebuild = True
+    updated = await update_commitment(
+        created["data"]["id"],
+        UpdateCommitmentRequest(name="Haircut"),
+        USER,
+    )
+    assert updated["success"] is True
+    assert updated["calendar_pending"] is True
+    assert store.settings_row["settings"]["commitments_pending_add"] == [created["data"]["id"]]
+    assert _names((await get_day("2026-10-27", USER))["data"]) == ["Dentist appointment"]
+
+    store.fail_rebuild = False
+    year = await get_year(2026, USER)
+    october = next(day for day in year["data"] if day["date"] == "2026-10-27")
+    assert _names(october) == ["Haircut"]
+    assert store.settings_row["settings"]["commitments_pending_add"] == []
+
+
+def _chips(day):
+    return (day or {}).get("state_json", {}).get("commitments") or []
+
+
+@pytest.mark.asyncio
+async def test_a_date_edit_rebuild_shows_one_chip_on_the_new_date(monkeypatch):
+    store = _Store()
+    _install(monkeypatch, store)
+    created = await create_commitment(
+        CreateCommitmentRequest(
+            name="Dentist appointment",
+            type="personal",
+            start_date="2026-10-27",
+            end_date="2026-10-27",
+        ),
+        USER,
+    )
+    commitment_id = created["data"]["id"]
+    updated = await update_commitment(
+        commitment_id,
+        UpdateCommitmentRequest(start_date="2026-11-05", end_date="2026-11-05"),
+        USER,
+    )
+    assert updated["calendar_pending"] is False
+    assert _chips((await get_day("2026-10-27", USER))["data"]) == []
+    moved = _chips((await get_day("2026-11-05", USER))["data"])
+    assert [chip["name"] for chip in moved] == ["Dentist appointment"]
+
+    # The settings copy can still describe the old span, as it did before
+    # updates wrote that copy. The table row is the one that was edited.
+    for item in store.settings_row["settings"]["commitments"]:
+        if item.get("id") == commitment_id:
+            item["start_date"] = "2026-10-27"
+            item["end_date"] = "2026-10-27"
+    wrote = await create_command_executor(store, USER["id"]).rebuild_calendar(
+        date(2026, 10, 1), date(2026, 11, 30)
+    )
+    assert wrote is True
+    assert _chips((await get_day("2026-10-27", USER))["data"]) == []
+    again = _chips((await get_day("2026-11-05", USER))["data"])
+    assert [chip["name"] for chip in again] == ["Dentist appointment"]
+    assert [chip.get("commitment_id") for chip in again] == [commitment_id]
 
 
 class _Missing:
