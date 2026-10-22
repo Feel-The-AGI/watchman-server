@@ -22,6 +22,7 @@ from app.engines.calendar_authority import (
     effective_constraints,
     is_night_study_rule,
     night_shift_dates,
+    sync_cycle_row,
 )
 from app.onboarding import finish_onboarding_for_saved_cycle
 from app.prompts.registry import insert_row
@@ -420,17 +421,22 @@ class CommandExecutor:
             else:
                 normalized_pattern.append(block)
         
-        # Build normalized cycle data with flat anchor format
+        # Build normalized cycle data with flat anchor format.
+        # A missing id stays missing. Inventing one would match no cycles row,
+        # so the single active row could not be synced.
+        cycle_id = payload.get("id") or existing_cycle.get("id")
         cycle_data = {
-            "id": payload.get("id", existing_cycle.get("id", str(uuid4()))),
             "name": payload.get("name", existing_cycle.get("name", "My Rotation")),
             "pattern": normalized_pattern,
             "anchor_date": anchor_date,
             "anchor_cycle_day": anchor_cycle_day,
             "total_days": sum(block.get("duration", 0) for block in normalized_pattern) or existing_cycle.get("total_days", 15)
         }
+        if cycle_id not in (None, ""):
+            cycle_data["id"] = cycle_id
         
         await self.settings_service.update_section(self.user_id, "cycle", cycle_data)
+        await sync_cycle_row(self.db, self.user_id, cycle_data)
         await finish_onboarding_for_saved_cycle(self.db, self.user_id)
         
         # Also update work settings if provided
@@ -875,6 +881,8 @@ class CommandExecutor:
         before_state = command.get("before_state")
         if before_state:
             await self.settings_service.update(self.user_id, before_state)
+            cycle = before_state.get("cycle") if isinstance(before_state, dict) else None
+            await sync_cycle_row(self.db, self.user_id, cycle)
         
         # Mark command as undone
         self.db.client.table("command_log").update({
@@ -899,6 +907,8 @@ class CommandExecutor:
         after_state = command.get("after_state")
         if after_state:
             await self.settings_service.update(self.user_id, after_state)
+            cycle = after_state.get("cycle") if isinstance(after_state, dict) else None
+            await sync_cycle_row(self.db, self.user_id, cycle)
         
         # Mark command as redone
         self.db.client.table("command_log").update({

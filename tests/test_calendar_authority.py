@@ -154,21 +154,42 @@ class MemorySettings:
         return {"settings": {"cycle": value}}
 
 
+SAVED_ROW = {
+    "id": "saved-row",
+    "name": "My Rotation",
+    "pattern": [{"label": "work_night", "duration": 5}, {"label": "off", "duration": 5}],
+    "anchor_date": "2026-10-21",
+    "anchor_cycle_day": 1,
+    "cycle_length": 10,
+}
+
+
 @pytest.mark.asyncio
-async def test_cycle_create_copies_into_master_settings():
-    """The client saves a rotation only through cycles.create/update, then stops."""
-    service = MemorySettings(ROTATION)
-    wrote = await remember_cycle(None, "user", {
-        "id": "saved-row",
-        "name": "My Rotation",
-        "pattern": [{"label": "work_night", "duration": 5}, {"label": "off", "duration": 5}],
-        "anchor_date": "2026-10-21",
-        "anchor_cycle_day": 1,
-        "cycle_length": 10,
-    }, service=service)
+async def test_cycle_create_copies_into_an_empty_document_only():
+    """A new row fills an empty document. A different cycle id does not replace one."""
+    empty = MemorySettings(None)
+    wrote = await remember_cycle(None, "user", SAVED_ROW, service=empty)
     assert wrote is True
-    assert service.writes[-1]["id"] == "saved-row"
-    assert service.cycle["pattern"][0]["label"] == "work_night"
+    assert empty.writes[-1]["id"] == "saved-row"
+    assert empty.cycle["pattern"][0]["label"] == "work_night"
+
+    occupied = MemorySettings(ROTATION)
+    wrote = await remember_cycle(None, "user", SAVED_ROW, service=occupied)
+    assert wrote is False
+    assert occupied.writes == []
+    assert occupied.cycle["id"] == "chat-cycle"
+
+    same = MemorySettings(dict(ROTATION))
+    wrote = await remember_cycle(None, "user", {**SAVED_ROW, "id": "chat-cycle"}, service=same)
+    assert wrote is True
+    assert same.cycle["id"] == "chat-cycle"
+    assert same.cycle["anchor_date"] == "2026-10-21"
+
+    forced = MemorySettings(dict(ROTATION))
+    wrote = await remember_cycle(None, "user", SAVED_ROW, service=forced, replace=True)
+    assert wrote is True
+    assert forced.cycle["id"] == "saved-row"
+    assert forced.cycle["anchor_date"] == "2026-10-21"
 
 
 @pytest.mark.asyncio

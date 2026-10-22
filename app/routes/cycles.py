@@ -12,12 +12,43 @@ from app.database import Database
 from app.middleware.auth import get_current_user
 from app.engines.calendar_engine import create_calendar_engine, generation_bounds
 from app.engines.command_executor import create_command_executor
-from app.engines.calendar_authority import engine_cycle, projection_for_user, remember_cycle
+from app.engines.master_settings_service import MasterSettingsService
+from app.engines.calendar_authority import (
+    engine_cycle,
+    projection_for_user,
+    remember_cycle,
+    sync_cycle_row,
+)
 from app.onboarding import finish_onboarding_for_saved_cycle
 from loguru import logger
 
 
 router = APIRouter()
+
+
+def _settings_cycle_follows(current_cycle, cycle_id: str) -> bool:
+    """A row may update the document cycle when that cycle is empty or the same id."""
+    if not isinstance(current_cycle, dict) or not current_cycle.get("id"):
+        return True
+    return str(current_cycle.get("id")) == str(cycle_id)
+
+
+def _overlay_cycle_patch(current_cycle, update_data: dict, cycle_id: str) -> dict:
+    """Settings cycle plus only the fields this PATCH sent."""
+    merged = dict(current_cycle) if isinstance(current_cycle, dict) else {}
+    if "name" in update_data:
+        merged["name"] = update_data["name"]
+    if "pattern" in update_data:
+        merged["pattern"] = update_data["pattern"]
+    if "cycle_length" in update_data:
+        merged["total_days"] = update_data["cycle_length"]
+    if "anchor_date" in update_data:
+        merged["anchor_date"] = update_data["anchor_date"]
+    if "anchor_cycle_day" in update_data:
+        merged["anchor_cycle_day"] = update_data["anchor_cycle_day"]
+    if not merged.get("id"):
+        merged["id"] = cycle_id
+    return merged
 
 
 class CycleBlockSchema(BaseModel):
@@ -132,10 +163,10 @@ async def create_cycle(
     
     # Create the new cycle
     cycle = await db.create_cycle(cycle_data)
-    
-    # Master Settings is the source. This write is skipped when the document
-    # already tracks a different cycle, so a stale row cannot replace it.
-    await remember_cycle(db, user["id"], cycle)
+
+    # Creating a rotation is the user's choice of the active cycle, so the
+    # settings copy is replaced even when it still tracks another id.
+    await remember_cycle(db, user["id"], cycle, replace=True)
     projection = await projection_for_user(db, user["id"])
     source = projection.get("cycle") or cycle
     prepared = engine_cycle(source)
@@ -226,8 +257,20 @@ async def update_cycle(
     cycle = await db.update_cycle(cycle_id, update_data, user_id=user["id"])
     if not cycle:
         raise HTTPException(status_code=404, detail="Cycle not found")
-    
-    await remember_cycle(db, user["id"], cycle)
+
+    # Start from the settings copy and lay only the fields this request sent
+    # on top. Copying the table row would put a stale anchor back. A settings
+    # failure leaves the row update in place.
+    try:
+        service = MasterSettingsService(db)
+        current = await service.get(user["id"])
+        current_cycle = (current.get("settings") or {}).get("cycle") if isinstance(current, dict) else None
+        if _settings_cycle_follows(current_cycle, cycle_id):
+            merged = _overlay_cycle_patch(current_cycle, update_data, cycle_id)
+            await service.update_section(user["id"], "cycle", merged)
+            await sync_cycle_row(db, user["id"], merged)
+    except Exception as exc:
+        logger.warning(f"Could not mirror cycle {cycle_id} into settings for {user['id']}: {exc}")
     await finish_onboarding_for_saved_cycle(db, user["id"])
     
     # AUTO-REGENERATE CALENDAR if pattern/anchor changed.
