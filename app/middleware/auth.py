@@ -292,28 +292,42 @@ async def require_admin(
     return user
 
 
+def _as_utc(value) -> Optional[datetime]:
+    """Parse an ISO timestamp. Naive values are treated as UTC."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def is_in_trial(user: dict) -> bool:
-    """Check if user is within their 3-day trial period"""
+    """True while a free account created before the cutoff is inside 3 days.
+
+    TRIAL_ENABLED false means no new trial. An account created at or after
+    the cutoff never starts one, and one created before it keeps the rest
+    of its 3 days. TRIAL_END_ALL is the separate switch that ends every
+    trial already underway. It defaults to off.
+    """
     # Only free tier users can be in trial
     if user.get("tier") not in ["free", None]:
         return False
-
-    created_at = user.get("created_at")
-    if not created_at:
+    settings = get_settings()
+    if getattr(settings, "trial_end_all", False):
         return False
 
     try:
-        # Parse the created_at timestamp
-        if isinstance(created_at, str):
-            # Handle ISO format with timezone
-            created_at = created_at.replace('Z', '+00:00')
-            created_date = datetime.fromisoformat(created_at)
-        else:
-            created_date = created_at
-
-        # Ensure timezone awareness
-        if created_date.tzinfo is None:
-            created_date = created_date.replace(tzinfo=timezone.utc)
+        created_date = _as_utc(user.get("created_at"))
+        if created_date is None:
+            return False
+        if not settings.trial_enabled:
+            cutoff = _as_utc(settings.trial_signup_cutoff)
+            if cutoff is not None and created_date >= cutoff:
+                return False
 
         trial_end = created_date + timedelta(days=TRIAL_DURATION_DAYS)
         now = datetime.now(timezone.utc)
