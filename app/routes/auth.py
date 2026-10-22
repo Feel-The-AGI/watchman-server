@@ -83,12 +83,13 @@ async def complete_onboarding(user: dict = Depends(get_current_user)):
     logger.info(f"[AUTH_ROUTE] POST /complete-onboarding - user_id: {user.get('id')}")
     db = Database(use_admin=True)
 
+    # Copy rules the user already saved, including a retry after the flag is set.
+    # Do not insert a default set.
+    await mirror_onboarding_constraints(db, user["id"])
+
     if user.get("onboarding_completed"):
         logger.debug(f"[AUTH_ROUTE] Onboarding already completed for user {user.get('id')}")
         return {"message": "Onboarding already completed"}
-
-    # Copy rules the user already saved. Do not insert a default set.
-    await mirror_onboarding_constraints(db, user["id"])
 
     await db.complete_onboarding(user["id"])
     logger.info(f"[AUTH_ROUTE] Onboarding completed for user {user.get('id')}")
