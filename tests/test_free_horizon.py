@@ -502,8 +502,12 @@ def _chat(monkeypatch, tool, version=""):
 async def test_free_chat_past_the_horizon_proposes_nothing(monkeypatch, version, prompt_id):
     _pin(monkeypatch)
     service = _chat(monkeypatch, {
-        "name": "add_leave",
-        "input": {"name": "Holiday", "start_date": NEXT.isoformat(), "end_date": NEXT.isoformat()},
+        "name": "override_days",
+        "input": {
+            "start_date": NEXT.isoformat(),
+            "end_date": NEXT.isoformat(),
+            "work_type": "off",
+        },
     }, version)
     result = await service.send_message("Add that leave", auto_execute=False, effective_tier="free")
     assert result["response"] == MESSAGE
@@ -590,8 +594,12 @@ async def test_execute_and_proposal_refuse_a_free_date_past_the_horizon(monkeypa
     assert outcome["horizon_end"] == HORIZON.isoformat()
     with pytest.raises(ValueError, match="3 months"):
         await executor.create_proposal({
-            "action": "add_leave",
-            "payload": {"name": "Holiday", "start_date": NEXT.isoformat(), "end_date": NEXT.isoformat()},
+            "action": "override_days",
+            "payload": {
+                "start_date": NEXT.isoformat(),
+                "end_date": NEXT.isoformat(),
+                "work_type": "off",
+            },
         })
 
 
@@ -604,8 +612,12 @@ async def test_approving_a_past_horizon_proposal_returns_403(monkeypatch):
         "user_id": "user-1",
         "status": "pending",
         "command": {
-            "action": "add_leave",
-            "payload": {"name": "Holiday", "start_date": NEXT.isoformat(), "end_date": NEXT.isoformat()},
+            "action": "override_days",
+            "payload": {
+                "start_date": NEXT.isoformat(),
+                "end_date": NEXT.isoformat(),
+                "work_type": "off",
+            },
         },
         "message_id": None,
         "expires_at": None,
