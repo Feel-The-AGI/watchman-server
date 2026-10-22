@@ -1,5 +1,6 @@
 """DELETE /api/commitments/{id} drops the settings copy and rebuilds."""
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -277,9 +278,40 @@ async def test_every_commitment_route_uses_the_admin_client_and_ownership(monkey
     flags = []
     calls = []
 
+    class AdminQuery:
+        def __init__(self, database):
+            self.database = database
+            self.op = "select"
+            self.payload = None
+
+        def select(self, *args, **kwargs):
+            return self
+
+        def eq(self, *args, **kwargs):
+            return self
+
+        def update(self, data):
+            self.op = "update"
+            self.payload = data
+            return self
+
+        def execute(self):
+            row = self.database.settings_row
+            if self.op == "update":
+                row.update(self.payload)
+            return SimpleNamespace(data=[row])
+
     class AdminDB:
         def __init__(self, use_admin=False):
             flags.append(use_admin)
+            self.settings_row = {
+                "id": "settings-1",
+                "user_id": "user-1",
+                "version": 1,
+                "updated_at": "2026-10-21T00:00:00+00:00",
+                "settings": {"commitments": [], "leave_blocks": [], "constraints": []},
+            }
+            self.client = SimpleNamespace(table=lambda name: AdminQuery(self))
 
         async def get_commitments(self, user_id):
             calls.append(("list", user_id))
@@ -307,6 +339,18 @@ async def test_every_commitment_route_uses_the_admin_client_and_ownership(monkey
         async def create_commitment(self, data):
             calls.append(("create", data["user_id"]))
             return dict(data)
+
+        async def read_commitments(self, user_id):
+            return []
+
+        async def read_leave_blocks(self, user_id):
+            return []
+
+        async def read_calendar_days(self, user_id, start, end):
+            return []
+
+        async def upsert_calendar_days(self, days):
+            return days or [{"date": "saved"}]
 
         async def update_commitment(self, commitment_id, data):
             raise AssertionError("must not update another user's commitment")

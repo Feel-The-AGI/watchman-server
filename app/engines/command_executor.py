@@ -34,6 +34,11 @@ from app.engines.proposal_effects import (
 
 
 # Command action types
+# A failed commitment delete records ids here until a calendar read finishes the rebuild.
+PENDING_COMMITMENT_REMOVAL = "commitments_pending_removal"
+PENDING_COMMITMENT_ADD = "commitments_pending_add"
+
+
 VALID_ACTIONS = {
     "update_cycle",
     "add_commitment",
@@ -949,30 +954,62 @@ class CommandExecutor:
         
         raise Exception("Failed to log command")
     
+    async def finish_pending_removals(self) -> bool:
+        """Rebuild for commitment ids a failed delete or create left behind.
+
+        Opening the year finishes that calendar write, then clears the ids.
+        A failed rebuild leaves them in place.
+        """
+        current = await self.settings_service.get(self.user_id)
+        settings = current.get("settings") if isinstance(current.get("settings"), dict) else {}
+        pending_removal = _pending_ids(settings.get(PENDING_COMMITMENT_REMOVAL))
+        pending_add = _pending_ids(settings.get(PENDING_COMMITMENT_ADD))
+        if not pending_removal and not pending_add:
+            return False
+        wrote = await self._regenerate_calendar()
+        if not wrote:
+            await self._project_saved_events()
+        fresh = await self.settings_service.get(self.user_id)
+        updated = dict(fresh.get("settings") or {})
+        updated[PENDING_COMMITMENT_REMOVAL] = _without_ids(
+            updated.get(PENDING_COMMITMENT_REMOVAL), pending_removal
+        )
+        updated[PENDING_COMMITMENT_ADD] = _without_ids(
+            updated.get(PENDING_COMMITMENT_ADD), pending_add
+        )
+        await self.settings_service.update(self.user_id, updated, fresh["version"])
+        return True
+
     async def _project_saved_events(self) -> None:
-        """Paint commitment and leave rows onto existing days when no cycle can rebuild them."""
-        commitments = await self.db.get_commitments(self.user_id) or []
-        leaves = await self.db.get_leave_blocks(self.user_id) or []
-        dates = event_dates(commitments, leaves)
+        """Paint saved rows onto existing days when no cycle can rebuild them.
+
+        Commitment and leave reads raise on failure, so a missed read does not
+        look like an empty list and wipe the calendar. A chip whose commitment
+        is gone is dropped.
+        """
+        table_rows = await self.db.read_commitments(self.user_id)
+        leaves = await self.db.read_leave_blocks(self.user_id)
+        snapshot = await self.settings_service.get_snapshot(self.user_id)
+        commitments = _commitments_to_stamp(snapshot.get("commitments") or [], table_rows)
+        dates = set(event_dates(commitments, leaves))
+        by_date, chip_days = await self._days_with_commitment_chips(dates)
+        dates.update(chip_days)
         if not dates:
             return
-        start = min(dates).isoformat()
-        end = max(dates).isoformat()
-        existing = await self.db.get_calendar_days(self.user_id, start, end) or []
-        by_date = {_day_key(day.get("date")): day for day in existing}
         updates = []
-        for day in dates:
+        for day in sorted(dates):
             key = day.isoformat()
             current = by_date.get(key) or {}
-            base = current.get("state_json") or {
-                "commitments": [],
-                "available_hours": 12.0,
-                "used_hours": 0,
-                "is_overloaded": False,
-                "is_leave": False,
-                "tags": [],
-                "engine_version": CALENDAR_ENGINE_VERSION,
-            }
+            base = _without_removed_commitments(current.get("state_json"), commitments)
+            if not current.get("state_json"):
+                base.update({
+                    "available_hours": 12.0,
+                    "used_hours": 0,
+                    "is_overloaded": False,
+                    "is_leave": False,
+                    "tags": [],
+                    "engine_version": CALENDAR_ENGINE_VERSION,
+                })
             updates.append({
                 "user_id": self.user_id,
                 "date": key,
@@ -984,6 +1021,29 @@ class CommandExecutor:
         saved = await self.db.upsert_calendar_days(updates)
         if not saved:
             raise RuntimeError("Calendar was not updated")
+
+    async def _days_with_commitment_chips(self, event_days: set):
+        """Stored days that already show a commitment, so a deleted one can be cleared."""
+        today = date.today()
+        years = set(range((today - timedelta(days=400)).year, (today + timedelta(days=800)).year + 1))
+        for day in event_days:
+            years.add(day.year)
+        by_date = {}
+        found = set()
+        for year in sorted(years):
+            rows = await self.db.read_calendar_days(
+                self.user_id, date(year, 1, 1).isoformat(), date(year, 12, 31).isoformat()
+            )
+            for row in rows or []:
+                key = _day_key(row.get("date"))
+                by_date[key] = row
+                state = row.get("state_json") or {}
+                if not state.get("commitments"):
+                    continue
+                parsed = _parse_day(key)
+                if parsed is not None:
+                    found.add(parsed)
+        return by_date, found
 
     async def _regenerate_calendar(self) -> bool:
         """Rebuild from 1 Jan of the anchor year through the next year."""
@@ -1167,6 +1227,42 @@ class CommandExecutor:
         return rows
 
 
+def _pending_ids(items) -> list:
+    return [str(item) for item in (items or []) if str(item).strip()]
+
+
+def _without_ids(items, finished: list) -> list:
+    done = set(finished)
+    return [item for item in (items or []) if str(item) not in done]
+
+
+def _without_removed_commitments(state, commitments: list) -> dict:
+    base = dict(state or {})
+    current_ids = {
+        item.get("id") for item in commitments or []
+        if isinstance(item, dict) and item.get("id")
+    }
+    kept = []
+    for chip in base.get("commitments") or []:
+        if not isinstance(chip, dict):
+            continue
+        chip_id = chip.get("commitment_id")
+        if chip_id and chip_id not in current_ids:
+            continue
+        kept.append(chip)
+    base["commitments"] = kept
+    return base
+
+
+def _parse_day(value: str):
+    if len(value or "") < 10:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
 def _day_key(value) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()[:10]
@@ -1192,23 +1288,51 @@ def _commitments_to_stamp(document_rows: list, table_rows: list) -> list:
     return merged
 
 
+def _dated_record(row: dict) -> dict:
+    start = _day_key(row.get("start_date") or row.get("date"))
+    end = _day_key(row.get("end_date")) or start
+    if start:
+        return {**row, "start_date": start, "end_date": end}
+    return dict(row)
+
+
 def _merge_records(document_rows: list, table_rows: list) -> list:
-    """Document rows first, then table rows that are not the same id or span."""
-    merged = []
-    seen = set()
-    for row in list(document_rows or []) + list(table_rows or []):
-        if not isinstance(row, dict):
-            continue
+    """One row per id. The table copy replaces the document copy.
+
+    A date edit used to leave both spans, because the old key included the
+    dates and the name. Rows with no id are still deduped by span and name.
+    """
+    by_id = {}
+    order = []
+    anonymous = []
+    seen_anonymous = set()
+
+    def take_identified(row: dict, overwrite: bool) -> bool:
+        row_id = str(row.get("id") or "")
+        if not row_id:
+            return False
+        if row_id not in by_id:
+            order.append(row_id)
+        if row_id not in by_id or overwrite:
+            by_id[row_id] = _dated_record(row)
+        return True
+
+    def take_anonymous(row: dict) -> None:
         start = _day_key(row.get("start_date") or row.get("date"))
         end = _day_key(row.get("end_date")) or start
-        key = (str(row.get("id") or ""), start, end, str(row.get("name") or ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        if start:
-            row = {**row, "start_date": start, "end_date": end}
-        merged.append(row)
-    return merged
+        key = (start, end, str(row.get("name") or ""))
+        if key in seen_anonymous:
+            return
+        seen_anonymous.add(key)
+        anonymous.append(_dated_record(row))
+
+    for row in document_rows or []:
+        if isinstance(row, dict) and not take_identified(row, overwrite=False):
+            take_anonymous(row)
+    for row in table_rows or []:
+        if isinstance(row, dict) and not take_identified(row, overwrite=True):
+            take_anonymous(row)
+    return [by_id[row_id] for row_id in order] + anonymous
 
 
 def _merge_leave_blocks(document_leaves: list, table_leaves: list) -> list:
