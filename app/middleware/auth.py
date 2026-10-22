@@ -308,23 +308,26 @@ def _as_utc(value) -> Optional[datetime]:
 def is_in_trial(user: dict) -> bool:
     """True while a free account created before the cutoff is inside 3 days.
 
-    Accounts created at or after the cutoff are never in trial, so an
-    existing trial can finish and a new signup does not start one.
-    The switch being off ends every trial, including one already underway.
+    TRIAL_ENABLED false means no new trial. An account created at or after
+    the cutoff never starts one, and one created before it keeps the rest
+    of its 3 days. TRIAL_END_ALL is the separate switch that ends every
+    trial already underway. It defaults to off.
     """
     # Only free tier users can be in trial
     if user.get("tier") not in ["free", None]:
         return False
-    if not get_settings().trial_enabled:
+    settings = get_settings()
+    if getattr(settings, "trial_end_all", False):
         return False
 
     try:
         created_date = _as_utc(user.get("created_at"))
         if created_date is None:
             return False
-        cutoff = _as_utc(get_settings().trial_signup_cutoff)
-        if cutoff is not None and created_date >= cutoff:
-            return False
+        if not settings.trial_enabled:
+            cutoff = _as_utc(settings.trial_signup_cutoff)
+            if cutoff is not None and created_date >= cutoff:
+                return False
 
         trial_end = created_date + timedelta(days=TRIAL_DURATION_DAYS)
         now = datetime.now(timezone.utc)
