@@ -62,8 +62,9 @@ def test_each_plan_has_a_fixed_ghs_amount_and_day_count():
 
 
 def test_pricing_offers_monthly_and_yearly_only():
-    body = payments._pricing_body()
+    body = payments._pricing_body(claimed=100)
     assert body["founding_available"] is False
+    assert body["seats_left"] == 0
     assert [plan["id"] for plan in body["plans"]] == ["monthly", "yearly"]
     assert body["plans"][0]["amount_ghs"] == 70
     assert body["plans"][0]["display_usd"] == 6
@@ -103,8 +104,9 @@ async def test_checkout_charges_the_plan_and_ignores_a_client_amount(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_founding_checkout_is_refused_while_it_is_not_offered(monkeypatch):
-    _checkout_ready(monkeypatch)
+async def test_founding_checkout_is_refused_when_the_cap_is_full(monkeypatch):
+    db = _checkout_ready(monkeypatch)
+    db.founding_claimed = 100
     with pytest.raises(HTTPException) as exc:
         await payments.create_checkout_session(
             {"id": "alice", "email": "alice@example.com"},

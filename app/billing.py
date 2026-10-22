@@ -80,6 +80,45 @@ def founding_available() -> bool:
     return PLANS["founding_yearly"].offered
 
 
+FOUNDING_CAP = 100
+
+
+def is_founding_payment(payment: dict) -> bool:
+    if not isinstance(payment, dict):
+        return False
+    if payment.get("plan") == "founding_yearly":
+        return True
+    return "plan=founding_yearly" in str(payment.get("description") or "")
+
+
+def seats_remaining(claimed: Optional[int]) -> int:
+    """Seats still offered. An unknown count offers none, so a missing table cannot oversell."""
+    if claimed is None:
+        return 0
+    return max(0, FOUNDING_CAP - int(claimed))
+
+
+def founding_open(claimed: Optional[int]) -> bool:
+    return claimed is not None and int(claimed) < FOUNDING_CAP
+
+
+def resolve_checkout_plan(
+    plan_id: Optional[str],
+    *,
+    founding_member: bool,
+    claimed: Optional[int],
+) -> Plan:
+    """Price a checkout. Flagged users keep GHS 420 on later yearly purchases."""
+    key = (plan_id or DEFAULT_PLAN_ID).strip().lower() or DEFAULT_PLAN_ID
+    if founding_member and key in {"yearly", "founding_yearly"}:
+        return PLANS["founding_yearly"]
+    if key == "founding_yearly":
+        if not founding_open(claimed):
+            raise PlanNotOffered(key)
+        return PLANS["founding_yearly"]
+    return checkout_plan(key)
+
+
 def to_pesewas(amount) -> int:
     """Paystack's integer minor units for a GHS amount."""
     return int(

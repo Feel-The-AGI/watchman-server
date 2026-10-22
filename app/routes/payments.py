@@ -24,17 +24,18 @@ from app.billing import (
     access_expired,
     charge_matches,
     checkout_description,
-    checkout_plan,
     extend_expiry,
-    founding_available,
+    is_founding_payment,
     offered_plans,
     parse_timestamp,
     period_days_for_payment,
+    resolve_checkout_plan,
+    seats_remaining,
     to_pesewas,
 )
 from app.config import get_settings
 from app.database import Database
-from app.middleware.auth import get_current_user, get_effective_tier
+from app.middleware.auth import get_current_user, get_effective_tier, get_optional_user
 from app.services.email_service import get_email_service, ADMIN_EMAIL
 
 
@@ -134,13 +135,32 @@ class CheckoutRequest(BaseModel):
         return str(chosen)
 
 
-def _pricing_body() -> dict:
-    """Offered plans, plus the monthly fields the current pricing page reads."""
+def _pricing_body(*, claimed: Optional[int], founding_member: bool = False) -> dict:
+    """Offered plans, plus the monthly fields the current pricing page reads.
+
+    A founding member keeps the GHS 420 yearly price after the 100 seats are gone.
+    """
     monthly = PLANS["monthly"]
+    yearly = PLANS["yearly"]
+    founding = PLANS["founding_yearly"]
+    open_seats = seats_remaining(claimed)
+    available = open_seats > 0
+    plans = [plan.as_public() for plan in offered_plans()]
+    yearly_amount = float(founding.amount_ghs if founding_member else yearly.amount_ghs)
+    if founding_member:
+        locked = yearly.as_public()
+        locked["amount_ghs"] = yearly_amount
+        locked["display_usd"] = float(founding.display_usd)
+        plans = [monthly.as_public(), locked, founding.as_public()]
+    elif available:
+        plans.append(founding.as_public())
     return {
         "currency": "GHS",
-        "founding_available": founding_available(),
-        "plans": [plan.as_public() for plan in offered_plans()],
+        "founding_available": available,
+        "seats_left": open_seats,
+        "founding_member": founding_member,
+        "yearly_amount_ghs": yearly_amount,
+        "plans": plans,
         "usd_price": float(monthly.display_usd),
         "ghs_amount": float(monthly.amount_ghs),
         "display_price": f"${int(monthly.display_usd)}",
@@ -172,8 +192,13 @@ async def create_checkout_session(
         raise HTTPException(status_code=400, detail="User email required for payment")
 
     try:
+        db = Database(use_admin=True)
         try:
-            plan = checkout_plan(body.requested_plan() if body else None)
+            plan = resolve_checkout_plan(
+                body.requested_plan() if body else None,
+                founding_member=bool(user.get("founding_member")),
+                claimed=await db.count_founding_claims(),
+            )
         except UnknownPlan as exc:
             raise HTTPException(status_code=400, detail=f"Unknown plan: {exc.plan_id}")
         except PlanNotOffered as exc:
@@ -234,7 +259,6 @@ async def create_checkout_session(
         if not authorization_url or not reference:
             raise HTTPException(status_code=502, detail="Payment provider did not return a checkout")
 
-        db = Database(use_admin=True)
         recorded = await db.create_payment_record({
             "user_id": user_id,
             "paystack_reference": reference,
@@ -274,12 +298,17 @@ async def create_checkout_session(
 
 
 @router.get("/pricing")
-async def get_pricing():
+async def get_pricing(user: Optional[dict] = Depends(get_optional_user)):
     """
     Public plan list for the pricing page.
-    Amounts are fixed GHS. founding_yearly is listed only when it is offered.
+    Founding is included only while seats remain, or for a user who already has it.
     """
-    return _pricing_body()
+    db = Database(use_admin=True)
+    claimed = await db.count_founding_claims()
+    return _pricing_body(
+        claimed=claimed,
+        founding_member=bool(user and user.get("founding_member")),
+    )
 
 
 async def _save_subscription_period(db: Database, user_id: str, until: datetime, *, cancelled: bool = False) -> None:
@@ -373,6 +402,9 @@ async def apply_successful_charge(db: Database, reference: str, verified: dict) 
         return {"status": "ignored"}
     if payment.get("status") == "paid":
         await _ensure_access(db, payment)
+        paid_user = await db.get_user_by_id(payment["user_id"])
+        if paid_user:
+            await _remember_founding(db, payment, paid_user)
         return {"status": "success", "access_until": payment.get("access_until")}
     if payment.get("status") != "pending":
         logger.info(f"[PAYMENTS] Charge {reference} is {payment.get('status')}; not granting access")
@@ -403,11 +435,15 @@ async def apply_successful_charge(db: Database, reference: str, verified: dict) 
         current = await db.get_payment_by_reference(reference)
         if current and current.get("status") == "paid":
             await _ensure_access(db, current)
+            paid_user = await db.get_user_by_id(current["user_id"])
+            if paid_user:
+                await _remember_founding(db, current, paid_user)
             return {"status": "success", "access_until": current.get("access_until")}
         if current and current.get("status") == "pending":
             raise HTTPException(status_code=500, detail="Could not record payment")
         return {"status": "ignored"}
 
+    await _remember_founding(db, claimed, user)
     customer = verified.get("customer") or {}
     was_active = user.get("tier") == "pro" and not access_expired(user, now)
     await _grant_access(
@@ -421,6 +457,39 @@ async def apply_successful_charge(db: Database, reference: str, verified: dict) 
     )
     logger.info(f"[PAYMENTS] User {user['id']} Pro access until {until.isoformat()}")
     return {"status": "success", "access_until": until.isoformat()}
+
+
+async def _remember_founding(db: Database, payment: dict, user: dict) -> None:
+    """Record a founding seat and the user's locked price.
+
+    A full cap or a missing table is logged. The paid period is still granted.
+    """
+    if not is_founding_payment(payment):
+        return
+    reference = str(payment.get("paystack_reference") or "")
+    try:
+        outcome = await db.claim_founding_seat(user["id"], reference)
+    except Exception as exc:
+        logger.error(
+            f"[PAYMENTS] Founding seat was not recorded for user {user['id']} "
+            f"reference {reference}: {exc}. Pro access is still granted."
+        )
+        outcome = "unavailable"
+    if outcome == "over_cap":
+        logger.error(
+            f"[PAYMENTS] Founding cap exceeded after payment {reference} for user {user['id']}. "
+            "Pro access is still granted."
+        )
+    if user.get("founding_member"):
+        return
+    saved = await db.update_user(user["id"], {"founding_member": True})
+    if not saved:
+        logger.error(
+            f"[PAYMENTS] Could not store founding_member for user {user['id']} "
+            f"after payment {reference}. Pro access is still granted."
+        )
+        return
+    user["founding_member"] = True
 
 
 async def _find_paystack_user(db: Database, data: dict) -> dict:
