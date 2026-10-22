@@ -70,6 +70,7 @@ _ON_WEEK = re.compile(rf"\b(?:on\s+)?({_WEEKDAY})\b", re.IGNORECASE)
 _RELATIVE = re.compile(r"\byesterday\b|\btoday\b|\btomorrow\b", re.IGNORECASE)
 _BARE_DAY = re.compile(rf"\b(?:the\s+)?(\d{{1,2}})(st|nd|rd|th)\b", re.IGNORECASE)
 _CONNECTOR = re.compile(r"\b(?:to|through|thru|and)\b|[-–—]", re.IGNORECASE)
+_DANGLING_NUMBER = re.compile(r"^\s*(?:and|to)\s+(\d{1,2})\b", re.IGNORECASE)
 
 
 class BadDate(Exception):
@@ -222,12 +223,17 @@ def _collect(text: str, today: date, direction: str) -> list:
     for match in _ON_WEEK.finditer(text):
         if _overlaps(match.span(), taken):
             continue
-        keep(match, _upcoming_weekday(_weekday_index(match.group(1)), today))
+        index = _weekday_index(match.group(1))
+        if direction == "past":
+            keep(match, _past_weekday(index, today))
+        else:
+            keep(match, _upcoming_weekday(index, today))
     for match in _BARE_DAY.finditer(text):
         if _overlaps(match.span(), taken):
             continue
-        built = _resolve(today.month, int(match.group(1)), None, today, direction, match.group(0))
+        built = _bare_day(int(match.group(1)), today, direction, match.group(0))
         keep(match, built)
+    _dangling_bare_number(text, found)
     found.sort(key=lambda item: item[0])
     return found
 
@@ -321,6 +327,58 @@ def _previous_weekday(index: int, today: date) -> date:
 def _upcoming_weekday(index: int, today: date) -> date:
     delta = (index - today.weekday()) % 7
     return today + timedelta(days=delta)
+
+
+def _past_weekday(index: int, today: date) -> date:
+    """Most recent weekday on or before today. Thursday 22 Oct, Monday → 19 Oct."""
+    delta = (today.weekday() - index) % 7
+    return today - timedelta(days=delta)
+
+
+def _bare_day(day_number: int, today: date, direction: str, label: str) -> date:
+    """A bare '25th' stays in this month or the next one over. Not last year."""
+    if direction == "past":
+        if day_number <= today.day:
+            return _exact(today.year, today.month, day_number, label)
+        return _shift_month(today, -1, day_number, label)
+    if direction == "future":
+        if day_number >= today.day:
+            return _exact(today.year, today.month, day_number, label)
+        return _shift_month(today, 1, day_number, label)
+    candidates = []
+    for delta in (0, -1, 1):
+        try:
+            candidates.append(_shift_month(today, delta, day_number, label))
+        except BadDate:
+            continue
+    if not candidates:
+        raise BadDate(label)
+    return min(candidates, key=lambda item: (abs((item - today).days), item.toordinal()))
+
+
+def _shift_month(today: date, delta: int, day_number: int, label: str) -> date:
+    month = today.month + delta
+    year = today.year
+    while month < 1:
+        month += 12
+        year -= 1
+    while month > 12:
+        month -= 12
+        year += 1
+    return _exact(year, month, day_number, label)
+
+
+def _dangling_bare_number(text: str, found: list) -> None:
+    """'Oct 20 and 21' names a second day the parser did not understand."""
+    for start, end, *_rest in found:
+        match = _DANGLING_NUMBER.match(text[end:])
+        if not match:
+            continue
+        number_start = end + match.start(1)
+        number_end = end + match.end(1)
+        covered = any(left <= number_start and number_end <= right for left, right, *_ in found)
+        if not covered:
+            raise AmbiguousDate("Which days did you mean?")
 
 
 def _weekday_index(name: str) -> int:
