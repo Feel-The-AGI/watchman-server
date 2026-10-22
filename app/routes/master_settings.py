@@ -21,6 +21,22 @@ from app.routes.cycles import rebuild_for_user
 router = APIRouter(prefix="/master-settings", tags=["master-settings"])
 
 
+ANCHOR_REQUIRED = "Your rotation needs a start date before it can be saved."
+
+
+def _has_anchor(cycle: dict) -> bool:
+    anchor = cycle.get("anchor")
+    if isinstance(anchor, dict) and anchor.get("date") not in (None, ""):
+        return True
+    return cycle.get("anchor_date") not in (None, "")
+
+
+def _require_anchor(cycle) -> None:
+    """A saved rotation object needs a start date. null means no rotation yet."""
+    if isinstance(cycle, dict) and not _has_anchor(cycle):
+        raise HTTPException(status_code=422, detail=ANCHOR_REQUIRED)
+
+
 def _saved_cycle(result, fallback) -> Optional[dict]:
     """The cycle stored by a successful settings write."""
     settings = result.get("settings") if isinstance(result, dict) else None
@@ -100,6 +116,7 @@ async def update_master_settings(
     
     Use expected_version for optimistic locking to prevent conflicts.
     """
+    _require_anchor((request.settings or {}).get("cycle"))
     db = Database(use_admin=True)
     service = create_master_settings_service(db)
     old_cycle = await _stored_cycle(service, user["id"])
@@ -140,6 +157,8 @@ async def update_section(
             detail=f"Invalid section. Valid sections: {', '.join(valid_sections)}"
         )
     
+    if section == "cycle":
+        _require_anchor(request.value)
     db = Database(use_admin=True)
     service = create_master_settings_service(db)
     old_cycle = await _stored_cycle(service, user["id"]) if section == "cycle" else None
