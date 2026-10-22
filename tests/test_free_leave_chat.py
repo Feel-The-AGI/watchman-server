@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from loguru import logger
 
@@ -325,3 +325,38 @@ def test_review_refuses_a_third_commitment_for_free_and_lapsed_pro(monkeypatch, 
     assert rows[0]["status"] == "pending"
     assert rows[0]["reviewed_at"] is None
     db.create_commitment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lapsed_pro_form_is_capped_at_two_commitments(monkeypatch):
+    from app.routes.commitments import CreateCommitmentRequest, create_commitment
+
+    class Store:
+        def __init__(self, use_admin=False):
+            self.created = False
+
+        async def read_commitments(self, user_id):
+            return [
+                {"id": "one", "user_id": user_id, "name": "Gym", "type": "personal"},
+                {"id": "two", "user_id": user_id, "name": "Course", "type": "education"},
+            ]
+
+        async def create_commitment(self, data):
+            self.created = True
+            return data
+
+    store = Store()
+    monkeypatch.setattr("app.routes.commitments.Database", lambda use_admin=False: store)
+    with pytest.raises(HTTPException) as exc:
+        await create_commitment(
+            CreateCommitmentRequest(name="Dentist", type="personal"),
+            {
+                "id": "alice",
+                "tier": "pro",
+                "pro_expires_at": _past(),
+                "settings": {},
+            },
+        )
+    assert exc.value.status_code == 403
+    assert "2 commitment" in exc.value.detail
+    assert store.created is False
