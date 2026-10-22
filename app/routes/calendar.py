@@ -9,6 +9,7 @@ from typing import Optional
 from datetime import date
 
 from app.database import Database
+from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 from app.middleware.auth import get_current_user, get_effective_tier
 from app.engines.calendar_authority import projection_for_user
 from app.engines.calendar_engine import (
@@ -51,6 +52,7 @@ class LeaveBlockRequest(BaseModel):
     start_date: date
     end_date: date
     notes: Optional[str] = None
+    type: Optional[str] = None
 
 
 @router.get("")
@@ -311,17 +313,10 @@ async def add_leave_block(
     data: LeaveBlockRequest,
     user: dict = Depends(get_current_user)
 ):
-    """
-    Add a leave block.
-    PRO FEATURE: Leave planning is only available for Pro or trial users.
-    """
-    # Check tier - leave planning is Pro only (trial users get access)
-    effective_tier = get_effective_tier(user)
-    if effective_tier not in ["pro", "admin", "trial"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Leave planning is a Pro feature. Upgrade to Pro to block out vacation days, sick leave, and plan time off on your calendar!"
-        )
+    """Add a leave block. Sick days are logging. Other leave is Pro, trial, or admin."""
+    kind = str(data.type or "").strip()
+    if leave_blocked(get_effective_tier(user), "add_leave", {"type": kind}):
+        raise HTTPException(status_code=403, detail=LEAVE_PRO_REPLY)
 
     db = Database(use_admin=True)
 
@@ -330,16 +325,19 @@ async def add_leave_block(
             status_code=400,
             detail="End date must be after start date"
         )
-    
+
+    effects = {
+        "work": "suspended",
+        "available_time": "increased",
+    }
+    if kind:
+        effects["type"] = kind
     leave_data = {
         "user_id": user["id"],
         "name": data.name,
         "start_date": data.start_date.isoformat(),
         "end_date": data.end_date.isoformat(),
-        "effects": {
-            "work": "suspended",
-            "available_time": "increased"
-        },
+        "effects": effects,
         "notes": data.notes
     }
     
