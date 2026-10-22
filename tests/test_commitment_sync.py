@@ -222,9 +222,30 @@ async def test_a_new_create_does_not_change_a_paused_row(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_failed_settings_write_returns_500_and_the_same_key_finishes(monkeypatch):
+async def test_a_failed_settings_write_with_a_successful_rebuild_is_not_a_500(monkeypatch):
+    """The calendar already shows the row. A 500 would make a keyless retry insert another."""
     store = _Store()
     store.fail_updates = 1
+    _install(monkeypatch, store)
+    body = CreateCommitmentRequest(
+        name="Gym", type="personal", start_date="2026-10-27", end_date="2026-10-27",
+    )
+
+    created = await create_commitment(body, USER)
+
+    assert created["success"] is True
+    assert created["calendar_pending"] is False
+    assert len(store.commitments) == 1
+    assert store.settings_row["settings"]["commitments"] == []
+    assert store.settings_row["settings"].get("commitments_pending_add") in (None, [])
+    assert _names((await get_day("2026-10-27", USER))["data"]) == ["Gym"]
+
+
+@pytest.mark.asyncio
+async def test_a_create_returns_500_only_when_settings_and_rebuild_both_fail(monkeypatch):
+    store = _Store()
+    store.fail_updates = 1
+    store.fail_rebuild = True
     _install(monkeypatch, store)
     body = CreateCommitmentRequest(
         name="Gym", type="personal", start_date="2026-10-27", end_date="2026-10-27",
@@ -236,15 +257,14 @@ async def test_a_failed_settings_write_returns_500_and_the_same_key_finishes(mon
     assert failed.value.status_code == 500
     assert len(store.commitments) == 1
     assert store.settings_row["settings"]["commitments"] == []
-    assert store.settings_row["settings"].get("commitments_pending_add") in (None, [])
+    assert _names((await get_day("2026-10-27", USER))["data"]) == []
 
+    store.fail_rebuild = False
     finished = await create_commitment(body, USER, idempotency_key="abc")
     assert finished["calendar_pending"] is False
-    assert finished["data"]["name"] == "Gym"
     assert finished["data"]["id"] == store.commitments[0]["id"]
     assert len(store.commitments) == 1
     assert _names((await get_day("2026-10-27", USER))["data"]) == ["Gym"]
-    assert store.settings_row["settings"].get("commitments_pending_add") == []
 
 
 @pytest.mark.asyncio
