@@ -8,6 +8,11 @@ from datetime import datetime, date, timedelta, timezone
 from uuid import uuid4
 from loguru import logger
 
+from app.commitment_limit import (
+    COMMITMENT_LIMIT_REPLY,
+    free_commitment_limit_hit,
+    reused_commitment,
+)
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_engine import (
@@ -24,6 +29,7 @@ from app.engines.calendar_authority import (
     night_shift_dates,
     sync_cycle_row,
 )
+from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 from app.onboarding import finish_onboarding_for_saved_cycle
 from app.prompts.registry import insert_row
 from app.engines.proposal_effects import (
@@ -194,6 +200,14 @@ class CommandExecutor:
         """
         # The stored card text is the payload summary, not the model's sentence.
         command = card_command(command)
+        action = command.get("action")
+        payload = command.get("payload") or {}
+        if leave_blocked(getattr(self, "effective_tier", None) or "", action, payload):
+            raise ValueError(LEAVE_PRO_REPLY)
+        if action == "add_commitment":
+            limit_reply = await self.commitment_limit_message(payload)
+            if limit_reply:
+                raise ValueError(limit_reply)
         # Validate first
         validation = await self.validate_command(command)
         if prompt_version:
@@ -253,7 +267,13 @@ class CommandExecutor:
         
         if action not in VALID_ACTIONS:
             raise ValueError(f"Unknown action: {action}")
-        
+        if leave_blocked(getattr(self, "effective_tier", None) or "", action, payload):
+            return {"success": False, "error": LEAVE_PRO_REPLY, "code": "leave_pro"}
+        if action == "add_commitment":
+            limit_reply = await self.commitment_limit_message(payload)
+            if limit_reply:
+                return {"success": False, "error": limit_reply, "code": "commitment_limit"}
+
         # Validate unless skipping
         if not skip_validation and action not in ["undo", "redo"]:
             validation = await self.validate_command(command)
@@ -456,6 +476,8 @@ class CommandExecutor:
             payload.get("id") or str(uuid4()),
             proposal_id=getattr(self, "_proposal_id", None),
         )
+        if await self.commitment_limit_message(payload):
+            raise ValueError(COMMITMENT_LIMIT_REPLY)
         saved = await self._matching_commitment(record)
         inserted_id = None
         if saved is None:
@@ -466,6 +488,42 @@ class CommandExecutor:
             raise RuntimeError(f"Commitment {record['name']!r} was not saved")
         await self.settings_service.add_to_list(self.user_id, "commitments", saved)
         return {"commitment": saved, "inserted_commitment_id": inserted_id}
+
+    async def _account_tier(self) -> Optional[str]:
+        """Tier for the commitment cap.
+
+        Chat and proposal review set effective_tier, so a lapsed Pro account
+        is capped there. A caller that did not set it uses the stored tier.
+        """
+        explicit = getattr(self, "effective_tier", None)
+        if isinstance(explicit, str) and explicit:
+            return explicit
+        getter = getattr(self.db, "get_user_by_id", None)
+        if getter is not None:
+            try:
+                user = await getter(self.user_id)
+            except Exception as exc:
+                logger.warning(f"Could not read tier for commitment limit {self.user_id}: {exc}")
+                user = None
+            if isinstance(user, dict):
+                return user.get("tier") or "free"
+        return None
+
+    async def commitment_limit_message(self, payload: dict) -> Optional[str]:
+        """Plain reply when a free account would store a third commitment."""
+        tier = await self._account_tier()
+        if tier != "free":
+            return None
+        reader = getattr(self.db, "read_commitments", None) or getattr(self.db, "get_commitments", None)
+        if reader is None:
+            return None
+        rows = await reader(self.user_id) or []
+        if not isinstance(rows, list):
+            return None
+        reused = reused_commitment(rows, self.user_id, payload or {})
+        if free_commitment_limit_hit(tier, rows, reused):
+            return COMMITMENT_LIMIT_REPLY
+        return None
 
     async def _matching_commitment(self, record: Dict[str, Any]) -> Optional[dict]:
         rows = await self.db.get_commitments(self.user_id) or []

@@ -53,6 +53,7 @@ from app.engines.day_status import (
     status_from_stored,
 )
 from app.engines.proposal_effects import card_command
+from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 from app.prompts.registry import insert_row, load_version, version_for
 
 
@@ -564,6 +565,7 @@ class ChatService:
         pattern: Optional[list] = None,
         onboarding_completed: bool = True,
         timezone_name: Optional[str] = None,
+        effective_tier: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send a message and get agent response using tool calling.
@@ -713,6 +715,28 @@ class ChatService:
             )
             response_text = declined_again_reply(tool["name"], tool.get("input") or {})
             tool = None
+        if tool and tool.get("name") and leave_blocked(
+            effective_tier or "", tool["name"], tool.get("input") or {}
+        ):
+            logger.info(
+                f"[CHAT] Leave planning blocked for free user {self.user_id}"
+            )
+            response_text = LEAVE_PRO_REPLY
+            tool = None
+        limit_check = getattr(self.command_executor, "commitment_limit_message", None)
+        if tool and tool.get("name") == "add_commitment" and limit_check is not None:
+            try:
+                limit_reply = await limit_check(tool.get("input") or {})
+            except Exception as exc:
+                logger.warning(
+                    f"[CHAT] Commitment count failed for {self.user_id}; "
+                    f"leaving the message through: {exc}"
+                )
+                limit_reply = None
+            if limit_reply:
+                logger.info(f"[CHAT] Commitment limit blocked for free user {self.user_id}")
+                response_text = limit_reply
+                tool = None
         if tool and tool.get("name"):
             payload = tool.get("input") or {}
             command = card_command({

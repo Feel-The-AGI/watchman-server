@@ -125,6 +125,7 @@ async def send_message(
             kwargs["onboarding_completed"] = False
         if user.get("timezone"):
             kwargs["timezone_name"] = user["timezone"]
+        kwargs["effective_tier"] = effective_tier
         result = await chat_service.send_message(**kwargs)
 
         logger.info(f"[CHAT] Response received - is_command: {result.get('is_command')}")
