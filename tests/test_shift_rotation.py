@@ -3,6 +3,7 @@
 from datetime import date, timedelta
 
 import pytest
+from loguru import logger
 
 from app.engines.calendar_engine import CalendarEngine
 from app.engines.calendar_authority import engine_cycle
@@ -172,3 +173,54 @@ async def test_a_shift_keeps_an_override_and_a_leave_day():
     assert leave["work_type"] == work_type
     assert leave["cycle_day"] == cycle_day
     assert settings.document["leave_blocks"][0]["start_date"] == LEAVE_DAY
+
+
+async def _save(payload):
+    settings = _Settings({**CYCLE, "pattern": [dict(block) for block in PATTERN]})
+    saved = await _executor(settings, _DB())._action_update_cycle(payload)
+    return saved
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_anchor_wins_over_a_shift():
+    payload = {
+        "anchor_date": "2026-11-01",
+        "shift_by_days": 4,
+        "name": "Renamed",
+    }
+    saved, records = await _capture(_save(payload))
+    assert saved["cycle"]["anchor_date"] == "2026-11-01"
+    assert saved["cycle"]["name"] == "Renamed"
+    assert any(
+        "2026-11-01" in record["message"] and "4" in record["message"]
+        for record in records
+    )
+
+
+async def _capture(awaitable):
+    records = []
+    handle = logger.add(lambda message: records.append(message.record), level="WARNING")
+    try:
+        saved = await awaitable
+    finally:
+        logger.remove(handle)
+    return saved, records
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shift", [True, False, 1.5, "abc", 367, -367])
+async def test_a_shift_that_cannot_be_applied_leaves_the_anchor(shift):
+    saved, records = await _capture(_save({
+        "shift_by_days": shift,
+        "name": "Renamed",
+    }))
+    assert saved["cycle"]["anchor_date"] == ANCHOR.isoformat()
+    assert saved["cycle"]["name"] == "Renamed"
+    assert records
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shift, days", [("2", 2), (366, 366)])
+async def test_a_whole_day_shift_is_applied(shift, days):
+    saved = await _save({"shift_by_days": shift})
+    assert saved["cycle"]["anchor_date"] == (ANCHOR + timedelta(days=days)).isoformat()

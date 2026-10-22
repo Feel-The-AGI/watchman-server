@@ -57,6 +57,58 @@ VALID_ACTIONS = {
 }
 
 
+def _cycle_shift_days(payload: dict) -> Optional[int]:
+    """Days to add to the anchor. None leaves the anchor date alone.
+
+    An explicit anchor_date wins over a shift. A bool, a fractional number,
+    a non-numeric string, zero, or a shift past 366 days is ignored.
+    """
+    shift = payload.get("shift_by_days")
+    explicit = payload.get("anchor_date") if "anchor_date" in payload else None
+    if explicit not in (None, ""):
+        if shift not in (None, ""):
+            logger.warning(
+                f"update_cycle kept anchor_date={explicit!r} "
+                f"and ignored shift_by_days={shift!r}"
+            )
+        return None
+    return _parsed_shift_days(shift)
+
+
+def _parsed_shift_days(shift) -> Optional[int]:
+    if shift in (None, ""):
+        return None
+    # bool is a subclass of int. True would otherwise become 1.
+    if isinstance(shift, bool):
+        logger.warning(f"update_cycle ignored shift_by_days={shift!r}")
+        return None
+    count = None
+    if isinstance(shift, int):
+        count = shift
+    elif isinstance(shift, float):
+        if not shift.is_integer():
+            logger.warning(f"update_cycle ignored shift_by_days={shift!r}")
+            return None
+        count = int(shift)
+    elif isinstance(shift, str):
+        try:
+            count = int(shift.strip())
+        except ValueError:
+            logger.warning(f"update_cycle ignored shift_by_days={shift!r}")
+            return None
+    else:
+        logger.warning(f"update_cycle ignored shift_by_days={shift!r}")
+        return None
+    if count == 0:
+        return None
+    if abs(count) > 366:
+        logger.warning(
+            f"update_cycle ignored shift_by_days={count} because it is past 366 days"
+        )
+        return None
+    return count
+
+
 class CommandExecutor:
     """
     Executes commands from the agent.
@@ -340,16 +392,11 @@ class CommandExecutor:
         anchor_date = anchor_date or existing_anchor_date
         anchor_cycle_day = anchor_cycle_day or existing_anchor_cycle_day
         # shift_by_days moves the anchor date. Positive is later on the calendar.
-        # A whole cycle length lands on the same rotation, so the days do not change.
-        shift = payload.get("shift_by_days")
-        if shift not in (None, "") and anchor_date:
-            try:
-                count = int(shift)
-            except (TypeError, ValueError):
-                count = 0
-            if count:
-                base = date.fromisoformat(str(anchor_date)[:10])
-                anchor_date = (base + timedelta(days=count)).isoformat()
+        # It applies only when the payload did not send its own anchor_date.
+        count = _cycle_shift_days(payload)
+        if count and anchor_date:
+            base = date.fromisoformat(str(anchor_date)[:10])
+            anchor_date = (base + timedelta(days=count)).isoformat()
         
         # Normalize pattern format - ensure {label, duration}
         raw_pattern = payload.get("pattern", existing_cycle.get("pattern", []))
