@@ -77,7 +77,7 @@ async def update_master_settings(
         )
         saved = _saved_cycle(result, (request.settings or {}).get("cycle"))
         if cycle_is_present(saved):
-            await sync_cycle_row(db, user["id"], saved)
+            await sync_cycle_row(db, user["id"], saved, require_id=True)
             await finish_onboarding_for_saved_cycle(db, user["id"])
         return result
     except ValueError as e:
@@ -114,7 +114,7 @@ async def update_section(
         if section == "cycle":
             saved = _saved_cycle(result, request.value if isinstance(request.value, dict) else None)
             if cycle_is_present(saved):
-                await sync_cycle_row(db, user["id"], saved)
+                await sync_cycle_row(db, user["id"], saved, require_id=True)
                 await finish_onboarding_for_saved_cycle(db, user["id"])
         return result
     except Exception as e:
