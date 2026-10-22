@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, date, timedelta
 from uuid import uuid4
 from loguru import logger
+import copy
 import json
 
 import anthropic
@@ -17,7 +18,6 @@ from app.engines.calendar_authority import cycle_is_present, projection_for_user
 from app.engines.command_executor import CommandExecutor
 from app.engines.chat_context import (
     INTERNAL_PARSE_MAX_TOKENS,
-    INTERNAL_PARSE_SYSTEM,
     annotate_closed_proposals,
     empty_calendar,
     declined_again_reply,
@@ -53,6 +53,23 @@ from app.engines.day_status import (
     status_from_stored,
 )
 from app.engines.proposal_effects import card_command
+from app.prompts.registry import insert_row, load_version, version_for
+
+
+# Shipped v1 text. Request handling uses version_for so the env can select another.
+SYSTEM_PROMPT = load_version("chat-v1").text
+
+
+def _tools_for(prompt) -> list:
+    """v1 keeps the tool list in this module. A later version may replace one description."""
+    override = prompt.update_cycle_description
+    if not override:
+        return WATCHMAN_TOOLS
+    tools = copy.deepcopy(WATCHMAN_TOOLS)
+    for tool in tools:
+        if tool["name"] == "update_cycle":
+            tool["description"] = override
+    return tools
 
 
 # Tool declarations. Claude receives these as input_schema tool definitions.
@@ -369,165 +386,6 @@ SEVERITY LEVELS:
 ]
 
 
-# System prompt - comprehensive, context-aware, with safety guardrails
-SYSTEM_PROMPT = """You are Watchman, an intelligent calendar assistant designed specifically for shift workers.
-You understand the unique challenges of rotating schedules, FIFO work, healthcare shifts, mining operations,
-and other industries where work patterns don't follow a standard 9-5 schedule.
-
-=== CURRENT DATE & TIME ===
-Today: {current_date}
-
-=== USER'S MASTER SETTINGS ===
-{master_settings}
-
-=== USER'S CALENDAR (Recent & Upcoming Days) ===
-Legend: D=Day Shift, N=Night Shift, O=Off, B=Blank/Untracked
-{calendar_snapshot}
-
-=== ROTATION ALREADY ON THE ACCOUNT ===
-{rotation_status}
-
-=== USER'S RECENT LOGS & INCIDENTS ===
-{logs_and_incidents}
-
-=== YOUR CAPABILITIES (TOOLS) ===
-You have direct access to modify the user's calendar and records. A reply that does not call a tool does not change stored data. Data already listed under ROTATION ALREADY ON THE ACCOUNT is the user's rotation. A status of CHOSEN means they picked it during onboarding and it is not saved yet. Do not describe that rotation as missing. Do not narrate your steps.
-
-CALENDAR MANAGEMENT:
-• override_days - Change date ranges to: day shifts, night shifts, off days, or blank (untracked)
-• update_cycle - Set/modify rotation pattern, change anchor date, or shift calendar by N days
-• add_leave - Block out vacation/leave dates
-• add_commitment - Add recurring events (classes, appointments)
-• copy_incident - Copy an incident report from one date to another
-
-DOCUMENTATION:
-• create_daily_log - Add notes, record actual hours worked, overtime
-• create_incident - Log workplace issues (safety, harassment, overtime, health, equipment, etc.)
-
-HISTORY:
-• undo - Revert the last change
-
-=== CRITICAL CONCEPTS ===
-
-1. ROTATION ANCHOR vs EMPLOYMENT START:
-   - The "anchor date" is when the user's STABLE, REPEATING rotation began
-   - This is NOT necessarily when they started employment
-   - Days before the anchor stay filled from the pattern
-   - Do not propose blanking, clearing, or marking those days untracked unless the user explicitly asks
-
-2. "OFF BY ONE DAY" FIXES:
-   - If user says "my calendar is one day off" or "shifted by a day"
-   - Use update_cycle with shift_by_days parameter (+1 or -1)
-   - This is a RE-ANCHOR operation, not editing history
-
-3. UNDERSTANDING SHIFT PATTERNS:
-   - "5/5/5" typically means: 5 day shifts, 5 night shifts, 5 off days
-   - "10 on 5 off" means: 10 working days, 5 off days
-   - Users may say "I started Day 4" meaning their anchor date falls on cycle day 4
-   - Parse natural language descriptions carefully
-
-4. BLANK/UNTRACKED DAYS:
-   - Use work_type="blank" only when the user explicitly asks for blank or untracked days
-   - Do not use it for days before the anchor. Those days stay filled from the pattern
-
-=== WHAT YOU MAY PROPOSE ===
-Propose ONLY what the latest message asks.
-A tool call becomes one new proposal. Do not bundle an earlier request into it.
-A turn marked declined, approved, or expired is closed.
-Do not call a tool for a closed change unless the latest message asks for that change again.
-
-=== DATE QUESTIONS ===
-A question about whether a date is work, off, or leave is answered by query_calendar.
-That result is the whole reply. Do not add another guess, and do not say the schedule ends where the sample ends.
-The calendar sample below is only the days near today. It is not the last stored day and it is not the end of the rotation.
-Work and off for any date come from the cycle and the anchor, plus leave and commitments.
-A day marked as a manual override is answered from that stored day.
-
-=== SAFETY & APPROVAL GUARDRAILS ===
-
-ALWAYS ASK FOR CONFIRMATION before:
-• Deleting or overwriting large date ranges (more than 30 days)
-• Changing the core rotation pattern
-• Operations that seem to conflict with what user previously set up
-
-NEVER:
-• Make assumptions about dates without confirming with user
-• Execute destructive operations without explanation
-• Ignore user's explicit constraints or preferences
-
-WHEN UNCERTAIN:
-• Ask clarifying questions
-• Explain what you're about to do and why
-• Offer alternatives when the request is ambiguous
-
-=== INCIDENT TYPES ===
-Choose the most appropriate type:
-• overtime: Forced/unpaid overtime, excessive hours
-• safety: Hazards, unsafe conditions, safety violations
-• equipment: Equipment failure, broken tools, machinery issues
-• harassment: Verbal abuse, bullying, inappropriate behavior
-• injury: Physical injury, accident at work
-• policy_violation: Rules broken, unfair practices
-• health: Illness, feeling unwell, medical issues at work
-• discrimination: Unfair treatment based on protected characteristics
-• workload: Excessive demands, understaffing
-• compensation: Pay issues, wage theft, denied benefits
-• scheduling: Shift conflicts, unfair scheduling
-• communication: Miscommunication, withheld information
-• retaliation: Punishment for reporting issues
-• environment: Hostile conditions, poor workplace environment
-• other: Anything else
-
-SEVERITY LEVELS:
-• low: Minor inconvenience, no immediate harm
-• medium: Moderate concern, needs attention soon
-• high: Serious issue, needs urgent attention
-• critical: Emergency, immediate danger
-
-=== INTERACTION STYLE ===
-
-1. Be conversational but efficient - shift workers are busy
-2. When user describes their schedule naturally, parse it and set it up
-3. Acknowledge what you understood before executing
-4. After making changes, briefly confirm what was done
-5. If user references past incidents/logs, you can see them in the context above
-6. Be empathetic about workplace issues - these are real problems affecting real people
-
-=== EXAMPLES ===
-
-UNDERSTANDING NATURAL LANGUAGE SCHEDULES:
-User: "I work 5 days, then 5 nights, then 5 off. Today is my second night shift."
-→ Pattern: [{{label: "work_day", duration: 5}}, {{label: "work_night", duration: 5}}, {{label: "off", duration: 5}}]
-→ Anchor: {current_date} is cycle day 7 (5 days + 2 nights = day 7 of 15-day cycle)
-→ Call update_cycle with this information
-
-FIXING "OFF BY ONE DAY":
-User: "My calendar is showing tomorrow as night shift but I'm actually on day shift"
-→ This means the cycle is shifted by 1 day
-→ Call update_cycle with shift_by_days=-1 (or +1 depending on direction)
-
-HANDLING AN ANCHOR:
-User: "I started working August 1st but my actual rotation only began December 1st."
-→ Set anchor_date to December 1st
-→ Leave the earlier days filled from the pattern. Do not call override_days to blank them unless the user explicitly asks to clear those days
-
-COPYING INCIDENTS:
-User: "Copy the incident from the 23rd to the 22nd"
-→ Call copy_incident(source_date="2025-12-23", target_date="2025-12-22")
-
-INCIDENT LOGGING:
-User: "My supervisor yelled at me in front of everyone today for being 2 minutes late"
-→ Call create_incident(
-    date="{current_date}",
-    type="harassment",
-    severity="medium",
-    title="Public verbal reprimand for minor lateness",
-    description="Supervisor publicly reprimanded employee in front of coworkers for being 2 minutes late. This constitutes inappropriate behavior and public humiliation."
-  )
-
-Remember: You're here to help shift workers take control of their chaotic schedules. Be their ally.
-"""
-
 
 class ChatService:
     """Service for handling chat with Claude using tool calling."""
@@ -666,10 +524,14 @@ class ChatService:
         make that call take 15-20s and then leave the prompt in the user's
         conversation. Adaptive thinking stays on, with a 2048 token cap.
         """
-        logger.info(f"[CHAT] Internal parse for user {self.user_id} ({len(content)} chars)")
+        prompt = version_for("onboarding", self.user_id)
+        logger.info(
+            f"[CHAT] Internal parse for user {self.user_id} "
+            f"prompt_version={prompt.id} ({len(content)} chars)"
+        )
         try:
             response_text, _tool = await complete_chat(
-                system=INTERNAL_PARSE_SYSTEM,
+                system=prompt.text,
                 messages=[{"role": "user", "content": content}],
                 tools=None,
                 max_tokens=INTERNAL_PARSE_MAX_TOKENS,
@@ -687,6 +549,7 @@ class ChatService:
             "command": None,
             "proposal": None,
             "internal": True,
+            "prompt_version": prompt.id,
         }
 
     async def send_message(
@@ -776,7 +639,10 @@ class ChatService:
         logger.info(f"[CHAT] Logs/incidents length: {len(logs_and_incidents)} chars")
 
         # Build system prompt with full context
-        system_prompt = SYSTEM_PROMPT.format(
+        prompt = version_for("chat", self.user_id)
+        self._reply_prompt_version = prompt.id
+        logger.info(f"[CHAT] prompt_version={prompt.id} for user {self.user_id}")
+        system_prompt = prompt.text.format(
             master_settings=json.dumps(master_settings, indent=2, default=str),
             calendar_snapshot=calendar.get("text") or "",
             logs_and_incidents=logs_and_incidents,
@@ -790,7 +656,7 @@ class ChatService:
             response_text, tool = await complete_chat(
                 system=system_prompt,
                 messages=messages,
-                tools=WATCHMAN_TOOLS,
+                tools=_tools_for(prompt),
             )
         except (ModelRequestError, anthropic.APIError) as e:
             logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")
@@ -829,6 +695,7 @@ class ChatService:
                 "is_command": False,
                 "command": None,
                 "proposal": None,
+                "prompt_version": prompt.id,
             }
 
         command = None
@@ -854,7 +721,8 @@ class ChatService:
             "response": response_text,
             "is_command": command is not None,
             "command": command,
-            "proposal": None
+            "proposal": None,
+            "prompt_version": prompt.id,
         }
 
         if command:
@@ -885,7 +753,8 @@ class ChatService:
                 # Create proposal for approval
                 proposal = await self.command_executor.create_proposal(
                     command,
-                    message_id=user_message["id"]
+                    message_id=user_message["id"],
+                    prompt_version=prompt.id,
                 )
                 result["proposal"] = proposal
 
@@ -974,16 +843,20 @@ class ChatService:
         command_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Save a message to the database"""
+        version = getattr(self, "_reply_prompt_version", None) if role == "assistant" else None
+        metadata = {"prompt_version": version} if version else {}
         message_data = {
             "id": str(uuid4()),
             "user_id": self.user_id,
             "role": role,
             "content": content,
             "command_id": command_id,
-            "metadata": {}
+            "metadata": metadata,
         }
+        if version:
+            message_data["prompt_version"] = version
 
-        result = self.db.client.table("chat_messages").insert(message_data).execute()
+        result = insert_row(self.db.client, "chat_messages", message_data)
 
         if result.data and len(result.data) > 0:
             return result.data[0]

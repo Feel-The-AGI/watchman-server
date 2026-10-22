@@ -24,6 +24,7 @@ from app.engines.calendar_authority import (
     night_shift_dates,
 )
 from app.onboarding import finish_onboarding_for_saved_cycle
+from app.prompts.registry import insert_row
 from app.engines.proposal_effects import (
     card_command,
     commitment_record,
@@ -110,7 +111,8 @@ class CommandExecutor:
     async def create_proposal(
         self, 
         command: Dict[str, Any],
-        message_id: Optional[str] = None
+        message_id: Optional[str] = None,
+        prompt_version: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a proposal for user approval.
@@ -126,6 +128,11 @@ class CommandExecutor:
         command = card_command(command)
         # Validate first
         validation = await self.validate_command(command)
+        if prompt_version:
+            validation = {**validation, "prompt_version": prompt_version}
+            logger.info(
+                f"Proposal for user {self.user_id} uses prompt_version={prompt_version}"
+            )
         
         # Create proposal record. Expired proposals cannot be approved.
         proposal_data = {
@@ -137,11 +144,15 @@ class CommandExecutor:
             "message_id": message_id,
             "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
         }
+        if prompt_version:
+            proposal_data["prompt_version"] = prompt_version
         
-        result = self.db.client.table("proposals").insert(proposal_data).execute()
+        result = insert_row(self.db.client, "proposals", proposal_data)
         
         if result.data and len(result.data) > 0:
             proposal = result.data[0]
+            if prompt_version and not proposal.get("prompt_version"):
+                proposal = {**proposal, "prompt_version": prompt_version}
             logger.info(f"Created proposal {proposal['id']} for user {self.user_id}")
             return proposal
         

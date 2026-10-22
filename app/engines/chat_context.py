@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.engines.calendar_authority import cycle_is_present
 from app.engines.proposal_effects import describe_command
+from app.prompts.registry import load_version as _load_prompt_version
 
 
 _PROMPT_MARKERS = (
@@ -21,13 +22,8 @@ _PROMPT_MARKERS = (
     "The user is describing their work shift rotation pattern",
 )
 
-INTERNAL_PARSE_SYSTEM = (
-    "Extract the shift rotation described in the user message. "
-    "Reply with one JSON object and no markdown. "
-    "Keys: understood (boolean), pattern (list of {label, duration}), "
-    "description (short string), message (short string for the user). "
-    "label is work_day, work_night, or off."
-)
+# The onboarding parse prompt lives in app/prompts/onboarding/v1.md.
+INTERNAL_PARSE_SYSTEM = _load_prompt_version("onboarding-v1").text
 
 # The parse is a short JSON extraction. The 15-20s came from sending it
 # through the full tool-using agent with an 8192-token thinking budget.
