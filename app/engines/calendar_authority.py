@@ -300,20 +300,96 @@ async def projection_for_user(db, user_id: str) -> dict:
 
 
 async def remember_cycle(db, user_id: str, cycle_row: dict, service=None) -> bool:
-    """Copy a cycle create/update into Master Settings.
+    """Copy a cycle create/update into Master Settings when may_replace_cycle allows it.
 
-    The cycles API is the client's one write: it stores the rotation and the
-    route then generates calendar days once. Calendar generate does not call
-    this, so a stale row cannot replace the document.
+    An empty document is filled in. A document that already tracks a different
+    cycle id is left alone, so a stale row cannot replace it. The cycles API
+    is the client's one write: it stores the rotation and the route then
+    generates calendar days once. Calendar generate does not call this.
     """
     service = service or MasterSettingsService(db)
     incoming = cycle_from_row(cycle_row)
+    try:
+        current = await service.get(user_id)
+        existing = (current.get("settings") or {}).get("cycle") if isinstance(current, dict) else None
+    except Exception as exc:
+        logger.warning(f"Could not read the cycle document for {user_id}: {exc}")
+        return False
+    if not may_replace_cycle(existing, incoming):
+        return False
     try:
         await service.update_section(user_id, "cycle", incoming)
     except Exception as exc:
         logger.error(f"Could not store cycle in Master Settings for {user_id}: {exc}")
         return False
     return True
+
+
+def _cycle_row_fields(cycle: dict) -> dict:
+    """Settings-cycle fields that belong on the cycles table."""
+    anchor_date = None
+    anchor_cycle_day = None
+    anchor = cycle.get("anchor")
+    if isinstance(anchor, dict):
+        anchor_date = anchor.get("date")
+        anchor_cycle_day = anchor.get("cycle_day")
+    if cycle.get("anchor_date") not in (None, ""):
+        anchor_date = cycle.get("anchor_date")
+        if cycle.get("anchor_cycle_day") is not None:
+            anchor_cycle_day = cycle.get("anchor_cycle_day")
+    if hasattr(anchor_date, "isoformat"):
+        anchor_date = anchor_date.isoformat()
+    elif isinstance(anchor_date, str):
+        anchor_date = anchor_date[:10]
+    length = cycle.get("total_days")
+    if length is None:
+        length = cycle.get("cycle_length")
+    fields = {}
+    if cycle.get("pattern") is not None:
+        fields["pattern"] = cycle.get("pattern")
+    if length is not None:
+        fields["cycle_length"] = length
+    if anchor_date:
+        fields["anchor_date"] = anchor_date
+    if anchor_cycle_day is not None:
+        fields["anchor_cycle_day"] = anchor_cycle_day
+    if cycle.get("name"):
+        fields["name"] = cycle.get("name")
+    return fields
+
+
+async def sync_cycle_row(db, user_id: str, cycle: Optional[dict]) -> None:
+    """Copy the settings cycle onto the matching active cycles row.
+
+    Does nothing when there is no row. Never creates, deletes, or deactivates.
+    A failed update is logged and does not undo the settings write.
+    """
+    if not isinstance(cycle, dict):
+        return
+    try:
+        rows = await db.get_cycles(user_id) or []
+        active = [row for row in rows if isinstance(row, dict) and row.get("is_active")]
+        wanted = cycle.get("id")
+        chosen = None
+        if wanted not in (None, ""):
+            for row in active:
+                if str(row.get("id")) == str(wanted):
+                    chosen = row
+                    break
+            if chosen is None:
+                return
+        elif len(active) == 1:
+            chosen = active[0]
+        else:
+            return
+        fields = _cycle_row_fields(cycle)
+        if not fields:
+            return
+        saved = await db.update_cycle(str(chosen.get("id")), fields, user_id)
+        if not saved:
+            logger.warning(f"Could not sync cycles row {chosen.get('id')} for {user_id}")
+    except Exception as exc:
+        logger.warning(f"Could not sync cycles row for {user_id}: {exc}")
 
 
 async def mirror_onboarding_constraints(db, user_id: str, rows: Optional[list] = None) -> None:

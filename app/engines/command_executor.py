@@ -22,6 +22,7 @@ from app.engines.calendar_authority import (
     effective_constraints,
     is_night_study_rule,
     night_shift_dates,
+    sync_cycle_row,
 )
 from app.onboarding import finish_onboarding_for_saved_cycle
 from app.prompts.registry import insert_row
@@ -431,6 +432,7 @@ class CommandExecutor:
         }
         
         await self.settings_service.update_section(self.user_id, "cycle", cycle_data)
+        await sync_cycle_row(self.db, self.user_id, cycle_data)
         await finish_onboarding_for_saved_cycle(self.db, self.user_id)
         
         # Also update work settings if provided
@@ -875,6 +877,8 @@ class CommandExecutor:
         before_state = command.get("before_state")
         if before_state:
             await self.settings_service.update(self.user_id, before_state)
+            cycle = before_state.get("cycle") if isinstance(before_state, dict) else None
+            await sync_cycle_row(self.db, self.user_id, cycle)
         
         # Mark command as undone
         self.db.client.table("command_log").update({
@@ -899,6 +903,8 @@ class CommandExecutor:
         after_state = command.get("after_state")
         if after_state:
             await self.settings_service.update(self.user_id, after_state)
+            cycle = after_state.get("cycle") if isinstance(after_state, dict) else None
+            await sync_cycle_row(self.db, self.user_id, cycle)
         
         # Mark command as redone
         self.db.client.table("command_log").update({
