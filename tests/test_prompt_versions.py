@@ -53,7 +53,7 @@ def test_config_defaults_to_the_latest_stable_version(monkeypatch):
     assert Settings.model_fields["chat_prompt_version"].default == ""
     assert Settings.model_fields["onboarding_prompt_version"].default == ""
     assert latest_stable("chat").id == "chat-v1"
-    assert "chat-v2" not in {item.id for item in VERSIONS.values()}
+    assert load_version("chat-v2").stable is False
     monkeypatch.setattr("app.prompts.registry.get_settings", lambda: _settings())
     assert version_for("chat").id == "chat-v1"
     assert version_for("onboarding").id == "onboarding-v1"
@@ -69,6 +69,47 @@ def test_env_switch_selects_the_requested_version(monkeypatch):
     assert selected.text == load_version("chat-v1").text
     assert "stay filled from the pattern" in selected.text
     assert _tools_for(selected) is WATCHMAN_TOOLS
+
+
+def test_chat_v1_tools_match_main_and_chat_v2_carries_the_shift_wording():
+    v1_tools = _tools_for(load_version("chat-v1"))
+    assert v1_tools is WATCHMAN_TOOLS
+    v1_update = next(item for item in v1_tools if item["name"] == "update_cycle")
+    assert "by adjusting anchor_cycle_day" in v1_update["description"]
+    assert v1_update["parameters"]["properties"]["shift_by_days"]["description"] == (
+        "Alternative way to shift the rotation: positive = forward, negative = backward. "
+        "Use this for 'off by one day' fixes."
+    )
+    assert "each shift happens that many days later" not in v1_update["description"]
+    assert "each shift happens that many days later" not in (
+        v1_update["parameters"]["properties"]["shift_by_days"]["description"]
+    )
+
+    v2_tools = _tools_for(load_version("chat-v2"))
+    assert v2_tools is not WATCHMAN_TOOLS
+    v2_update = next(item for item in v2_tools if item["name"] == "update_cycle")
+    assert "each shift happens that many days later" in v2_update["description"]
+    assert v2_update["parameters"]["properties"]["shift_by_days"]["description"] == (
+        "Move the rotation without editing history. A positive number means each shift "
+        "happens that many days later. A negative number means each shift happens that "
+        "many days earlier."
+    )
+
+
+def test_chat_v2_states_that_a_positive_shift_moves_each_shift_later():
+    v1 = load_version("chat-v1").text
+    v2 = load_version("chat-v2").text
+    assert v2 != v1
+    assert "each shift happens that many days later" in v2
+    assert "do not propose a shift yet" in v2
+    assert "what shift it is" in v2
+    assert 'User: "I\'m a day behind."' in v2
+    assert "No concrete date" in v2
+    assert "They confirmed the date" in v2
+    assert "shift_by_days=1" in v2
+    assert 'User: "I\'m a day ahead."' in v2
+    assert "shift_by_days=-1" in v2
+    assert "I'm a day behind" not in v1
 
 
 def test_every_later_version_differs_from_v1_and_has_a_changelog():

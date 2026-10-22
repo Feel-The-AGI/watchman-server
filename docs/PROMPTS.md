@@ -2,7 +2,7 @@
 
 The chat agent and the onboarding parser each have a versioned system prompt. The live text is a file in `app/prompts/`. Code asks the registry which version to send.
 
-Only v1 is registered today: `chat-v1` and `onboarding-v1`. Both are stable. An empty version env uses the latest stable version for that family.
+`chat-v1` and `onboarding-v1` are stable. `chat-v2` is registered and is not stable, so an empty version env still uses `chat-v1`.
 
 | Family | Active env | Allowlist env | Stable default |
 | --- | --- | --- | --- |

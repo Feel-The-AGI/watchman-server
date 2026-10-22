@@ -61,14 +61,19 @@ SYSTEM_PROMPT = load_version("chat-v1").text
 
 
 def _tools_for(prompt) -> list:
-    """v1 keeps the tool list in this module. A later version may replace one description."""
-    override = prompt.update_cycle_description
-    if not override:
+    """v1 keeps the shared tool list. A later version may replace update_cycle text."""
+    description = prompt.update_cycle_description
+    shift = prompt.shift_by_days_description
+    if not description and not shift:
         return WATCHMAN_TOOLS
     tools = copy.deepcopy(WATCHMAN_TOOLS)
     for tool in tools:
-        if tool["name"] == "update_cycle":
-            tool["description"] = override
+        if tool["name"] != "update_cycle":
+            continue
+        if description:
+            tool["description"] = description
+        if shift:
+            tool["parameters"]["properties"]["shift_by_days"]["description"] = shift
     return tools
 
 
