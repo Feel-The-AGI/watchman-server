@@ -5,7 +5,6 @@ Endpoints for calendar day management and generation
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from calendar import isleap
 from typing import Optional
 from datetime import date
 
@@ -17,12 +16,29 @@ from app.engines.calendar_engine import (
     present_calendar_day,
     year_bounds,
 )
+from app.planning_horizon import clip_range, horizon_detail, horizon_end, parse_day, unlimited
 from app.engines.command_executor import create_command_executor
 
 
 from loguru import logger
 
 router = APIRouter()
+
+
+def _free_view(user: dict, days: list) -> dict:
+    """Reads stay available. Free responses omit days after the rolling horizon."""
+    tier = get_effective_tier(user)
+    shown = list(days or [])
+    extra = {}
+    if not unlimited(tier):
+        cap = horizon_end()
+        shown = [
+            day for day in shown
+            if (parsed := parse_day(day.get("date") if isinstance(day, dict) else None)) is None
+            or parsed <= cap
+        ]
+        extra["free_horizon_end"] = cap.isoformat()
+    return {"days": shown, **extra}
 
 
 class GenerateCalendarRequest(BaseModel):
@@ -52,12 +68,14 @@ async def get_calendar_days(
         start_date.isoformat(),
         end_date.isoformat()
     )
-    logger.info(f"[CALENDAR] Returning {len(days)} days for user {user['id']}")
+    view = _free_view(user, days)
+    logger.info(f"[CALENDAR] Returning {len(view['days'])} days for user {user['id']}")
 
     return {
         "success": True,
-        "data": [present_calendar_day(day) for day in (days or [])],
-        "count": len(days or [])
+        "data": [present_calendar_day(day) for day in view["days"]],
+        "count": len(view["days"]),
+        **({"free_horizon_end": view["free_horizon_end"]} if "free_horizon_end" in view else {}),
     }
 
 
@@ -72,10 +90,27 @@ def _is_calendar_stale(days: list) -> bool:
     return stored_version < CALENDAR_ENGINE_VERSION
 
 
-def _year_is_incomplete(days: list, year: int) -> bool:
-    """True when the year does not contain every date, including pre-anchor days."""
-    expected = 366 if isleap(year) else 365
-    return len(days or []) < expected
+def _span_complete(days: list, start: date, end: date) -> bool:
+    """True when every date from start through end is already stored."""
+    expected = (end - start).days + 1
+    found = set()
+    for day in days or []:
+        parsed = parse_day(day.get("date") if isinstance(day, dict) else None)
+        if parsed is not None and start <= parsed <= end:
+            found.add(parsed)
+    return len(found) >= expected
+
+
+def _rebuild_span(days: list, year: int, tier: str):
+    """Inclusive range still worth generating. None when the year is past the cap
+    or the allowed dates are already stored and current.
+    """
+    span = clip_range(*year_bounds(year), tier)
+    if span is None:
+        return None
+    if _is_calendar_stale(days) or not _span_complete(days, *span):
+        return span
+    return None
 
 
 @router.get("/year/{year}")
@@ -93,24 +128,26 @@ async def get_year(
     days = await db.get_calendar_days(user["id"], start_date, end_date)
     logger.debug(f"[CALENDAR] Found {len(days)} existing days for year {year}")
 
-    # Check if data is missing OR stale (generated with older engine version)
-    needs_regeneration = _is_calendar_stale(days) or _year_is_incomplete(days, year)
+    # A year that starts after the free horizon is not filled in. A year that
+    # overlaps it is complete once every allowed day is stored.
+    tier = get_effective_tier(user)
+    span = _rebuild_span(days, year, tier)
     # A failed delete or create leaves ids here. Finish that rebuild before
     # serving the year, and leave the ids if it fails again.
     try:
         executor = create_command_executor(db, user["id"])
         if await executor.finish_pending_removals():
             days = await db.get_calendar_days(user["id"], start_date, end_date)
-            needs_regeneration = _is_calendar_stale(days) or _year_is_incomplete(days, year)
+            span = _rebuild_span(days, year, tier)
     except Exception:
         logger.exception(
             f"Pending commitment removal was not finished for user {user['id']}; "
             "the ids stay until the next calendar read"
         )
-    if needs_regeneration:
+    if span is not None:
         logger.info(f"[CALENDAR] Calendar needs regeneration (stale or empty) for user {user['id']}, year {year}")
 
-    if needs_regeneration:
+    if span is not None:
         if days:
             logger.info(f"Calendar data for user {user['id']} year {year} is stale (old engine version), regenerating...")
         else:
@@ -118,11 +155,11 @@ async def get_year(
         # Same path as an approved chat change: document leave and
         # leave_blocks are merged, commitments are stamped, overrides stay.
         # Nothing is deleted first. If this load fails, return the days already
-        # stored and try again on the next request.
+        # stored and try again on the next request. The span stops at the
+        # free horizon, so a later stored day is left where it is.
         try:
-            start_gen, end_gen = year_bounds(year)
             executor = create_command_executor(db, user["id"])
-            await executor.rebuild_calendar(start_gen, end_gen)
+            await executor.rebuild_calendar(*span)
             days = await db.get_calendar_days(user["id"], start_date, end_date)
             logger.info(f"Rebuilt {len(days or [])} days for year {year}")
         except Exception:
@@ -131,13 +168,17 @@ async def get_year(
                 "returning the stored days"
             )
     
-    shown = [present_calendar_day(day) for day in (days or [])]
-    return {
+    view = _free_view(user, days)
+    shown = [present_calendar_day(day) for day in view["days"]]
+    body = {
         "success": True,
         "data": shown,
         "year": year,
-        "count": len(shown)
+        "count": len(shown),
     }
+    if "free_horizon_end" in view:
+        body["free_horizon_end"] = view["free_horizon_end"]
+    return body
 
 
 @router.get("/month/{year}/{month}")
@@ -161,15 +202,18 @@ async def get_month(
         end_date = last_day.isoformat()
     
     days = await db.get_calendar_days(user["id"], start_date, end_date)
-    
-    shown = [present_calendar_day(day) for day in (days or [])]
-    return {
+    view = _free_view(user, days)
+    shown = [present_calendar_day(day) for day in view["days"]]
+    body = {
         "success": True,
         "data": shown,
         "year": year,
         "month": month,
-        "count": len(shown)
+        "count": len(shown),
     }
+    if "free_horizon_end" in view:
+        body["free_horizon_end"] = view["free_horizon_end"]
+    return body
 
 
 @router.get("/day/{date_str}")
@@ -182,17 +226,24 @@ async def get_day(
     
     day = await db.get_calendar_day(user["id"], date_str)
     
-    if not day:
-        return {
+    view = _free_view(user, [day] if day else [])
+    if not view["days"]:
+        body = {
             "success": True,
             "data": None,
-            "message": "No calendar data for this date"
+            "message": "No calendar data for this date",
         }
-    
-    return {
+        if "free_horizon_end" in view:
+            body["free_horizon_end"] = view["free_horizon_end"]
+        return body
+
+    body = {
         "success": True,
-        "data": present_calendar_day(day)
+        "data": present_calendar_day(view["days"][0]),
     }
+    if "free_horizon_end" in view:
+        body["free_horizon_end"] = view["free_horizon_end"]
+    return body
 
 
 @router.post("/generate")
@@ -201,24 +252,16 @@ async def generate_calendar(
     user: dict = Depends(get_current_user)
 ):
     """Generate calendar days for a year based on active cycle"""
+    tier = get_effective_tier(user)
+    start_bound, end_bound = year_bounds(data.year)
+    clipped = clip_range(start_bound, end_bound, tier)
+    if clipped is None:
+        logger.warning(
+            f"Free tier user {user['id']} blocked from generating {data.year} past the horizon"
+        )
+        raise HTTPException(status_code=403, detail=horizon_detail())
+
     db = Database(use_admin=True)
-    
-    # Check tier limits for free users (6 months only)
-    tier = user.get("tier", "free")
-    if tier == "free":
-        logger.info(f"Free tier user {user['id']} attempting calendar generation for {data.year}")
-        # Free users can only plan 6 months ahead from today
-        from datetime import date as date_module
-        today = date_module.today()
-        max_date = date_module(today.year, today.month + 6, 1) if today.month <= 6 else date_module(today.year + 1, today.month - 6, 1)
-        
-        if data.year > max_date.year:
-            logger.warning(f"Free tier user {user['id']} blocked from generating {data.year} - exceeds 6 month limit")
-            raise HTTPException(
-                status_code=403,
-                detail="The free plan covers 6 months of planning ahead. Want to see further into the future? Upgrade to Pro for unlimited years."
-            )
-    
     logger.info(f"User {user['id']} generating calendar for year {data.year}")
 
     # Master Settings wins. The cycles table is used only when the document has no cycle.
@@ -242,7 +285,7 @@ async def generate_calendar(
         existing
         and not data.regenerate
         and not _is_calendar_stale(existing)
-        and not _year_is_incomplete(existing, data.year)
+        and _span_complete(existing, *clipped)
     ):
         return {
             "success": True,
@@ -250,7 +293,7 @@ async def generate_calendar(
             "count": len(existing)
         }
     
-    start_date, end_date = year_bounds(data.year)
+    start_date, end_date = clipped
     executor = create_command_executor(db, user["id"])
     await executor.rebuild_calendar(start_date, end_date)
     days = await db.get_calendar_days(

@@ -16,6 +16,7 @@ from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_authority import cycle_is_present, projection_for_user
 from app.engines.command_executor import CommandExecutor
+from app.planning_horizon import horizon_violation, payload_dates
 from app.engines.chat_context import (
     INTERNAL_PARSE_MAX_TOKENS,
     annotate_closed_proposals,
@@ -570,6 +571,8 @@ class ChatService:
         """
         Send a message and get agent response using tool calling.
         """
+        if effective_tier is not None:
+            self.command_executor.effective_tier = effective_tier
         if is_internal_chat_content(content):
             return await self._complete_internal(content)
 
@@ -737,6 +740,17 @@ class ChatService:
                 logger.info(f"[CHAT] Commitment limit blocked for free user {self.user_id}")
                 response_text = limit_reply
                 tool = None
+        horizon_block = None
+        if tool and tool.get("name") and (effective_tier or "") == "free":
+            horizon_block = horizon_violation(
+                "free", payload_dates(tool.get("input") or {})
+            )
+            if horizon_block:
+                logger.info(
+                    f"[CHAT] Blocked {tool['name']} past the free horizon for {self.user_id}"
+                )
+                response_text = horizon_block["message"]
+                tool = None
         if tool and tool.get("name"):
             payload = tool.get("input") or {}
             command = card_command({
@@ -753,6 +767,9 @@ class ChatService:
             "proposal": None,
             "prompt_version": prompt.id,
         }
+        if horizon_block:
+            result["code"] = horizon_block["code"]
+            result["horizon_end"] = horizon_block["horizon_end"]
 
         if command:
             if auto_execute:

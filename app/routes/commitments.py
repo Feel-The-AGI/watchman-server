@@ -20,6 +20,7 @@ from app.engines.command_executor import (
 )
 from app.engines.master_settings_service import MasterSettingsService
 from app.middleware.auth import get_current_user, get_effective_tier
+from app.planning_horizon import horizon_violation
 from loguru import logger
 
 
@@ -131,6 +132,11 @@ async def create_commitment(
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """Create a new commitment"""
+    past_horizon = horizon_violation(
+        get_effective_tier(user), [data.start_date, data.end_date]
+    )
+    if past_horizon:
+        raise HTTPException(status_code=403, detail=past_horizon)
     db = Database(use_admin=True)
     
     logger.info(f"User {user['id']} creating commitment: {data.name} ({data.type})")
@@ -277,6 +283,13 @@ async def update_commitment(
     
     if not update_data:
         return {"message": "No changes provided"}
+
+    past_horizon = horizon_violation(
+        get_effective_tier(user),
+        [value for value in (data.start_date, data.end_date) if value is not None],
+    )
+    if past_horizon:
+        raise HTTPException(status_code=403, detail=past_horizon)
 
     commitment = await db.update_commitment(commitment_id, update_data)
     if not commitment:

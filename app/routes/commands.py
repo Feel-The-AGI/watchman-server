@@ -184,6 +184,15 @@ async def review_proposal(
         _restore_pending_proposal(db, proposal_id, user["id"])
         if isinstance(outcome, dict) and outcome.get("code") == "commitment_limit":
             raise HTTPException(status_code=403, detail=outcome.get("error"))
+        if isinstance(outcome, dict) and outcome.get("code") == "free_horizon":
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "free_horizon",
+                    "horizon_end": outcome.get("horizon_end"),
+                    "message": outcome.get("error"),
+                },
+            )
         if isinstance(outcome, dict) and "validation" in outcome:
             raise HTTPException(
                 status_code=422,
