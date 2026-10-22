@@ -53,7 +53,7 @@ def _version(
     )
 
 
-# Only v1 is registered. A later version must be a real text change.
+# chat-v1 stays the stable default. chat-v2 is a candidate and is not stable.
 _VERSIONS = (
     _version(
         "chat-v1",
@@ -63,6 +63,15 @@ _VERSIONS = (
         "2026-10-22",
         True,
         "chat/v1.md",
+    ),
+    _version(
+        "chat-v2",
+        "chat",
+        2,
+        "State that a positive shift_by_days moves each shift later.",
+        "2026-10-22",
+        False,
+        "chat/v2.md",
     ),
     _version(
         "onboarding-v1",

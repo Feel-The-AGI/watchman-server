@@ -114,7 +114,7 @@ Use 'blank' for dates before the user's rotation became stable/consistent.""",
 - Set up a new rotation pattern (e.g., 5 days, 5 nights, 5 off)
 - Change the anchor date (which date corresponds to which cycle day)
 - Regenerate calendar from the current pattern
-- Handle "off by one day" scenarios by adjusting anchor_cycle_day
+- Handle "off by one day" scenarios with shift_by_days. A positive number means each shift happens that many days later. A negative number means each shift happens that many days earlier.
 
 IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
 - The anchor_date is when the user's STABLE ROTATION began, not their employment start date
@@ -156,7 +156,7 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
                 },
                 "shift_by_days": {
                     "type": "integer",
-                    "description": "Alternative way to shift the rotation: positive = forward, negative = backward. Use this for 'off by one day' fixes."
+                    "description": "Move the rotation without editing history. A positive number means each shift happens that many days later. A negative number means each shift happens that many days earlier."
                 }
             },
             "required": []

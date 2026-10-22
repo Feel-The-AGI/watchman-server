@@ -53,7 +53,7 @@ def test_config_defaults_to_the_latest_stable_version(monkeypatch):
     assert Settings.model_fields["chat_prompt_version"].default == ""
     assert Settings.model_fields["onboarding_prompt_version"].default == ""
     assert latest_stable("chat").id == "chat-v1"
-    assert "chat-v2" not in {item.id for item in VERSIONS.values()}
+    assert load_version("chat-v2").stable is False
     monkeypatch.setattr("app.prompts.registry.get_settings", lambda: _settings())
     assert version_for("chat").id == "chat-v1"
     assert version_for("onboarding").id == "onboarding-v1"
@@ -69,6 +69,21 @@ def test_env_switch_selects_the_requested_version(monkeypatch):
     assert selected.text == load_version("chat-v1").text
     assert "stay filled from the pattern" in selected.text
     assert _tools_for(selected) is WATCHMAN_TOOLS
+
+
+def test_chat_v2_states_that_a_positive_shift_moves_each_shift_later():
+    v1 = load_version("chat-v1").text
+    v2 = load_version("chat-v2").text
+    assert v2 != v1
+    assert "each shift happens that many days later" in v2
+    assert 'User: "I\'m a day behind."' in v2
+    assert "shift_by_days=1" in v2
+    assert 'User: "I\'m a day ahead."' in v2
+    assert "shift_by_days=-1" in v2
+    assert "I'm a day behind" not in v1
+    tool = next(item for item in WATCHMAN_TOOLS if item["name"] == "update_cycle")
+    description = tool["parameters"]["properties"]["shift_by_days"]["description"]
+    assert "each shift happens that many days later" in description
 
 
 def test_every_later_version_differs_from_v1_and_has_a_changelog():
