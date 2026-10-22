@@ -121,6 +121,14 @@ class Database:
         logger.info(f"[DB] complete_onboarding: {user_id}")
         return await self.update_user(user_id, {"onboarding_completed": True})
 
+    async def complete_onboarding_if_open(self, user_id: str) -> bool:
+        """Mark setup finished when it is still open. A finished account is left alone."""
+        user = await self.get_user_by_id(user_id)
+        if isinstance(user, dict) and user.get("onboarding_completed"):
+            return False
+        await self.complete_onboarding(user_id)
+        return True
+
     async def get_user_by_paystack_customer(self, paystack_customer_code: str) -> Optional[dict]:
         """Get user by Paystack customer code"""
         logger.debug(f"[DB] get_user_by_paystack_customer: {paystack_customer_code}")

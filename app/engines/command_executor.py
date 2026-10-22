@@ -23,6 +23,7 @@ from app.engines.calendar_authority import (
     is_night_study_rule,
     night_shift_dates,
 )
+from app.onboarding import finish_onboarding_for_saved_cycle
 from app.engines.proposal_effects import (
     card_command,
     commitment_record,
@@ -348,6 +349,7 @@ class CommandExecutor:
         }
         
         await self.settings_service.update_section(self.user_id, "cycle", cycle_data)
+        await finish_onboarding_for_saved_cycle(self.db, self.user_id)
         
         # Also update work settings if provided
         if "shift_hours" in payload:
