@@ -336,6 +336,20 @@ class CommandExecutor:
         else:
             existing_anchor_date = existing_cycle.get("anchor_date")
             existing_anchor_cycle_day = existing_cycle.get("anchor_cycle_day", 1)
+
+        anchor_date = anchor_date or existing_anchor_date
+        anchor_cycle_day = anchor_cycle_day or existing_anchor_cycle_day
+        # shift_by_days moves the anchor date. Positive is later on the calendar.
+        # A whole cycle length lands on the same rotation, so the days do not change.
+        shift = payload.get("shift_by_days")
+        if shift not in (None, "") and anchor_date:
+            try:
+                count = int(shift)
+            except (TypeError, ValueError):
+                count = 0
+            if count:
+                base = date.fromisoformat(str(anchor_date)[:10])
+                anchor_date = (base + timedelta(days=count)).isoformat()
         
         # Normalize pattern format - ensure {label, duration}
         raw_pattern = payload.get("pattern", existing_cycle.get("pattern", []))
@@ -359,8 +373,8 @@ class CommandExecutor:
             "id": payload.get("id", existing_cycle.get("id", str(uuid4()))),
             "name": payload.get("name", existing_cycle.get("name", "My Rotation")),
             "pattern": normalized_pattern,
-            "anchor_date": anchor_date or existing_anchor_date,
-            "anchor_cycle_day": anchor_cycle_day or existing_anchor_cycle_day,
+            "anchor_date": anchor_date,
+            "anchor_cycle_day": anchor_cycle_day,
             "total_days": sum(block.get("duration", 0) for block in normalized_pattern) or existing_cycle.get("total_days", 15)
         }
         
