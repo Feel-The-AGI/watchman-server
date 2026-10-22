@@ -25,11 +25,13 @@ from app.engines.chat_context import (
     anchor_acknowledgement,
     is_hidden_chat_message,
     is_internal_chat_content,
+    chosen_cycle,
     parse_typed_anchor,
     rotation_status,
     settings_for_prompt,
     strip_model_reasoning,
     unsolicited_blank_override,
+    with_unsaved_pattern,
 )
 from app.engines.claude_chat import (
     USER_FACING_MODEL_ERROR,
@@ -385,7 +387,7 @@ Legend: D=Day Shift, N=Night Shift, O=Off, B=Blank/Untracked
 {logs_and_incidents}
 
 === YOUR CAPABILITIES (TOOLS) ===
-You have direct access to modify the user's calendar and records. A reply that does not call a tool does not change stored data. Data already listed under ROTATION ALREADY ON THE ACCOUNT is saved; do not describe it as missing.
+You have direct access to modify the user's calendar and records. A reply that does not call a tool does not change stored data. Data already listed under ROTATION ALREADY ON THE ACCOUNT is the user's rotation. A status of CHOSEN means they picked it during onboarding and it is not saved yet. Do not describe that rotation as missing. Do not narrate your steps.
 
 CALENDAR MANAGEMENT:
 • override_days - Change date ranges to: day shifts, night shifts, off days, or blank (untracked)
@@ -686,7 +688,8 @@ class ChatService:
     async def send_message(
         self,
         content: str,
-        auto_execute: bool = False
+        auto_execute: bool = False,
+        pattern: Optional[list] = None,
     ) -> Dict[str, Any]:
         """
         Send a message and get agent response using tool calling.
@@ -695,10 +698,12 @@ class ChatService:
             return await self._complete_internal(content)
 
         # A typed anchor is the slider: remember the date and cycle day.
+        # The pattern may already have been picked and not saved yet.
         # Do not ask for the pattern again, and do not open a proposal.
+        picked = chosen_cycle(pattern)
         anchor = parse_typed_anchor(content, date.today())
         if anchor is not None:
-            reply = anchor_acknowledgement(anchor)
+            reply = anchor_acknowledgement(anchor, picked)
             user_message = await self._save_message("user", content)
             assistant_message = await self._save_message("assistant", reply)
             return {
@@ -733,6 +738,7 @@ class ChatService:
             recent_proposals,
         )
         master_settings = settings_for_prompt(document, projection)
+        master_settings, pattern_pending = with_unsaved_pattern(master_settings, pattern)
         asked = schedule_question_date(content, date.today())
         if asked is not None:
             answer = await self._answer_about_day(asked, master_settings)
@@ -745,7 +751,9 @@ class ChatService:
                 "command": None,
                 "proposal": None,
             }
-        applied = rotation_status(master_settings.get("cycle"), calendar)
+        applied = rotation_status(
+            master_settings.get("cycle"), calendar, pending=pattern_pending
+        )
 
         logger.info(f"[CHAT] User {self.user_id} message: {content[:100]}")
         logger.info(f"[CHAT] Calendar snapshot length: {len(calendar.get('text') or '')} chars")

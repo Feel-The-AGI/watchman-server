@@ -120,7 +120,7 @@ def describe_cycle(cycle: Optional[dict]) -> str:
     )
 
 
-def rotation_status(cycle: Optional[dict], calendar: Optional[dict]) -> str:
+def rotation_status(cycle: Optional[dict], calendar: Optional[dict], pending: bool = False) -> str:
     """Tell the model the schedule it can already see is applied."""
     summary = calendar or {}
     count = int(summary.get("count") or 0)
@@ -136,6 +136,13 @@ def rotation_status(cycle: Optional[dict], calendar: Optional[dict]) -> str:
     else:
         span = "No calendar days are stored in the recent window."
 
+    if cycle_text and pending:
+        return (
+            f"CHOSEN. {cycle_text} {span} "
+            "The user already picked this pattern during onboarding. It is not saved yet. "
+            "Do not say there is no cycle. Do not ask for the pattern again. "
+            "Do not narrate your steps."
+        )
     if cycle_text and count:
         return (
             f"APPLIED. {cycle_text} {span} "
@@ -500,9 +507,25 @@ _MONTH_NAME = (
 )
 _MONTH_DAY = rf"({_MONTH_NAME})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(\d{{4}}))?"
 _ANCHOR_IS = re.compile(
-    rf"(?:today\s+)?{_MONTH_DAY}\s+is\s+day\s+(\d+)\b",
+    rf"(?:today\s*,?\s+)?{_MONTH_DAY}\s*,?\s+is\s+day\s+(\d+)\b",
     re.IGNORECASE,
 )
+_STEP_NARRATION = re.compile(
+    r"(?is)(?:^|(?<=[.!?]\s)|(?<=\n))"
+    r"(?:"
+    r"i(?:'ll| will) set up the anchor\b.*?[.!?]"
+    r"|but i need the rotation pattern\b.*?[.!?]"
+    r"|i need the rotation pattern first\b.*?[.!?]"
+    r"|the calendar has no cycle stored\b.*?[.!?]"
+    r"|so i can(?:not|'t) set an anchor\b.*?[.!?]"
+    r"|could you tell me your full rotation pattern\??"
+    r")\s*"
+)
+_BLOCK_WORDS = {
+    "work_day": "day shifts",
+    "work_night": "night shifts",
+    "off": "days off",
+}
 _ANCHOR_WAS = re.compile(
     rf"\bday\s+(\d+)\s+was\s+(?:on\s+)?{_MONTH_DAY}\b",
     re.IGNORECASE,
@@ -517,6 +540,7 @@ def strip_model_reasoning(text: Optional[str]) -> str:
     while cleaned and previous != cleaned:
         previous = cleaned
         cleaned = _REASONING.sub("", cleaned)
+        cleaned = _STEP_NARRATION.sub("", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r" *\n *", "\n", cleaned)
     return cleaned.strip()
@@ -554,14 +578,61 @@ def parse_typed_anchor(text: str, today: date) -> Optional[dict]:
     return {"date": found.isoformat(), "cycle_day": cycle_day}
 
 
-def anchor_acknowledgement(anchor: dict) -> str:
+def chosen_cycle(pattern: Optional[list]) -> Optional[dict]:
+    """The rotation the user picked in onboarding, before it is saved."""
+    blocks = []
+    for block in pattern or []:
+        if not isinstance(block, dict):
+            continue
+        label = str(block.get("label") or block.get("type") or "").strip()
+        raw = block.get("duration")
+        if raw is None:
+            raw = block.get("days")
+        try:
+            duration = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if label not in _BLOCK_WORDS or duration < 1:
+            continue
+        blocks.append({"label": label, "duration": duration})
+    if not blocks:
+        return None
+    return {
+        "name": "Rotation",
+        "pattern": blocks,
+        "cycle_length": sum(block["duration"] for block in blocks),
+    }
+
+
+def pattern_phrase(cycle: Optional[dict]) -> str:
+    parts = []
+    for block in (cycle or {}).get("pattern") or []:
+        if not isinstance(block, dict):
+            continue
+        words = _BLOCK_WORDS.get(str(block.get("label") or ""), "days")
+        parts.append(f"{int(block.get('duration') or 0)} {words}")
+    return ", ".join(part for part in parts if not part.startswith("0 "))
+
+
+def with_unsaved_pattern(settings: Optional[dict], pattern: Optional[list]) -> tuple:
+    """Use a picked pattern when the account does not have a cycle yet."""
+    base = dict(settings or {})
+    picked = chosen_cycle(pattern)
+    if not picked or cycle_is_present(base.get("cycle")):
+        return base, False
+    base["cycle"] = picked
+    return base, True
+
+
+def anchor_acknowledgement(anchor: dict, cycle: Optional[dict] = None) -> str:
     """Same next step as confirming the slider: the anchor is set, then the rules."""
     day = date.fromisoformat(anchor["date"])
     label = f"{day.strftime('%b')} {day.day}, {day.year}"
-    return (
-        f"{label} is day {anchor['cycle_day']} of your cycle. "
-        "What rules should I always respect?"
-    )
+    text = f"{label} is day {anchor['cycle_day']} of your cycle"
+    phrase = pattern_phrase(cycle)
+    if phrase:
+        text += f": {phrase}"
+    return f"{text}. What rules should I always respect?"
 
 
 def unsolicited_blank_override(user_text: str, tool_name: str, payload: Optional[dict]) -> bool:

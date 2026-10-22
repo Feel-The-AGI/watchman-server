@@ -21,9 +21,16 @@ FREE_HISTORY_LIMIT = 50   # Max history messages to retrieve
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
+class PatternBlock(BaseModel):
+    label: str
+    duration: int
+
+
 class SendMessageRequest(BaseModel):
     content: str
     auto_execute: Literal[False] = False
+    # The onboarding preset, sent before the cycle row exists.
+    pattern: Optional[List[PatternBlock]] = None
 
 
 class MessageResponse(BaseModel):
@@ -92,9 +99,16 @@ async def send_message(
         chat_service = create_chat_service(db, user["id"])
 
         logger.info(f"[CHAT] Sending message to Claude for user {user['id']}")
+        picked = None
+        if request.pattern:
+            picked = [
+                {"label": block.label, "duration": block.duration}
+                for block in request.pattern
+            ]
         result = await chat_service.send_message(
             content=request.content,
-            auto_execute=request.auto_execute
+            auto_execute=request.auto_execute,
+            pattern=picked,
         )
 
         logger.info(f"[CHAT] Response received - is_command: {result.get('is_command')}")

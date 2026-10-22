@@ -118,9 +118,24 @@ async def test_a_model_reply_starting_the_user_says_never_reaches_the_user(monke
     assert "Try 14 on, 14 off." in parsed["response"]
 
 
+FIVE_FIVE_FIVE = [
+    {"label": "work_day", "duration": 5},
+    {"label": "work_night", "duration": 5},
+    {"label": "off", "duration": 5},
+]
+LIVE_ANCHOR = "Today, Oct 22 2026, is day 1 of the cycle."
+LIVE_WRONG_REPLY = (
+    "I'll set up the anchor so that today, 2026-10-22, is cycle day 1. "
+    "But I need the rotation pattern first: the calendar has no cycle stored yet, "
+    "so I can't set an anchor without knowing the shift blocks. "
+    "Could you tell me your full rotation pattern?"
+)
+
+
 @pytest.mark.parametrize("text, expected", [
     ("Today Oct 22 is day 1", {"date": "2026-10-22", "cycle_day": 1}),
     ("day 1 was Oct 20", {"date": "2026-10-20", "cycle_day": 1}),
+    (LIVE_ANCHOR, {"date": "2026-10-22", "cycle_day": 1}),
 ])
 def test_a_typed_anchor_matches_the_slider(text, expected):
     assert parse_typed_anchor(text, TODAY) == expected
@@ -153,6 +168,43 @@ async def test_a_typed_anchor_does_not_ask_for_the_pattern(monkeypatch, text, ex
     assert "pattern" not in result["response"].lower()
     assert "clear the days" not in result["response"].lower()
     service.command_executor.create_proposal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_picked_preset_is_known_when_the_anchor_is_typed(monkeypatch):
+    """Live signup: 5-5-5 was chosen, then the anchor was typed before it was saved."""
+    service = _service()
+    monkeypatch.setattr(chat_service, "date", _Today)
+    monkeypatch.setattr(chat_service, "projection_for_user", AsyncMock(return_value={}))
+    seen = {}
+
+    async def fake_complete(**kwargs):
+        seen["system"] = kwargs.get("system") or ""
+        return (LIVE_WRONG_REPLY, None)
+
+    monkeypatch.setattr(chat_service, "complete_chat", fake_complete)
+    result = await service.send_message(LIVE_ANCHOR, pattern=FIVE_FIVE_FIVE)
+    reply = result["response"]
+    lowered = reply.lower()
+    assert result["anchor"] == {"date": "2026-10-22", "cycle_day": 1}
+    assert "5 day shifts" in reply
+    assert "5 night shifts" in reply
+    assert "5 days off" in reply
+    assert "no cycle" not in lowered
+    assert "i'll set up" not in lowered
+    assert "rotation pattern" not in lowered
+    assert "shift blocks" not in lowered
+    assert seen == {}
+
+    follow = await service.send_message("What should I do next?", pattern=FIVE_FIVE_FIVE)
+    system = seen["system"]
+    assert "CHOSEN." in system
+    assert "5 work day" in system
+    assert "5 work night" in system
+    assert "5 off" in system
+    assert "No rotation is stored" not in system
+    assert "no cycle" not in follow["response"].lower()
+    assert "i'll set up the anchor" not in follow["response"].lower()
 
 
 def test_the_prompt_does_not_tell_the_model_to_blank_days_before_the_anchor():
