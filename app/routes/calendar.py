@@ -95,8 +95,8 @@ async def get_year(
 
     # Check if data is missing OR stale (generated with older engine version)
     needs_regeneration = _is_calendar_stale(days) or _year_is_incomplete(days, year)
-    # A failed delete leaves ids here after the row is gone. Finish that
-    # rebuild before serving the year, and leave the ids if it fails again.
+    # A failed delete or create leaves ids here. Finish that rebuild before
+    # serving the year, and leave the ids if it fails again.
     try:
         executor = create_command_executor(db, user["id"])
         if await executor.finish_pending_removals():

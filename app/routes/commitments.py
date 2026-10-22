@@ -3,14 +3,18 @@ Watchman Commitments Routes
 Endpoints for managing commitments (education, personal, etc.)
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import date
 from uuid import uuid4
 
 from app.database import Database
-from app.engines.command_executor import PENDING_COMMITMENT_REMOVAL, create_command_executor
+from app.engines.command_executor import (
+    PENDING_COMMITMENT_ADD,
+    PENDING_COMMITMENT_REMOVAL,
+    create_command_executor,
+)
 from app.engines.master_settings_service import MasterSettingsService
 from app.middleware.auth import get_current_user
 from loguru import logger
@@ -31,6 +35,7 @@ class CommitmentConstraintsSchema(BaseModel):
 
 
 class CreateCommitmentRequest(BaseModel):
+    id: Optional[str] = None
     name: str
     type: str  # education, personal, study, sleep
     priority: int = 1
@@ -119,12 +124,15 @@ async def get_commitment(
 @router.post("")
 async def create_commitment(
     data: CreateCommitmentRequest,
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """Create a new commitment"""
     db = Database(use_admin=True)
     
     logger.info(f"User {user['id']} creating commitment: {data.name} ({data.type})")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        idempotency_key = None
 
     commitment_data = {
         "user_id": user["id"],
@@ -148,20 +156,23 @@ async def create_commitment(
         "source": "manual"
     }
 
-    existing_rows = await db.get_commitments(user["id"])
-    matched = _matching_commitment(existing_rows, commitment_data)
+    existing_rows = await db.read_commitments(user["id"])
+    reused = _reusable_commitment(existing_rows, user["id"], data.id, idempotency_key)
+    if reused is None and data.id:
+        other = await db.get_commitment(data.id)
+        if other and other.get("user_id") != user["id"]:
+            raise HTTPException(status_code=403, detail="Not authorized")
     tier = user.get("tier", "free")
-    if tier == "free" and not matched and len(existing_rows) >= 2:
+    if tier == "free" and reused is None and len(existing_rows) >= 2:
         logger.warning(f"Free tier user {user['id']} blocked from creating additional commitment")
         raise HTTPException(
             status_code=403,
             detail="You've hit the 2 commitment limit on the free plan. Want to track more? Upgrade to Pro for unlimited commitments."
         )
-    if data.type == "education" and data.status == "active":
-        active_education = await db.get_active_commitments(user["id"])
+    if data.type == "education" and data.status == "active" and reused is None:
         education_count = sum(
-            1 for row in active_education
-            if row.get("type") == "education" and (not matched or row.get("id") != matched.get("id"))
+            1 for row in existing_rows
+            if row.get("type") == "education" and row.get("status") == "active"
         )
         max_concurrent = user.get("settings", {}).get("max_concurrent_commitments", 2)
         if education_count >= max_concurrent:
@@ -170,28 +181,26 @@ async def create_commitment(
                 detail=f"Maximum {max_concurrent} concurrent education commitments allowed. Current: {education_count}"
             )
 
-    # A retry of the same request reuses the row already inserted, then finishes
-    # the settings copy and the calendar rebuild.
-    if matched:
-        commitment_data["id"] = matched["id"]
-        commitment = await db.update_commitment(matched["id"], commitment_data) or matched
+    # POST never overwrites an existing row. The same request is reused only
+    # when the client repeats an id or an Idempotency-Key.
+    if reused is not None:
+        commitment = reused
     else:
-        commitment_data["id"] = str(uuid4())
+        commitment_data["id"] = data.id or str(uuid4())
+        if idempotency_key:
+            commitment_data["source_text"] = f"idempotency:{idempotency_key}"
         commitment = await db.create_commitment(commitment_data)
     if not commitment:
         raise HTTPException(status_code=500, detail="Commitment could not be saved")
-    try:
-        await _publish_commitment(db, user["id"], commitment)
-    except Exception as exc:
-        logger.error(f"[COMMITMENTS] Create was not fully saved for {commitment.get('id')}: {exc}")
-        raise HTTPException(status_code=500, detail="Commitment could not be saved") from exc
+    calendar_pending = not await _publish_commitment(db, user["id"], commitment)
 
     logger.info(f"Commitment created: {commitment.get('id')} for user {user['id']}")
 
     return {
         "success": True,
         "message": "Commitment created",
-        "data": commitment
+        "data": commitment,
+        "calendar_pending": calendar_pending,
     }
 
 
@@ -215,8 +224,11 @@ async def update_commitment(
     # Check concurrent limit if activating
     if data.status == "active" and existing.get("status") != "active":
         if existing.get("type") == "education":
-            active_education = await db.get_active_commitments(user["id"])
-            education_count = sum(1 for c in active_education if c.get("type") == "education")
+            stored = await db.read_commitments(user["id"])
+            education_count = sum(
+                1 for row in stored
+                if row.get("type") == "education" and row.get("status") == "active"
+            )
             
             settings = user.get("settings", {})
             max_concurrent = settings.get("max_concurrent_commitments", 2)
@@ -331,47 +343,66 @@ async def delete_commitment(
     }
 
 
-def _same_day(left, right) -> bool:
-    return str(left or "")[:10] == str(right or "")[:10]
-
-
-def _matching_commitment(rows: list, data: dict):
-    """The row a repeated create should finish, matching the chat add path."""
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        if (
-            row.get("name") == data.get("name")
-            and row.get("type") == data.get("type")
-            and _same_day(row.get("start_date"), data.get("start_date"))
-        ):
-            return row
+def _reusable_commitment(rows: list, user_id: str, supplied_id: Optional[str], idempotency_key: Optional[str]):
+    """An existing row this POST may finish. Never a name or date match."""
+    if idempotency_key:
+        marker = f"idempotency:{idempotency_key}"
+        for row in rows or []:
+            if isinstance(row, dict) and row.get("user_id") == user_id and row.get("source_text") == marker:
+                return row
+    if supplied_id:
+        for row in rows or []:
+            if isinstance(row, dict) and str(row.get("id") or "") == supplied_id and row.get("user_id") == user_id:
+                return row
     return None
 
 
-async def _publish_commitment(db: Database, user_id: str, saved: dict):
-    """Keep the settings copy and the calendar in step with this row."""
+async def _publish_commitment(db: Database, user_id: str, saved: dict) -> bool:
+    """Write the settings copy and rebuild. False leaves a pending add for GET /year."""
     service = MasterSettingsService(db)
-    current = await service.get(user_id)
-    settings = dict(current.get("settings") or {})
     saved_id = str(saved.get("id") or "")
-    items = []
-    replaced = False
-    for item in settings.get("commitments") or []:
-        if isinstance(item, dict) and str(item.get("id") or "") == saved_id:
+    try:
+        current = await service.get(user_id)
+        settings = dict(current.get("settings") or {})
+        items = []
+        replaced = False
+        for item in settings.get("commitments") or []:
+            if isinstance(item, dict) and str(item.get("id") or "") == saved_id:
+                items.append(saved)
+                replaced = True
+            else:
+                items.append(item)
+        if not replaced:
             items.append(saved)
-            replaced = True
-        else:
-            items.append(item)
-    if not replaced:
-        items.append(saved)
-    settings["commitments"] = items
-    await service.update(user_id, settings, current["version"])
+        settings["commitments"] = items
+        pending = [item for item in _text_ids(settings.get(PENDING_COMMITMENT_ADD)) if item != saved_id]
+        pending.append(saved_id)
+        settings[PENDING_COMMITMENT_ADD] = pending
+        await service.update(user_id, settings, current["version"])
+    except Exception as exc:
+        logger.error(f"[COMMITMENTS] Settings update failed for {saved_id}: {exc}")
+        return False
 
     executor = create_command_executor(db, user_id)
-    wrote = await executor._regenerate_calendar()
-    if not wrote:
-        await executor._project_saved_events()
+    try:
+        wrote = await executor._regenerate_calendar()
+        if not wrote:
+            await executor._project_saved_events()
+    except Exception as exc:
+        logger.error(f"[COMMITMENTS] Rebuild failed for {saved_id}: {exc}")
+        return False
+
+    try:
+        fresh = await service.get(user_id)
+        cleared = dict(fresh.get("settings") or {})
+        cleared[PENDING_COMMITMENT_ADD] = [
+            item for item in _text_ids(cleared.get(PENDING_COMMITMENT_ADD)) if item != saved_id
+        ]
+        await service.update(user_id, cleared, fresh["version"])
+    except Exception as exc:
+        logger.error(f"[COMMITMENTS] Could not clear pending add for {saved_id}: {exc}")
+        return False
+    return True
 
 
 def _listed(items, commitment_id: str) -> bool:

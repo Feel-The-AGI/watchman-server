@@ -36,6 +36,7 @@ from app.engines.proposal_effects import (
 # Command action types
 # A failed commitment delete records ids here until a calendar read finishes the rebuild.
 PENDING_COMMITMENT_REMOVAL = "commitments_pending_removal"
+PENDING_COMMITMENT_ADD = "commitments_pending_add"
 
 
 VALID_ACTIONS = {
@@ -954,30 +955,28 @@ class CommandExecutor:
         raise Exception("Failed to log command")
     
     async def finish_pending_removals(self) -> bool:
-        """Rebuild for commitment ids a failed delete left behind, then clear them.
+        """Rebuild for commitment ids a failed delete or create left behind.
 
-        After the table row is gone the user has no delete button to retry.
-        Opening the year is the next read, so it finishes that calendar write.
-        A failed rebuild leaves the ids in place.
+        Opening the year finishes that calendar write, then clears the ids.
+        A failed rebuild leaves them in place.
         """
         current = await self.settings_service.get(self.user_id)
         settings = current.get("settings") if isinstance(current.get("settings"), dict) else {}
-        pending = [
-            str(item) for item in (settings.get(PENDING_COMMITMENT_REMOVAL) or [])
-            if str(item).strip()
-        ]
-        if not pending:
+        pending_removal = _pending_ids(settings.get(PENDING_COMMITMENT_REMOVAL))
+        pending_add = _pending_ids(settings.get(PENDING_COMMITMENT_ADD))
+        if not pending_removal and not pending_add:
             return False
         wrote = await self._regenerate_calendar()
         if not wrote:
             await self._project_saved_events()
         fresh = await self.settings_service.get(self.user_id)
         updated = dict(fresh.get("settings") or {})
-        finished = set(pending)
-        updated[PENDING_COMMITMENT_REMOVAL] = [
-            item for item in (updated.get(PENDING_COMMITMENT_REMOVAL) or [])
-            if str(item) not in finished
-        ]
+        updated[PENDING_COMMITMENT_REMOVAL] = _without_ids(
+            updated.get(PENDING_COMMITMENT_REMOVAL), pending_removal
+        )
+        updated[PENDING_COMMITMENT_ADD] = _without_ids(
+            updated.get(PENDING_COMMITMENT_ADD), pending_add
+        )
         await self.settings_service.update(self.user_id, updated, fresh["version"])
         return True
 
@@ -988,8 +987,10 @@ class CommandExecutor:
         look like an empty list and wipe the calendar. A chip whose commitment
         is gone is dropped.
         """
-        commitments = await self.db.read_commitments(self.user_id)
+        table_rows = await self.db.read_commitments(self.user_id)
         leaves = await self.db.read_leave_blocks(self.user_id)
+        snapshot = await self.settings_service.get_snapshot(self.user_id)
+        commitments = _commitments_to_stamp(snapshot.get("commitments") or [], table_rows)
         dates = set(event_dates(commitments, leaves))
         by_date, chip_days = await self._days_with_commitment_chips(dates)
         dates.update(chip_days)
@@ -1224,6 +1225,15 @@ class CommandExecutor:
             rows.extend(batch or [])
             year += 1
         return rows
+
+
+def _pending_ids(items) -> list:
+    return [str(item) for item in (items or []) if str(item).strip()]
+
+
+def _without_ids(items, finished: list) -> list:
+    done = set(finished)
+    return [item for item in (items or []) if str(item) not in done]
 
 
 def _without_removed_commitments(state, commitments: list) -> dict:

@@ -173,6 +173,7 @@ class _ProjectDB:
                 "state_json": {
                     "commitments": [
                         {"commitment_id": "gone", "name": "Dentist appointment"},
+                        {"commitment_id": "doc-only", "name": "From settings"},
                     ],
                     "tags": [],
                     "is_leave": False,
@@ -198,10 +199,26 @@ class _ProjectDB:
         return days
 
 
+class _DocSettings:
+    async def get_snapshot(self, user_id):
+        return {
+            "commitments": [{
+                "id": "doc-only",
+                "user_id": user_id,
+                "name": "From settings",
+                "type": "personal",
+                "status": "active",
+                "start_date": "2026-10-28",
+                "end_date": "2026-10-28",
+            }],
+        }
+
+
 def _executor(database):
     executor = CommandExecutor.__new__(CommandExecutor)
     executor.db = database
     executor.user_id = "user-1"
+    executor.settings_service = _DocSettings()
     return executor
 
 
@@ -212,7 +229,9 @@ async def test_projecting_saved_events_drops_a_deleted_commitment():
     by_date = {day["date"]: day for day in database.upserts}
     october = [chip["name"] for chip in by_date["2026-10-27"]["state_json"]["commitments"]]
     assert october == ["Gym"]
-    assert by_date["2026-10-28"]["state_json"]["commitments"] == []
+    later = [chip["name"] for chip in by_date["2026-10-28"]["state_json"]["commitments"]]
+    assert "Dentist appointment" not in later
+    assert "From settings" in later
 
 
 @pytest.mark.asyncio
