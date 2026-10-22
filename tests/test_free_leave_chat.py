@@ -321,7 +321,10 @@ def test_review_refuses_a_third_commitment_for_free_and_lapsed_pro(monkeypatch, 
         json={"decision": "approve"},
     )
     assert response.status_code == 403
-    assert response.json()["detail"] == COMMITMENT_LIMIT_REPLY
+    assert response.json()["detail"] == {
+        "code": "commitment_limit",
+        "message": COMMITMENT_LIMIT_REPLY,
+    }
     assert rows[0]["status"] == "pending"
     assert rows[0]["reviewed_at"] is None
     db.create_commitment.assert_not_awaited()
@@ -358,5 +361,8 @@ async def test_lapsed_pro_form_is_capped_at_two_commitments(monkeypatch):
             },
         )
     assert exc.value.status_code == 403
-    assert "2 commitment" in exc.value.detail
+    assert exc.value.detail == {
+        "code": "commitment_limit",
+        "message": COMMITMENT_LIMIT_REPLY,
+    }
     assert store.created is False

@@ -11,7 +11,7 @@ from typing import Optional, List
 from datetime import date
 from uuid import UUID, uuid4
 
-from app.commitment_limit import free_commitment_limit_hit
+from app.commitment_limit import COMMITMENT_LIMIT_REPLY, free_commitment_limit_hit
 from app.database import Database
 from app.engines.command_executor import (
     PENDING_COMMITMENT_ADD,
@@ -180,7 +180,10 @@ async def create_commitment(
         logger.warning(f"Free tier user {user['id']} blocked from creating additional commitment")
         raise HTTPException(
             status_code=403,
-            detail="You've hit the 2 commitment limit on the free plan. Want to track more? Upgrade to Pro for unlimited commitments."
+            detail={
+                "code": "commitment_limit",
+                "message": COMMITMENT_LIMIT_REPLY,
+            },
         )
     if data.type == "education" and data.status == "active" and reused is None:
         education_count = sum(
