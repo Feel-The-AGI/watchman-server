@@ -284,17 +284,55 @@ def _describe_removal(kind: str, payload: dict) -> str:
 def _describe_override(payload: dict) -> str:
     start = _as_date(payload.get("start_date") or payload.get("date"))
     end = _as_date(payload.get("end_date")) or start
+    work = str(payload.get("work_type") or "").strip().lower()
+    if work in {"off", "rest"}:
+        return f"Mark {_full_span(start, end)} as Off"
     if start and end and start != end:
         span = f"{_format_day(start)} \u2013 {_format_day(end)}"
     elif start:
         span = _format_day(start)
     else:
         span = "those days"
-    kind = _SHIFT_NAMES.get(str(payload.get("work_type") or "").strip().lower(), "that shift")
+    kind = _SHIFT_NAMES.get(work, "that shift")
     text = f"Set {span} to {kind}"
     if _keeps_off_days(payload):
         text += ", keeping off days"
     return text
+
+
+def no_change_message(start: date, end: date, work_type: str) -> str:
+    """Honest review text when approving the command would not change a day."""
+    label = _ALREADY_LABEL.get(str(work_type or "").strip().lower(), "that shift")
+    if start == end:
+        return f"No change: {_format_full(start)} was already {label}"
+    return f"No change: {_format_full(start)} \u2013 {_format_full(end)} were already {label}"
+
+
+def _full_span(start: Optional[date], end: Optional[date]) -> str:
+    if start and end and start != end:
+        return f"{_format_full(start)} \u2013 {_format_full(end)}"
+    if start:
+        return _format_full(start)
+    return "those days"
+
+
+def _format_full(day: date) -> str:
+    return f"{_WEEKDAYS[day.weekday()]} {day.day} {_MONTHS[day.month - 1]} {day.year}"
+
+
+_ALREADY_LABEL = {
+    "off": "Off",
+    "rest": "Off",
+    "work_day": "Day",
+    "day": "Day",
+    "day_shift": "Day",
+    "work_night": "Night",
+    "night": "Night",
+    "night_shift": "Night",
+    "blank": "Blank",
+    "untracked": "Blank",
+    "unknown": "Blank",
+}
 
 
 def _describe_cycle(payload: dict) -> str:

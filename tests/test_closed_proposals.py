@@ -11,6 +11,7 @@ from app.engines.chat_context import (
     annotate_closed_proposals,
     closed_proposal_note,
     declined_again_reply,
+    proposal_is_expired,
     repeats_declined_proposal,
 )
 from app.engines.chat_service import SYSTEM_PROMPT, ChatService
@@ -94,6 +95,20 @@ def test_approved_and_expired_are_closed_and_pending_is_not():
     lapsed = {"status": "pending", "expires_at": (now - timedelta(minutes=1)).isoformat()}
     assert closed_proposal_note(lapsed, now).startswith("This proposal expired")
     assert annotate_closed_proposals(HISTORY, [still_open], now) == HISTORY
+    aged = {
+        "status": "pending",
+        "expires_at": None,
+        "created_at": (now - timedelta(days=8)).isoformat(),
+    }
+    assert proposal_is_expired(aged, now)
+    assert closed_proposal_note(aged, now).startswith("This proposal expired")
+    fresh = {
+        "status": "pending",
+        "expires_at": None,
+        "created_at": (now - timedelta(days=1)).isoformat(),
+    }
+    assert proposal_is_expired(fresh, now) is False
+    assert closed_proposal_note(fresh, now) is None
 
 
 @pytest.mark.asyncio
