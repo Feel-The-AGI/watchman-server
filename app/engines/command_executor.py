@@ -16,13 +16,7 @@ from app.commitment_limit import (
 from app.database import Database
 from app.middleware.auth import get_effective_tier
 from app.engines.master_settings_service import MasterSettingsService
-from app.planning_horizon import (
-    clip_range,
-    horizon_end,
-    horizon_violation,
-    payload_dates,
-    unlimited,
-)
+from app.planning_horizon import horizon_violation, payload_dates
 from app.engines.calendar_engine import (
     CALENDAR_ENGINE_VERSION,
     block_day_for,
@@ -1168,9 +1162,6 @@ class CommandExecutor:
         dates = set(event_dates(commitments, leaves))
         by_date, chip_days = await self._days_with_commitment_chips(dates)
         dates.update(chip_days)
-        if not unlimited(await self._effective_tier() or "pro"):
-            cap = horizon_end()
-            dates = {day for day in dates if day <= cap}
         if not dates:
             return
         updates = []
@@ -1247,17 +1238,9 @@ class CommandExecutor:
         Leave in the settings document and leave_blocks are both applied.
         Commitments are stamped back onto the days. A manual override, including
         a blank mark and a day before the anchor, keeps its work type.
-        Free plans stop on the rolling horizon. Days already stored after that
-        date are not read or written here, so they stay in place.
+        A rotation save rewrites the whole requested range, including days a
+        Free plan cannot see yet, so those stored days do not keep an old shift.
         """
-        tier = await self._effective_tier() or "pro"
-        clipped = clip_range(start_date, end_date, tier)
-        if clipped is None:
-            logger.info(
-                f"Skipped calendar rebuild past the free horizon for user {self.user_id}"
-            )
-            return True
-        start_date, end_date = clipped
         settings = await self.settings_service.get_snapshot(self.user_id)
         cycle = settings.get("cycle")
 
