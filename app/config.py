@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     # Shared secret for /api/cron/*. Required in every deployed environment.
     cron_secret: str = ""
 
+    # Trial. Off for accounts created at or after the cutoff. Earlier
+    # accounts keep the days they have left. Turning the switch off
+    # ends every trial immediately.
+    trial_enabled: bool = False
+    trial_signup_cutoff: str = "2026-10-22T00:00:00Z"
+
     # Application
     app_env: str = "development"
     debug: bool = False
