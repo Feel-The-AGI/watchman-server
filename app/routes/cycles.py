@@ -13,6 +13,7 @@ from app.middleware.auth import get_current_user
 from app.engines.calendar_engine import create_calendar_engine, generation_bounds
 from app.engines.command_executor import create_command_executor
 from app.engines.calendar_authority import engine_cycle, projection_for_user, remember_cycle
+from app.onboarding import finish_onboarding_for_saved_cycle
 from loguru import logger
 
 
@@ -156,6 +157,8 @@ async def create_cycle(
     except Exception as e:
         logger.error(f"Failed to auto-generate calendar: {e}")
         # Don't fail the cycle creation, just log the error
+
+    await finish_onboarding_for_saved_cycle(db, user["id"])
     
     return {
         "success": True,
@@ -225,6 +228,7 @@ async def update_cycle(
         raise HTTPException(status_code=404, detail="Cycle not found")
     
     await remember_cycle(db, user["id"], cycle)
+    await finish_onboarding_for_saved_cycle(db, user["id"])
     
     # AUTO-REGENERATE CALENDAR if pattern/anchor changed.
     # Regeneration reads Master Settings, not the relational row, so a different
