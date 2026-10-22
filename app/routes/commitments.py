@@ -11,6 +11,7 @@ from typing import Optional, List
 from datetime import date
 from uuid import UUID, uuid4
 
+from app.commitment_limit import free_commitment_limit_hit
 from app.database import Database
 from app.engines.command_executor import (
     PENDING_COMMITMENT_ADD,
@@ -169,7 +170,7 @@ async def create_commitment(
         if other and other.get("user_id") != user["id"]:
             raise HTTPException(status_code=403, detail="Not authorized")
     tier = user.get("tier", "free")
-    if tier == "free" and reused is None and len(existing_rows) >= 2:
+    if free_commitment_limit_hit(tier, existing_rows, reused):
         logger.warning(f"Free tier user {user['id']} blocked from creating additional commitment")
         raise HTTPException(
             status_code=403,

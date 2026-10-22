@@ -182,6 +182,8 @@ async def review_proposal(
         raise _review_failed(request.decision) from exc
     if not isinstance(outcome, dict) or outcome.get("success") is False:
         _restore_pending_proposal(db, proposal_id, user["id"])
+        if isinstance(outcome, dict) and outcome.get("code") == "commitment_limit":
+            raise HTTPException(status_code=403, detail=outcome.get("error"))
         if isinstance(outcome, dict) and "validation" in outcome:
             raise HTTPException(
                 status_code=422,

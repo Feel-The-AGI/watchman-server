@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.commitment_limit import COMMITMENT_LIMIT_REPLY
 from app.engines.chat_service import ChatService
+from app.engines.command_executor import CommandExecutor
 from app.engines import chat_service
 from app.leave_access import LEAVE_PRO_REPLY
 from app.prompts.registry import version_for
@@ -129,3 +131,54 @@ async def test_free_non_leave_chat_edits_still_proceed(monkeypatch, tool):
     assert result["proposal"]["id"] == "proposal-1"
     created.assert_awaited()
     executed.assert_not_awaited()
+
+
+def _limit_executor(rows, tier="free"):
+    executor = CommandExecutor.__new__(CommandExecutor)
+    executor.user_id = "user-1"
+    executor.effective_tier = tier
+    executor.db = SimpleNamespace(
+        get_user_by_id=AsyncMock(return_value={"id": "user-1", "tier": tier}),
+        read_commitments=AsyncMock(return_value=rows),
+        create_commitment=AsyncMock(),
+    )
+    return executor
+
+
+@pytest.mark.asyncio
+async def test_free_chat_cannot_add_a_third_commitment(monkeypatch):
+    service, created, executed = _service()
+    rows = [
+        {"id": "one", "user_id": "user-1", "name": "Gym", "type": "personal", "start_date": "2026-11-01"},
+        {"id": "two", "user_id": "user-1", "name": "Course", "type": "education", "start_date": "2026-11-02"},
+    ]
+    limiter = _limit_executor(rows)
+    service.command_executor.commitment_limit_message = limiter.commitment_limit_message
+    _install(monkeypatch, "", {
+        "name": "add_commitment",
+        "input": {"name": "Dentist", "type": "personal", "start_date": "2026-12-01"},
+    })
+
+    result = await service.send_message("Add another commitment", effective_tier="free")
+
+    assert result["response"] == COMMITMENT_LIMIT_REPLY
+    assert result["proposal"] is None
+    assert result["is_command"] is False
+    created.assert_not_awaited()
+    executed.assert_not_awaited()
+    limiter.db.create_commitment.assert_not_awaited()
+
+    blocked = await limiter.execute({
+        "action": "add_commitment",
+        "payload": {"name": "Dentist", "type": "personal", "start_date": "2026-12-01"},
+    })
+    assert blocked["success"] is False
+    assert blocked["code"] == "commitment_limit"
+    assert blocked["error"] == COMMITMENT_LIMIT_REPLY
+    limiter.db.create_commitment.assert_not_awaited()
+
+    assert await limiter.commitment_limit_message({
+        "id": "one", "name": "Renamed", "type": "work",
+    }) is None
+    paid = _limit_executor(rows, tier="pro")
+    assert await paid.commitment_limit_message({"name": "Dentist", "type": "personal"}) is None

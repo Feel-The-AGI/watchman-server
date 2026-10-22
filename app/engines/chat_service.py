@@ -723,6 +723,13 @@ class ChatService:
             )
             response_text = LEAVE_PRO_REPLY
             tool = None
+        limit_check = getattr(self.command_executor, "commitment_limit_message", None)
+        if tool and tool.get("name") == "add_commitment" and limit_check is not None:
+            limit_reply = await limit_check(tool.get("input") or {})
+            if limit_reply:
+                logger.info(f"[CHAT] Commitment limit blocked for free user {self.user_id}")
+                response_text = limit_reply
+                tool = None
         if tool and tool.get("name"):
             payload = tool.get("input") or {}
             command = card_command({
