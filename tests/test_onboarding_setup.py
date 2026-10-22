@@ -521,6 +521,61 @@ async def test_completing_onboarding_copies_rules_when_the_flag_is_already_true(
 
 
 @pytest.mark.asyncio
+async def test_copying_onboarding_rules_twice_adds_nothing_the_second_time(monkeypatch):
+    rule = {
+        "id": "rule-1",
+        "name": "No study on night shifts",
+        "is_active": True,
+        "rule": {
+            "type": "no_activity_on",
+            "activity": "study",
+            "work_types": ["work_night"],
+        },
+    }
+    document = {"settings": {"constraints": []}, "version": 3}
+    updates = []
+    completed = []
+
+    class DB:
+        def __init__(self, use_admin=False):
+            pass
+
+        async def get_active_constraints(self, user_id):
+            return [rule]
+
+        async def complete_onboarding(self, user_id):
+            completed.append(user_id)
+
+    class Settings:
+        def __init__(self, db):
+            pass
+
+        async def get(self, user_id):
+            return {
+                "user_id": user_id,
+                "settings": {"constraints": list(document["settings"]["constraints"])},
+                "version": document["version"],
+            }
+
+        async def update(self, user_id, settings, version):
+            updates.append(list(settings["constraints"]))
+            document["settings"] = {"constraints": list(settings["constraints"])}
+            document["version"] = version + 1
+
+    monkeypatch.setattr("app.routes.auth.Database", DB)
+    monkeypatch.setattr("app.engines.calendar_authority.MasterSettingsService", Settings)
+
+    first = await complete_onboarding({"id": "user-1", "onboarding_completed": False})
+    second = await complete_onboarding({"id": "user-1", "onboarding_completed": True})
+
+    assert first["message"] == "Onboarding completed."
+    assert second["message"] == "Onboarding already completed"
+    assert completed == ["user-1"]
+    assert updates == [[rule]]
+    assert document["settings"]["constraints"] == [rule]
+
+
+@pytest.mark.asyncio
 async def test_create_default_constraints_writes_nothing():
     database = Database.__new__(Database)
     assert await database.create_default_constraints("user-1") == []
