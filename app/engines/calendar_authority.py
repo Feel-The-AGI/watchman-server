@@ -302,10 +302,11 @@ async def projection_for_user(db, user_id: str) -> dict:
 async def remember_cycle(db, user_id: str, cycle_row: dict, service=None, *, replace: bool = False) -> bool:
     """Copy a cycle row into Master Settings.
 
-    replace=True is an explicit new rotation (POST /api/cycles): the settings
-    cycle is always overwritten. Otherwise may_replace_cycle decides. An empty
-    document is filled in, and a different cycle id is left alone so a stale
-    row cannot replace it. Calendar generate does not call this.
+    replace=True is an explicit choice of the active rotation (create, or
+    PATCH is_active=true): the settings cycle is always overwritten. Otherwise
+    may_replace_cycle decides. An empty document is filled in, and a different
+    cycle id is left alone so a stale row cannot replace it. Calendar generate
+    does not call this.
     """
     service = service or MasterSettingsService(db)
     incoming = cycle_from_row(cycle_row)
@@ -359,11 +360,14 @@ def _cycle_row_fields(cycle: dict) -> dict:
     return fields
 
 
-async def sync_cycle_row(db, user_id: str, cycle: Optional[dict]) -> None:
+async def sync_cycle_row(db, user_id: str, cycle: Optional[dict], *, require_id: bool = False) -> None:
     """Copy the settings cycle onto the matching active cycles row.
 
     Does nothing when there is no row. Never creates, deletes, or deactivates.
-    A failed update is logged and does not undo the settings write.
+    require_id is for master-settings saves: sync only when the cycle id matches
+    an active row. Chat, undo, redo, and PATCH /api/cycles keep the fallback
+    that updates the single active row when the cycle has no id. A failed
+    update is logged and does not undo the settings write.
     """
     if not isinstance(cycle, dict):
         return
@@ -372,17 +376,23 @@ async def sync_cycle_row(db, user_id: str, cycle: Optional[dict]) -> None:
         active = [row for row in rows if isinstance(row, dict) and row.get("is_active")]
         wanted = cycle.get("id")
         chosen = None
-        if wanted not in (None, ""):
+        if wanted in (None, ""):
+            if require_id or len(active) != 1:
+                if require_id:
+                    logger.warning(f"Skipped cycles row sync for {user_id}: settings cycle has no id")
+                return
+            chosen = active[0]
+        else:
             for row in active:
                 if str(row.get("id")) == str(wanted):
                     chosen = row
                     break
             if chosen is None:
+                if require_id:
+                    logger.warning(
+                        f"Skipped cycles row sync for {user_id}: no active row matches {wanted}"
+                    )
                 return
-        elif len(active) == 1:
-            chosen = active[0]
-        else:
-            return
         fields = _cycle_row_fields(cycle)
         if not fields:
             return

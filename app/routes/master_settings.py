@@ -10,12 +10,21 @@ from typing import Optional, Any, Dict
 
 from app.middleware.auth import get_current_user
 from app.database import Database
-from app.engines.calendar_authority import cycle_is_present
+from app.engines.calendar_authority import cycle_is_present, sync_cycle_row
 from app.engines.master_settings_service import create_master_settings_service
 from app.onboarding import finish_onboarding_for_saved_cycle
 
 
 router = APIRouter(prefix="/master-settings", tags=["master-settings"])
+
+
+def _saved_cycle(result, fallback) -> Optional[dict]:
+    """The cycle stored by a successful settings write."""
+    settings = result.get("settings") if isinstance(result, dict) else None
+    saved = settings.get("cycle") if isinstance(settings, dict) else None
+    if isinstance(saved, dict):
+        return saved
+    return fallback if isinstance(fallback, dict) else None
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -66,7 +75,9 @@ async def update_master_settings(
             request.settings,
             request.expected_version
         )
-        if cycle_is_present((request.settings or {}).get("cycle")):
+        saved = _saved_cycle(result, (request.settings or {}).get("cycle"))
+        if cycle_is_present(saved):
+            await sync_cycle_row(db, user["id"], saved, require_id=True)
             await finish_onboarding_for_saved_cycle(db, user["id"])
         return result
     except ValueError as e:
@@ -100,8 +111,11 @@ async def update_section(
     
     try:
         result = await service.update_section(user["id"], section, request.value)
-        if section == "cycle" and cycle_is_present(request.value if isinstance(request.value, dict) else None):
-            await finish_onboarding_for_saved_cycle(db, user["id"])
+        if section == "cycle":
+            saved = _saved_cycle(result, request.value if isinstance(request.value, dict) else None)
+            if cycle_is_present(saved):
+                await sync_cycle_row(db, user["id"], saved, require_id=True)
+                await finish_onboarding_for_saved_cycle(db, user["id"])
         return result
     except Exception as e:
         logger.exception(f"[SETTINGS] Failed to update {section} for {user['id']}: {e}")

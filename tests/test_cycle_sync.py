@@ -4,6 +4,7 @@ import copy
 from datetime import date
 
 import pytest
+from fastapi import HTTPException
 
 from app.engines.command_executor import CommandExecutor
 from app.routes.cycles import (
@@ -12,6 +13,12 @@ from app.routes.cycles import (
     UpdateCycleRequest,
     create_cycle,
     update_cycle,
+)
+from app.routes.master_settings import (
+    UpdateSectionRequest,
+    UpdateSettingsRequest,
+    update_master_settings,
+    update_section,
 )
 
 
@@ -418,3 +425,248 @@ async def test_creating_a_cycle_fills_empty_settings(monkeypatch):
     assert saved["pattern"][0]["label"] == "work_night"
     assert store.rebuilt[0]["cycle"]["id"] == "new-row"
     assert store.rebuilt[0]["start"] == date(2026, 1, 1)
+
+
+class _SettingsService:
+    def __init__(self, db):
+        self.db = db
+
+    async def update(self, user_id, settings, expected_version=None):
+        self.db.document = settings
+        return {"settings": settings, "version": 2}
+
+    async def update_section(self, user_id, section, value):
+        self.db.document = {**self.db.document, section: value}
+        return {"settings": self.db.document}
+
+
+def _settings_db(rows, document):
+    db = _Cycles(rows)
+    db.document = document
+    return db
+
+
+@pytest.mark.asyncio
+async def test_a_master_settings_cycle_save_updates_the_row(monkeypatch):
+    row = _row(ANCHOR)
+    db = _settings_db([row], {"cycle": _cycle(ANCHOR), "work": {"shift_hours": 12}})
+    monkeypatch.setattr("app.routes.master_settings.Database", lambda **kwargs: db)
+    monkeypatch.setattr(
+        "app.routes.master_settings.create_master_settings_service",
+        lambda _db: _SettingsService(db),
+    )
+    saved_cycle = _cycle(SHIFTED)
+    await update_section("cycle", UpdateSectionRequest(value=saved_cycle), {"id": "user-1"})
+    assert db.rows[0]["anchor_date"] == SHIFTED
+    assert db.rows[0]["id"] == "cycle-1"
+    assert db.rows[0]["is_active"] is True
+
+    db.rows[0]["anchor_date"] = ANCHOR
+    await update_master_settings(
+        UpdateSettingsRequest(settings={"cycle": saved_cycle, "work": {"shift_hours": 10}}),
+        {"id": "user-1"},
+    )
+    assert db.rows[0]["anchor_date"] == SHIFTED
+
+
+@pytest.mark.asyncio
+async def test_a_master_settings_save_without_a_cycle_leaves_the_row(monkeypatch):
+    db = _settings_db([_row(ANCHOR)], {"cycle": _cycle(ANCHOR), "work": {"shift_hours": 12}})
+    monkeypatch.setattr("app.routes.master_settings.Database", lambda **kwargs: db)
+    monkeypatch.setattr(
+        "app.routes.master_settings.create_master_settings_service",
+        lambda _db: _SettingsService(db),
+    )
+    await update_section("work", UpdateSectionRequest(value={"shift_hours": 8}), {"id": "user-1"})
+    assert db.rows[0]["anchor_date"] == ANCHOR
+    assert db.updated == []
+
+    await update_master_settings(
+        UpdateSettingsRequest(settings={"work": {"shift_hours": 6}}),
+        {"id": "user-1"},
+    )
+    assert db.rows[0]["anchor_date"] == ANCHOR
+    assert db.updated == []
+
+
+@pytest.mark.asyncio
+async def test_activating_a_cycle_replaces_a_different_settings_cycle(monkeypatch):
+    chosen = {
+        "id": "chosen-row",
+        "user_id": "user-1",
+        "name": "Chosen",
+        "pattern": [
+            {"label": "work_night", "duration": 4},
+            {"label": "off", "duration": 3},
+        ],
+        "cycle_length": 7,
+        "anchor_date": "2026-11-02",
+        "anchor_cycle_day": 1,
+        "is_active": False,
+    }
+    old_settings = {
+        "id": "old-cycle",
+        "name": "Old",
+        "pattern": [{"label": "off", "duration": 2}],
+        "anchor_date": "2020-01-01",
+        "anchor_cycle_day": 1,
+        "total_days": 2,
+    }
+    store = _CreateStore(old_settings, [_old_row(), chosen])
+    db = _CreateDB(store)
+    monkeypatch.setattr("app.routes.cycles.Database", lambda **kwargs: db)
+    monkeypatch.setattr("app.engines.calendar_authority.MasterSettingsService", _CreateSettings)
+    monkeypatch.setattr("app.routes.cycles.create_command_executor", _executor_factory)
+
+    result = await update_cycle(
+        "chosen-row",
+        UpdateCycleRequest(is_active=True, name="Chosen now"),
+        {"id": "user-1"},
+    )
+
+    assert result["success"] is True
+    saved = store.settings["cycle"]
+    assert saved["id"] == "chosen-row"
+    assert saved["name"] == "Chosen now"
+    assert saved["anchor_date"] == "2026-11-02"
+    assert saved["anchor_cycle_day"] == 1
+    assert saved["total_days"] == 7
+    assert saved["pattern"][0]["label"] == "work_night"
+    assert store.rows[0]["id"] == "old-cycle"
+    assert store.rows[0]["is_active"] is False
+    assert store.rows[1]["is_active"] is True
+    assert store.rebuilt[0]["cycle"]["id"] == "chosen-row"
+    assert store.rebuilt[0]["cycle"]["anchor_date"] == "2026-11-02"
+    assert store.rebuilt[0]["start"] == date(2026, 1, 1)
+
+
+DEFAULT_CYCLE = {
+    "name": "Default",
+    "pattern": [
+        {"label": "work_day", "duration": 5},
+        {"label": "work_night", "duration": 5},
+        {"label": "off", "duration": 10},
+    ],
+}
+
+
+def _fortnight_row():
+    return {
+        "id": "cycle-1",
+        "user_id": "user-1",
+        "name": "14-14",
+        "pattern": [
+            {"label": "work_day", "duration": 14},
+            {"label": "off", "duration": 14},
+        ],
+        "cycle_length": 28,
+        "anchor_date": ANCHOR,
+        "anchor_cycle_day": 1,
+        "is_active": True,
+    }
+
+
+def _wire_settings(monkeypatch, db):
+    monkeypatch.setattr("app.routes.master_settings.Database", lambda **kwargs: db)
+    monkeypatch.setattr(
+        "app.routes.master_settings.create_master_settings_service",
+        lambda _db: _SettingsService(db),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_no_id_settings_cycle_does_not_overwrite_the_row(monkeypatch):
+    row = _fortnight_row()
+    before = copy.deepcopy(row)
+    db = _settings_db([row], {"cycle": dict(DEFAULT_CYCLE), "work": {"shift_hours": 12}})
+    _wire_settings(monkeypatch, db)
+
+    await update_master_settings(
+        UpdateSettingsRequest(settings={"cycle": DEFAULT_CYCLE, "work": {"shift_hours": 8}}),
+        {"id": "user-1"},
+    )
+    await update_section("cycle", UpdateSectionRequest(value=dict(DEFAULT_CYCLE)), {"id": "user-1"})
+
+    assert db.rows[0]["pattern"] == before["pattern"]
+    assert db.rows[0]["cycle_length"] == before["cycle_length"]
+    assert db.rows[0]["anchor_date"] == before["anchor_date"]
+    assert db.rows[0]["name"] == before["name"]
+    assert db.updated == []
+
+
+def _wire_cycle_patch(monkeypatch, settings, db):
+    monkeypatch.setattr("app.routes.cycles.Database", lambda **kwargs: db)
+    monkeypatch.setattr("app.routes.cycles.MasterSettingsService", lambda _db: settings)
+
+
+@pytest.mark.asyncio
+async def test_deactivating_a_cycle_leaves_the_settings_cycle_alone(monkeypatch):
+    settings = _Settings(_cycle(SHIFTED))
+    row = _fortnight_row()
+    before_row = copy.deepcopy(row)
+    db = _Cycles([row])
+    _wire_cycle_patch(monkeypatch, settings, db)
+    before = copy.deepcopy(settings.document["cycle"])
+
+    result = await update_cycle("cycle-1", UpdateCycleRequest(is_active=False), {"id": "user-1"})
+
+    assert result["success"] is True
+    assert settings.document["cycle"] == before
+    assert db.rows[0]["is_active"] is False
+    assert db.rows[0]["pattern"] == before_row["pattern"]
+    assert db.rows[0]["cycle_length"] == before_row["cycle_length"]
+    assert db.rows[0]["anchor_date"] == before_row["anchor_date"]
+
+
+@pytest.mark.asyncio
+async def test_a_patch_without_is_active_does_not_replace_the_settings_cycle(monkeypatch):
+    settings = _Settings(_cycle(SHIFTED))
+    other = _fortnight_row()
+    other["id"] = "other"
+    before_other = copy.deepcopy(other)
+    db = _Cycles([other])
+    _wire_cycle_patch(monkeypatch, settings, db)
+    before = copy.deepcopy(settings.document["cycle"])
+
+    await update_cycle("other", UpdateCycleRequest(name="Renamed"), {"id": "user-1"})
+
+    assert settings.document["cycle"] == before
+    assert db.rows[0]["name"] == "Renamed"
+    assert db.rows[0]["pattern"] == before_other["pattern"]
+    assert db.rows[0]["cycle_length"] == before_other["cycle_length"]
+    assert db.rows[0]["anchor_date"] == before_other["anchor_date"]
+
+    same = _Settings(_cycle(SHIFTED))
+    stale = _fortnight_row()
+    same_db = _Cycles([stale])
+    _wire_cycle_patch(monkeypatch, same, same_db)
+    await update_cycle("cycle-1", UpdateCycleRequest(name="Days"), {"id": "user-1"})
+
+    assert same.document["cycle"]["id"] == "cycle-1"
+    assert same.document["cycle"]["name"] == "Days"
+    assert same.document["cycle"]["anchor_date"] == SHIFTED
+    assert same.document["cycle"]["pattern"] == PATTERN
+    assert same.document["cycle"]["total_days"] == 15
+    assert same_db.rows[0]["anchor_date"] == SHIFTED
+
+
+@pytest.mark.asyncio
+async def test_patching_another_users_cycle_changes_nothing(monkeypatch):
+    settings = _Settings(_cycle(SHIFTED))
+    row = _fortnight_row()
+    db = _Cycles([row])
+    _wire_cycle_patch(monkeypatch, settings, db)
+    before_cycle = copy.deepcopy(settings.document["cycle"])
+    before_row = copy.deepcopy(row)
+
+    with pytest.raises(HTTPException) as exc:
+        await update_cycle(
+            "foreign-row",
+            UpdateCycleRequest(name="Nope", is_active=True),
+            {"id": "user-1"},
+        )
+
+    assert exc.value.status_code == 404
+    assert settings.document["cycle"] == before_cycle
+    assert db.rows[0] == before_row
+    assert db.updated == []
