@@ -15,6 +15,7 @@ from app.engines.command_executor import create_command_executor
 from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_authority import (
     engine_cycle,
+    pattern_length,
     projection_for_user,
     remember_cycle,
     sync_cycle_row,
@@ -42,6 +43,10 @@ def _overlay_cycle_patch(current_cycle, update_data: dict, cycle_id: str) -> dic
         merged["pattern"] = update_data["pattern"]
     if "cycle_length" in update_data:
         merged["total_days"] = update_data["cycle_length"]
+    elif "pattern" in update_data:
+        derived = pattern_length(update_data["pattern"])
+        if derived is not None:
+            merged["total_days"] = derived
     if "anchor_date" in update_data:
         merged["anchor_date"] = update_data["anchor_date"]
     if "anchor_cycle_day" in update_data:

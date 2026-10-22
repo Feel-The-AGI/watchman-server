@@ -11,6 +11,7 @@ from app.routes.cycles import (
     CreateCycleRequest,
     CycleBlockSchema,
     UpdateCycleRequest,
+    _overlay_cycle_patch,
     create_cycle,
     update_cycle,
 )
@@ -670,3 +671,89 @@ async def test_patching_another_users_cycle_changes_nothing(monkeypatch):
     assert settings.document["cycle"] == before_cycle
     assert db.rows[0] == before_row
     assert db.updated == []
+
+
+SHORT = [
+    {"label": "work_day", "duration": 5},
+    {"label": "work_night", "duration": 5},
+    {"label": "off", "duration": 10},
+]
+
+
+def _short_cycle():
+    return {
+        "id": "cycle-1",
+        "name": "5-5-10",
+        "pattern": [dict(block) for block in SHORT],
+        "anchor_date": ANCHOR,
+        "anchor_cycle_day": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_settings_pattern_without_a_length_sets_the_row_length(monkeypatch):
+    row = _fortnight_row()
+    db = _settings_db([row], {"cycle": _cycle(), "work": {}})
+    _wire_settings(monkeypatch, db)
+    saved = _short_cycle()
+
+    await update_section("cycle", UpdateSectionRequest(value=saved), {"id": "user-1"})
+
+    assert db.rows[0]["pattern"] == SHORT
+    assert db.rows[0]["cycle_length"] == 20
+    assert db.rows[0]["anchor_date"] == ANCHOR
+
+    await update_section(
+        "cycle",
+        UpdateSectionRequest(value={**saved, "total_days": 99}),
+        {"id": "user-1"},
+    )
+    assert db.rows[0]["pattern"] == SHORT
+    assert db.rows[0]["cycle_length"] == 99
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_pattern_patch_sets_the_length_from_the_blocks(monkeypatch):
+    old = {
+        "id": "cycle-1",
+        "name": "14-14",
+        "pattern": _fortnight_row()["pattern"],
+        "anchor_date": ANCHOR,
+        "anchor_cycle_day": 1,
+        "total_days": 28,
+    }
+    settings = _Settings(old)
+    db = _Cycles([_fortnight_row()])
+    _wire_cycle_patch(monkeypatch, settings, db)
+
+    async def projection(db, user_id):
+        return {"cycle": settings.document["cycle"], "leave_blocks": [], "constraints": []}
+
+    class _Rebuild:
+        async def rebuild_calendar(self, start, end):
+            return True
+
+    monkeypatch.setattr("app.routes.cycles.projection_for_user", projection)
+    monkeypatch.setattr("app.routes.cycles.create_command_executor", lambda *args: _Rebuild())
+
+    await update_cycle(
+        "cycle-1",
+        UpdateCycleRequest(pattern=[CycleBlockSchema(**block) for block in SHORT]),
+        {"id": "user-1"},
+    )
+
+    assert db.rows[0]["pattern"] == SHORT
+    assert db.rows[0]["cycle_length"] == 20
+    assert db.rows[0]["anchor_date"] == ANCHOR
+    assert settings.document["cycle"]["pattern"] == SHORT
+    assert settings.document["cycle"]["total_days"] == 20
+
+    derived = _overlay_cycle_patch(old, {"pattern": [dict(block) for block in SHORT]}, "cycle-1")
+    assert derived["total_days"] == 20
+    assert derived["anchor_date"] == ANCHOR
+    explicit = _overlay_cycle_patch(
+        old,
+        {"pattern": [dict(block) for block in SHORT], "cycle_length": 99},
+        "cycle-1",
+    )
+    assert explicit["total_days"] == 99
