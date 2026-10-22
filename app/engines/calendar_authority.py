@@ -302,10 +302,11 @@ async def projection_for_user(db, user_id: str) -> dict:
 async def remember_cycle(db, user_id: str, cycle_row: dict, service=None, *, replace: bool = False) -> bool:
     """Copy a cycle row into Master Settings.
 
-    replace=True is an explicit new rotation (POST /api/cycles): the settings
-    cycle is always overwritten. Otherwise may_replace_cycle decides. An empty
-    document is filled in, and a different cycle id is left alone so a stale
-    row cannot replace it. Calendar generate does not call this.
+    replace=True is an explicit choice of the active rotation (create, or
+    PATCH is_active=true): the settings cycle is always overwritten. Otherwise
+    may_replace_cycle decides. An empty document is filled in, and a different
+    cycle id is left alone so a stale row cannot replace it. Calendar generate
+    does not call this.
     """
     service = service or MasterSettingsService(db)
     incoming = cycle_from_row(cycle_row)

@@ -258,19 +258,24 @@ async def update_cycle(
     if not cycle:
         raise HTTPException(status_code=404, detail="Cycle not found")
 
-    # Start from the settings copy and lay only the fields this request sent
-    # on top. Copying the table row would put a stale anchor back. A settings
-    # failure leaves the row update in place.
-    try:
-        service = MasterSettingsService(db)
-        current = await service.get(user["id"])
-        current_cycle = (current.get("settings") or {}).get("cycle") if isinstance(current, dict) else None
-        if _settings_cycle_follows(current_cycle, cycle_id):
-            merged = _overlay_cycle_patch(current_cycle, update_data, cycle_id)
-            await service.update_section(user["id"], "cycle", merged)
-            await sync_cycle_row(db, user["id"], merged)
-    except Exception as exc:
-        logger.warning(f"Could not mirror cycle {cycle_id} into settings for {user['id']}: {exc}")
+    if update_data.get("is_active") is True:
+        # This row is now the active rotation, so it replaces the settings
+        # cycle. Other active rows were already deactivated above.
+        await remember_cycle(db, user["id"], {**cycle, **update_data}, replace=True)
+    else:
+        # Start from the settings copy and lay only the fields this request sent
+        # on top. Copying the table row would put a stale anchor back. A settings
+        # failure leaves the row update in place.
+        try:
+            service = MasterSettingsService(db)
+            current = await service.get(user["id"])
+            current_cycle = (current.get("settings") or {}).get("cycle") if isinstance(current, dict) else None
+            if _settings_cycle_follows(current_cycle, cycle_id):
+                merged = _overlay_cycle_patch(current_cycle, update_data, cycle_id)
+                await service.update_section(user["id"], "cycle", merged)
+                await sync_cycle_row(db, user["id"], merged)
+        except Exception as exc:
+            logger.warning(f"Could not mirror cycle {cycle_id} into settings for {user['id']}: {exc}")
     await finish_onboarding_for_saved_cycle(db, user["id"])
     
     # AUTO-REGENERATE CALENDAR if pattern/anchor changed.

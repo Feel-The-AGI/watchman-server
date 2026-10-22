@@ -13,6 +13,12 @@ from app.routes.cycles import (
     create_cycle,
     update_cycle,
 )
+from app.routes.master_settings import (
+    UpdateSectionRequest,
+    UpdateSettingsRequest,
+    update_master_settings,
+    update_section,
+)
 
 
 ANCHOR = "2026-10-22"
@@ -417,4 +423,117 @@ async def test_creating_a_cycle_fills_empty_settings(monkeypatch):
     assert saved["anchor_date"] == "2026-11-02"
     assert saved["pattern"][0]["label"] == "work_night"
     assert store.rebuilt[0]["cycle"]["id"] == "new-row"
+    assert store.rebuilt[0]["start"] == date(2026, 1, 1)
+
+
+class _SettingsService:
+    def __init__(self, db):
+        self.db = db
+
+    async def update(self, user_id, settings, expected_version=None):
+        self.db.document = settings
+        return {"settings": settings, "version": 2}
+
+    async def update_section(self, user_id, section, value):
+        self.db.document = {**self.db.document, section: value}
+        return {"settings": self.db.document}
+
+
+def _settings_db(rows, document):
+    db = _Cycles(rows)
+    db.document = document
+    return db
+
+
+@pytest.mark.asyncio
+async def test_a_master_settings_cycle_save_updates_the_row(monkeypatch):
+    row = _row(ANCHOR)
+    db = _settings_db([row], {"cycle": _cycle(ANCHOR), "work": {"shift_hours": 12}})
+    monkeypatch.setattr("app.routes.master_settings.Database", lambda **kwargs: db)
+    monkeypatch.setattr(
+        "app.routes.master_settings.create_master_settings_service",
+        lambda _db: _SettingsService(db),
+    )
+    saved_cycle = _cycle(SHIFTED)
+    await update_section("cycle", UpdateSectionRequest(value=saved_cycle), {"id": "user-1"})
+    assert db.rows[0]["anchor_date"] == SHIFTED
+    assert db.rows[0]["id"] == "cycle-1"
+    assert db.rows[0]["is_active"] is True
+
+    db.rows[0]["anchor_date"] = ANCHOR
+    await update_master_settings(
+        UpdateSettingsRequest(settings={"cycle": saved_cycle, "work": {"shift_hours": 10}}),
+        {"id": "user-1"},
+    )
+    assert db.rows[0]["anchor_date"] == SHIFTED
+
+
+@pytest.mark.asyncio
+async def test_a_master_settings_save_without_a_cycle_leaves_the_row(monkeypatch):
+    db = _settings_db([_row(ANCHOR)], {"cycle": _cycle(ANCHOR), "work": {"shift_hours": 12}})
+    monkeypatch.setattr("app.routes.master_settings.Database", lambda **kwargs: db)
+    monkeypatch.setattr(
+        "app.routes.master_settings.create_master_settings_service",
+        lambda _db: _SettingsService(db),
+    )
+    await update_section("work", UpdateSectionRequest(value={"shift_hours": 8}), {"id": "user-1"})
+    assert db.rows[0]["anchor_date"] == ANCHOR
+    assert db.updated == []
+
+    await update_master_settings(
+        UpdateSettingsRequest(settings={"work": {"shift_hours": 6}}),
+        {"id": "user-1"},
+    )
+    assert db.rows[0]["anchor_date"] == ANCHOR
+    assert db.updated == []
+
+
+@pytest.mark.asyncio
+async def test_activating_a_cycle_replaces_a_different_settings_cycle(monkeypatch):
+    chosen = {
+        "id": "chosen-row",
+        "user_id": "user-1",
+        "name": "Chosen",
+        "pattern": [
+            {"label": "work_night", "duration": 4},
+            {"label": "off", "duration": 3},
+        ],
+        "cycle_length": 7,
+        "anchor_date": "2026-11-02",
+        "anchor_cycle_day": 1,
+        "is_active": False,
+    }
+    old_settings = {
+        "id": "old-cycle",
+        "name": "Old",
+        "pattern": [{"label": "off", "duration": 2}],
+        "anchor_date": "2020-01-01",
+        "anchor_cycle_day": 1,
+        "total_days": 2,
+    }
+    store = _CreateStore(old_settings, [_old_row(), chosen])
+    db = _CreateDB(store)
+    monkeypatch.setattr("app.routes.cycles.Database", lambda **kwargs: db)
+    monkeypatch.setattr("app.engines.calendar_authority.MasterSettingsService", _CreateSettings)
+    monkeypatch.setattr("app.routes.cycles.create_command_executor", _executor_factory)
+
+    result = await update_cycle(
+        "chosen-row",
+        UpdateCycleRequest(is_active=True, name="Chosen now"),
+        {"id": "user-1"},
+    )
+
+    assert result["success"] is True
+    saved = store.settings["cycle"]
+    assert saved["id"] == "chosen-row"
+    assert saved["name"] == "Chosen now"
+    assert saved["anchor_date"] == "2026-11-02"
+    assert saved["anchor_cycle_day"] == 1
+    assert saved["total_days"] == 7
+    assert saved["pattern"][0]["label"] == "work_night"
+    assert store.rows[0]["id"] == "old-cycle"
+    assert store.rows[0]["is_active"] is False
+    assert store.rows[1]["is_active"] is True
+    assert store.rebuilt[0]["cycle"]["id"] == "chosen-row"
+    assert store.rebuilt[0]["cycle"]["anchor_date"] == "2026-11-02"
     assert store.rebuilt[0]["start"] == date(2026, 1, 1)
