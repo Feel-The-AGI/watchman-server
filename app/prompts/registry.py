@@ -62,7 +62,7 @@ def _version(
     )
 
 
-# chat-v1 stays the stable default. chat-v2 is a candidate and is not stable.
+# chat-v2 is the stable default. Roll back with CHAT_PROMPT_VERSION=chat-v1.
 _VERSIONS = (
     _version(
         "chat-v1",
@@ -79,7 +79,7 @@ _VERSIONS = (
         2,
         "State that a positive shift_by_days moves each shift later.",
         "2026-10-22",
-        False,
+        True,
         "chat/v2.md",
         tool_path="chat/v2_update_cycle.txt",
         shift_path="chat/v2_shift_by_days.txt",

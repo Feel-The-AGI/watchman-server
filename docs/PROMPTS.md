@@ -2,11 +2,11 @@
 
 The chat agent and the onboarding parser each have a versioned system prompt. The live text is a file in `app/prompts/`. Code asks the registry which version to send.
 
-`chat-v1` and `onboarding-v1` are stable. `chat-v2` is registered and is not stable, so an empty version env still uses `chat-v1`.
+`chat-v2` is now the stable default for chat. An empty `CHAT_PROMPT_VERSION` uses it. Rollback is `CHAT_PROMPT_VERSION=chat-v1`. `onboarding-v1` is unchanged.
 
 | Family | Active env | Allowlist env | Stable default |
 | --- | --- | --- | --- |
-| Chat | `CHAT_PROMPT_VERSION` | `CHAT_PROMPT_ALLOWLIST` | `chat-v1` |
+| Chat | `CHAT_PROMPT_VERSION` | `CHAT_PROMPT_ALLOWLIST` | `chat-v2` |
 | Onboarding parse | `ONBOARDING_PROMPT_VERSION` | `ONBOARDING_PROMPT_ALLOWLIST` | `onboarding-v1` |
 
 ## Add a version
@@ -39,7 +39,7 @@ The env value wins over the stable default. Changing the env does not need a cod
 
 ## Roll back
 
-Set `CHAT_PROMPT_VERSION=chat-v1` and save. The next process uses v1. Set the value back to empty to follow the stable default again.
+`chat-v2` is the default. Set `CHAT_PROMPT_VERSION=chat-v1` and save. The next process uses v1. Set the value back to empty to follow `chat-v2` again.
 
 An unknown value, such as a typo, logs a warning and uses the latest stable version.
 

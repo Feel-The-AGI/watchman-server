@@ -52,10 +52,10 @@ def test_v1_matches_the_shipped_prompt_byte_for_byte():
 def test_config_defaults_to_the_latest_stable_version(monkeypatch):
     assert Settings.model_fields["chat_prompt_version"].default == ""
     assert Settings.model_fields["onboarding_prompt_version"].default == ""
-    assert latest_stable("chat").id == "chat-v1"
-    assert load_version("chat-v2").stable is False
+    assert latest_stable("chat").id == "chat-v2"
+    assert load_version("chat-v2").stable is True
     monkeypatch.setattr("app.prompts.registry.get_settings", lambda: _settings())
-    assert version_for("chat").id == "chat-v1"
+    assert version_for("chat").id == "chat-v2"
     assert version_for("onboarding").id == "onboarding-v1"
 
 
@@ -67,6 +67,7 @@ def test_env_switch_selects_the_requested_version(monkeypatch):
     selected = version_for("chat")
     assert selected.id == "chat-v1"
     assert selected.text == load_version("chat-v1").text
+    assert selected.text.encode() == (ROOT / "app/prompts/chat/v1.md").read_bytes()
     assert "stay filled from the pattern" in selected.text
     assert _tools_for(selected) is WATCHMAN_TOOLS
 
@@ -140,7 +141,7 @@ def test_unknown_version_falls_back_and_warns(monkeypatch):
         selected = version_for("chat")
     finally:
         logger.remove(handle)
-    assert selected.id == "chat-v1"
+    assert selected.id == "chat-v2"
     assert any("chat-v9" in record["message"] for record in records)
 
 
@@ -150,8 +151,8 @@ def test_allowlist_selects_a_version_for_one_account(monkeypatch):
         lambda: _settings(chat_prompt_allowlist="user-test:chat-v1, user-other:chat-v9"),
     )
     assert version_for("chat", "user-test").id == "chat-v1"
-    assert version_for("chat", "user-live").id == "chat-v1"
-    assert version_for("chat", "user-other").id == "chat-v1"
+    assert version_for("chat", "user-live").id == "chat-v2"
+    assert version_for("chat", "user-other").id == "chat-v2"
 
 
 class _Table:
@@ -271,12 +272,12 @@ async def test_chat_response_names_the_prompt_version(monkeypatch):
 
     result = await service.send_message("Add leave from 1 Nov", auto_execute=False)
 
-    assert result["prompt_version"] == "chat-v1"
-    assert result["proposal"]["prompt_version"] == "chat-v1"
-    assert result["proposal"]["validation"]["prompt_version"] == "chat-v1"
+    assert result["prompt_version"] == "chat-v2"
+    assert result["proposal"]["prompt_version"] == "chat-v2"
+    assert result["proposal"]["validation"]["prompt_version"] == "chat-v2"
     assistant = next(row for name, row in client.saved if name == "chat_messages" and row["role"] == "assistant")
-    assert assistant["metadata"]["prompt_version"] == "chat-v1"
-    assert assistant["prompt_version"] == "chat-v1"
+    assert assistant["metadata"]["prompt_version"] == "chat-v2"
+    assert assistant["prompt_version"] == "chat-v2"
     sent = chat_service.complete_chat.await_args.kwargs
     assert sent["system"].startswith("You are Watchman")
-    assert sent["tools"] is WATCHMAN_TOOLS
+    assert sent["tools"] is not WATCHMAN_TOOLS
