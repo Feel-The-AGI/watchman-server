@@ -291,41 +291,13 @@ class Database:
             return None
 
     async def create_default_constraints(self, user_id: str) -> list:
-        """Create default system constraints for a new user"""
-        logger.info(f"[DB] create_default_constraints: user_id={user_id}")
-        default_constraints = [
-            {
-                "user_id": user_id,
-                "name": "No study on night shifts",
-                "description": "Study is not allowed during night shift days",
-                "is_active": True,
-                "rule": {"type": "no_activity_on", "activity": "study", "work_types": ["work_night"]},
-                "is_system": True
-            },
-            {
-                "user_id": user_id,
-                "name": "Maximum 2 concurrent education commitments",
-                "description": "Cannot have more than 2 active education commitments at once",
-                "is_active": True,
-                "rule": {"type": "max_concurrent", "scope": "education", "value": 2},
-                "is_system": True
-            },
-            {
-                "user_id": user_id,
-                "name": "Work is immutable",
-                "description": "Work schedule cannot be modified or removed by proposals",
-                "is_active": True,
-                "rule": {"type": "immutable", "scope": "work"},
-                "is_system": True
-            }
-        ]
-        try:
-            result = self.client.table("constraints").insert(default_constraints).execute()
-            logger.info(f"[DB] Created {len(result.data or [])} default constraints")
-            return result.data or []
-        except Exception as e:
-            logger.error(f"[DB] Error creating default constraints: {e}")
-            return []
+        """Do not invent rules. A constraint is saved only when the user picks it.
+
+        Work staying on the pattern is how the calendar is built. It is not a
+        rule row, so it is not shown as something the user chose.
+        """
+        logger.info(f"[DB] No default constraints for {user_id}")
+        return []
 
     async def update_constraint(self, constraint_id: str, data: dict, user_id: str) -> dict:
         """Update a constraint"""

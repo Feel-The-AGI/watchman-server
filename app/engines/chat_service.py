@@ -22,10 +22,14 @@ from app.engines.chat_context import (
     empty_calendar,
     declined_again_reply,
     repeats_declined_proposal,
+    anchor_acknowledgement,
     is_hidden_chat_message,
     is_internal_chat_content,
+    parse_typed_anchor,
     rotation_status,
     settings_for_prompt,
+    strip_model_reasoning,
+    unsolicited_blank_override,
 )
 from app.engines.claude_chat import (
     USER_FACING_MODEL_ERROR,
@@ -93,7 +97,7 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
 - The anchor_date is when the user's STABLE ROTATION began, not their employment start date
 - Many workers have chaotic/random schedules during onboarding before getting a stable rotation
 - The anchor represents when the repeating pattern became consistent
-- Days BEFORE the anchor can be marked as 'blank' (untracked) if the schedule was unstable""",
+- Days before the anchor stay filled from the pattern. Do not mark them blank unless the user explicitly asks""",
         "parameters": {
             "type": "object",
             "properties": {
@@ -402,8 +406,8 @@ HISTORY:
 1. ROTATION ANCHOR vs EMPLOYMENT START:
    - The "anchor date" is when the user's STABLE, REPEATING rotation began
    - This is NOT necessarily when they started employment
-   - Many workers have chaotic/random schedules during onboarding before getting assigned a stable shift
-   - If user says their schedule was messy before a certain date, mark those days as 'blank'
+   - Days before the anchor stay filled from the pattern
+   - Do not propose blanking, clearing, or marking those days untracked unless the user explicitly asks
 
 2. "OFF BY ONE DAY" FIXES:
    - If user says "my calendar is one day off" or "shifted by a day"
@@ -417,9 +421,8 @@ HISTORY:
    - Parse natural language descriptions carefully
 
 4. BLANK/UNTRACKED DAYS:
-   - Use work_type="blank" for days where the schedule was unknown or chaotic
-   - Perfect for: onboarding periods, transition periods, before rotation became stable
-   - Blank days show as untracked - no wrong data is better than wrong data
+   - Use work_type="blank" only when the user explicitly asks for blank or untracked days
+   - Do not use it for days before the anchor. Those days stay filled from the pattern
 
 === WHAT YOU MAY PROPOSE ===
 Propose ONLY what the latest message asks.
@@ -497,10 +500,10 @@ User: "My calendar is showing tomorrow as night shift but I'm actually on day sh
 → This means the cycle is shifted by 1 day
 → Call update_cycle with shift_by_days=-1 (or +1 depending on direction)
 
-HANDLING MESSY HISTORY:
-User: "I started working August 1st but my actual rotation only began December 1st. Before that was random."
+HANDLING AN ANCHOR:
+User: "I started working August 1st but my actual rotation only began December 1st."
 → Set anchor_date to December 1st
-→ Optionally mark Aug 1 - Nov 30 as 'blank' using override_days
+→ Leave the earlier days filled from the pattern. Do not call override_days to blank them unless the user explicitly asks to clear those days
 
 COPYING INCIDENTS:
 User: "Copy the incident from the 23rd to the 22nd"
@@ -669,6 +672,7 @@ class ChatService:
         except (ModelRequestError, anthropic.APIError) as exc:
             logger.error(f"[CLAUDE] Internal parse failed for user {self.user_id}: {exc}")
             response_text = USER_FACING_MODEL_ERROR
+        response_text = strip_model_reasoning(response_text) or "Could you tell me a bit more?"
         return {
             "user_message": None,
             "assistant_message": None,
@@ -689,6 +693,23 @@ class ChatService:
         """
         if is_internal_chat_content(content):
             return await self._complete_internal(content)
+
+        # A typed anchor is the slider: remember the date and cycle day.
+        # Do not ask for the pattern again, and do not open a proposal.
+        anchor = parse_typed_anchor(content, date.today())
+        if anchor is not None:
+            reply = anchor_acknowledgement(anchor)
+            user_message = await self._save_message("user", content)
+            assistant_message = await self._save_message("assistant", reply)
+            return {
+                "user_message": user_message,
+                "assistant_message": assistant_message,
+                "response": reply,
+                "anchor": anchor,
+                "is_command": False,
+                "command": None,
+                "proposal": None,
+            }
 
         # Save user message
         user_message = await self._save_message("user", content)
@@ -751,6 +772,17 @@ class ChatService:
             logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")
             response_text = USER_FACING_MODEL_ERROR
             tool = None
+
+        response_text = strip_model_reasoning(response_text)
+        if tool and unsolicited_blank_override(content, tool.get("name") or "", tool.get("input") or {}):
+            logger.info(
+                f"[CHAT] Dropped unsolicited blank override for {self.user_id}: "
+                "days before the anchor stay filled from the pattern"
+            )
+            tool = None
+            response_text = "Days before the anchor stay filled from your pattern."
+        if not response_text and not (tool and tool.get("name")):
+            response_text = "Could you tell me a bit more?"
 
         if tool and tool.get("name") == "query_calendar":
             day = date_from_query(tool.get("input") or {}, date.today())

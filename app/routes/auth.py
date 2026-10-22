@@ -79,7 +79,7 @@ async def update_profile(
 
 @router.post("/complete-onboarding")
 async def complete_onboarding(user: dict = Depends(get_current_user)):
-    """Mark the user's onboarding as complete and set up default constraints"""
+    """Mark onboarding complete. Rules exist only when the user picked them."""
     logger.info(f"[AUTH_ROUTE] POST /complete-onboarding - user_id: {user.get('id')}")
     db = Database(use_admin=True)
 
@@ -87,16 +87,13 @@ async def complete_onboarding(user: dict = Depends(get_current_user)):
         logger.debug(f"[AUTH_ROUTE] Onboarding already completed for user {user.get('id')}")
         return {"message": "Onboarding already completed"}
 
-    # Create default constraints
-    logger.info(f"[AUTH_ROUTE] Creating default constraints for user {user.get('id')}")
-    created = await db.create_default_constraints(user["id"])
-    await mirror_onboarding_constraints(db, user["id"], created)
+    # Copy rules the user already saved. Do not insert a default set.
+    await mirror_onboarding_constraints(db, user["id"])
 
-    # Mark onboarding as complete
     await db.complete_onboarding(user["id"])
     logger.info(f"[AUTH_ROUTE] Onboarding completed for user {user.get('id')}")
 
     return {
         "success": True,
-        "message": "Onboarding completed. Default constraints created."
+        "message": "Onboarding completed."
     }

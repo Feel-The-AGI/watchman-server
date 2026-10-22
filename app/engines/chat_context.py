@@ -470,3 +470,105 @@ def _as_datetime(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+_REASONING = re.compile(
+    r"(?i)(?:^|(?<=[\s\"'“]))"
+    r"the user (?:says|said|is saying|is asking|wants|asked|mentioned|described|wrote|typed|"
+    r"is describing|is telling)\b"
+    r"[^.\n\"“”]{0,500}"
+    r"(?:\.\.\.|[.!])?"
+)
+
+_ANCHOR_MONTHS = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+_MONTH_NAME = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|"
+    r"aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+_MONTH_DAY = rf"({_MONTH_NAME})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(\d{{4}}))?"
+_ANCHOR_IS = re.compile(
+    rf"(?:today\s+)?{_MONTH_DAY}\s+is\s+day\s+(\d+)\b",
+    re.IGNORECASE,
+)
+_ANCHOR_WAS = re.compile(
+    rf"\bday\s+(\d+)\s+was\s+(?:on\s+)?{_MONTH_DAY}\b",
+    re.IGNORECASE,
+)
+_BLANK_REQUEST = re.compile(r"\b(?:blank|clear|untracked|wipe|erase)\b", re.IGNORECASE)
+
+
+def strip_model_reasoning(text: Optional[str]) -> str:
+    """Drop leaked model narration such as 'The user says...' before display."""
+    cleaned = text or ""
+    previous = None
+    while cleaned and previous != cleaned:
+        previous = cleaned
+        cleaned = _REASONING.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    return cleaned.strip()
+
+
+def _anchor_date(month_name: str, day: str, year: Optional[str], today: date) -> Optional[date]:
+    month = _ANCHOR_MONTHS.get(month_name.lower())
+    if month is None:
+        return None
+    try:
+        return date(int(year) if year else today.year, month, int(day))
+    except ValueError:
+        return None
+
+
+def parse_typed_anchor(text: str, today: date) -> Optional[dict]:
+    """The anchor a typed sentence sets, the same date and cycle day as the slider.
+
+    'Today Oct 22 is day 1' and 'day 1 was Oct 20' are anchors, not a new pattern.
+    """
+    if not text or not text.strip():
+        return None
+    was = _ANCHOR_WAS.search(text)
+    if was:
+        cycle_day = int(was.group(1))
+        found = _anchor_date(was.group(2), was.group(3), was.group(4), today)
+    else:
+        is_anchor = _ANCHOR_IS.search(text)
+        if not is_anchor:
+            return None
+        found = _anchor_date(is_anchor.group(1), is_anchor.group(2), is_anchor.group(3), today)
+        cycle_day = int(is_anchor.group(4))
+    if found is None or cycle_day < 1:
+        return None
+    return {"date": found.isoformat(), "cycle_day": cycle_day}
+
+
+def anchor_acknowledgement(anchor: dict) -> str:
+    """Same next step as confirming the slider: the anchor is set, then the rules."""
+    day = date.fromisoformat(anchor["date"])
+    label = f"{day.strftime('%b')} {day.day}, {day.year}"
+    return (
+        f"{label} is day {anchor['cycle_day']} of your cycle. "
+        "What rules should I always respect?"
+    )
+
+
+def unsolicited_blank_override(user_text: str, tool_name: str, payload: Optional[dict]) -> bool:
+    """True when the model wants to blank days the user did not ask to clear."""
+    if tool_name != "override_days":
+        return False
+    work_type = str((payload or {}).get("work_type") or "").strip().lower()
+    if work_type != "blank":
+        return False
+    return _BLANK_REQUEST.search(user_text or "") is None
