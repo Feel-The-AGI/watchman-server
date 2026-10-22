@@ -1,4 +1,4 @@
-"""Stored days include the rotation before the anchor, and badges are D1..N then OFF."""
+"""Stored days include the rotation before the anchor, and badges are D1, N1, and O1."""
 
 from datetime import date, timedelta
 
@@ -62,7 +62,7 @@ def test_shift_badges_run_d1_through_d14_then_off():
     )
     badges = [day.state_json["shift_badge"] for day in days]
     cycle_days = [day.cycle_day for day in days]
-    assert badges == [f"D{n}" for n in range(1, 15)] + ["OFF"] * 14
+    assert badges == [f"D{n}" for n in range(1, 15)] + [f"O{n}" for n in range(1, 15)]
     assert cycle_days == list(range(1, 29))
     assert days[0].state_json["block_day"] == 1
     assert days[13].state_json["block_day"] == 14
@@ -81,7 +81,65 @@ def test_a_night_block_numbers_from_n1_not_from_the_cycle_index():
     ]
     assert block_day_for(6, pattern) == 1
     assert shift_badge("work_night", 1) == "N1"
-    assert shift_badge("off", 1) == "OFF"
+    assert shift_badge("off", 1) == "O1"
+    assert shift_badge("off", 5) == "O5"
+
+
+def test_a_five_five_five_cycle_numbers_day_night_and_off():
+    cycle = {
+        "id": "cycle-555",
+        "pattern": [
+            {"label": "work_day", "duration": 5},
+            {"label": "work_night", "duration": 5},
+            {"label": "off", "duration": 5},
+        ],
+        "anchor_date": "2026-10-20",
+        "anchor_cycle_day": 1,
+        "cycle_length": 15,
+    }
+    start = date(2026, 10, 20)
+    days = CalendarEngine("user").generate_range(
+        start,
+        start + timedelta(days=14),
+        engine_cycle(cycle),
+        [],
+    )
+    badges = [day.state_json["shift_badge"] for day in days]
+    assert badges == (
+        [f"D{n}" for n in range(1, 6)]
+        + [f"N{n}" for n in range(1, 6)]
+        + [f"O{n}" for n in range(1, 6)]
+    )
+    assert [day.state_json["block_day"] for day in days] == (
+        [1, 2, 3, 4, 5] * 3
+    )
+
+
+def test_an_off_block_wraps_across_the_cycle_boundary():
+    """Off at both ends of the pattern is two blocks, numbered like a wrapped day block."""
+    cycle = {
+        "id": "cycle-wrap",
+        "pattern": [
+            {"label": "off", "duration": 2},
+            {"label": "work_day", "duration": 4},
+            {"label": "off", "duration": 3},
+        ],
+        "anchor_date": "2026-10-21",
+        "anchor_cycle_day": 1,
+        "cycle_length": 9,
+    }
+    # 19 Oct is cycle day 8, the second day of the trailing off block.
+    # 21 Oct restarts the cycle on the leading off block.
+    days = CalendarEngine("user").generate_range(
+        date(2026, 10, 19),
+        date(2026, 10, 23),
+        engine_cycle(cycle),
+        [],
+    )
+    assert [day.cycle_day for day in days] == [8, 9, 1, 2, 3]
+    assert [day.work_type.value for day in days] == ["off", "off", "off", "off", "work_day"]
+    assert [day.state_json["shift_badge"] for day in days] == ["O2", "O3", "O1", "O2", "D1"]
+    assert [day.state_json["block_day"] for day in days] == [2, 3, 1, 2, 1]
 
 
 def test_horizon_includes_pre_anchor_days_and_the_next_year():

@@ -144,7 +144,7 @@ class CalendarEngine:
             
             # Build initial state with engine version for staleness detection.
             # cycle_day stays the position in the whole rotation. block_day is
-            # 1..N inside the current block, which is the badge (D1..D14, then OFF).
+            # 1..N inside the current block, which is the badge (D1, N1, O1).
             state = {
                 "commitments": [],
                 "available_hours": self._get_available_hours(work_type, is_leave),
@@ -463,13 +463,13 @@ def block_day_for(cycle_day: int, pattern: List[Dict]) -> int:
 
 
 def shift_badge(work_type: str, block_day: int) -> str:
-    """Client badge. Day shifts are D1..N, nights N1..N, and off days are OFF."""
+    """Client badge. The number is the day inside the current block: D1, N1, or O1."""
     if work_type == "work_day":
         return f"D{block_day}"
     if work_type == "work_night":
         return f"N{block_day}"
     if work_type == "off":
-        return "OFF"
+        return f"O{block_day}"
     return ""
 
 
