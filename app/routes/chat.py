@@ -99,17 +99,16 @@ async def send_message(
         chat_service = create_chat_service(db, user["id"])
 
         logger.info(f"[CHAT] Sending message to Claude for user {user['id']}")
-        picked = None
+        kwargs = {
+            "content": request.content,
+            "auto_execute": request.auto_execute,
+        }
         if request.pattern:
-            picked = [
+            kwargs["pattern"] = [
                 {"label": block.label, "duration": block.duration}
                 for block in request.pattern
             ]
-        result = await chat_service.send_message(
-            content=request.content,
-            auto_execute=request.auto_execute,
-            pattern=picked,
-        )
+        result = await chat_service.send_message(**kwargs)
 
         logger.info(f"[CHAT] Response received - is_command: {result.get('is_command')}")
         if result.get('is_command'):
