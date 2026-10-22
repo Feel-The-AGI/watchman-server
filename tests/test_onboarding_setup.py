@@ -1,20 +1,25 @@
 """Onboarding: no leaked reasoning, a typed anchor, no default rules, no stray blank."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
 from app.database import Database
 from app.engines import chat_service
+
 from app.engines.chat_context import (
     anchor_acknowledgement,
+    local_today,
     parse_typed_anchor,
     strip_model_reasoning,
+    unsolicited_blank_override,
 )
 from app.engines.chat_service import SYSTEM_PROMPT, WATCHMAN_TOOLS, ChatService
 from app.routes.auth import complete_onboarding
+from app.routes.chat import PatternBlock, SendMessageRequest, send_message
 
 
 TODAY = date(2026, 10, 22)
@@ -75,17 +80,21 @@ def _blank_tool():
 def test_model_reasoning_is_removed_before_it_is_shown():
     leaked = 'The user says they work 14 on and 14 off. Got it — 14 days on, 14 off.'
     cleaned = strip_model_reasoning(leaked)
-    assert "The user says" not in cleaned
-    assert "the user says" not in cleaned.lower()
+    assert cleaned.startswith("Got it")
     assert "14 days on, 14 off" in cleaned
 
-    raw = (
-        '{"understood": false, "pattern": [], "description": "The user says 14 on", '
-        '"message": "The user says this is unclear. What pattern is it?"}'
-    )
-    hidden = strip_model_reasoning(raw)
-    assert "the user says" not in hidden.lower()
-    assert "What pattern is it?" in hidden
+    quoted = "Keep the request 'the user wants to swap' on the card."
+    assert strip_model_reasoning(quoted) == quoted
+
+    later = "Your manager said the user wants a report by Friday."
+    assert strip_model_reasoning(later) == later
+
+    no_stop = "The user says the anchor is today"
+    assert strip_model_reasoning(no_stop) == no_stop
+
+    question = "Could you tell me your full rotation pattern?"
+    assert strip_model_reasoning(question, cycle_known=False) == question
+    assert strip_model_reasoning(question, cycle_known=True) == ""
 
 
 @pytest.mark.asyncio
@@ -114,7 +123,7 @@ async def test_a_model_reply_starting_the_user_says_never_reaches_the_user(monke
 
     monkeypatch.setattr(chat_service, "complete_chat", parse)
     parsed = await service.send_message(ONBOARDING_PROMPT, auto_execute=False)
-    assert "the user says" not in parsed["response"].lower()
+    assert not parsed["response"].lower().startswith("the user says")
     assert "Try 14 on, 14 off." in parsed["response"]
 
 
@@ -159,7 +168,7 @@ async def test_a_typed_anchor_does_not_ask_for_the_pattern(monkeypatch, text, ex
         return _blank_tool()
 
     monkeypatch.setattr(chat_service, "complete_chat", fake_complete)
-    result = await service.send_message(text, auto_execute=False)
+    result = await service.send_message(text, onboarding_completed=False)
 
     assert called["n"] == 0
     assert result["proposal"] is None
@@ -183,7 +192,9 @@ async def test_a_picked_preset_is_known_when_the_anchor_is_typed(monkeypatch):
         return (LIVE_WRONG_REPLY, None)
 
     monkeypatch.setattr(chat_service, "complete_chat", fake_complete)
-    result = await service.send_message(LIVE_ANCHOR, pattern=FIVE_FIVE_FIVE)
+    result = await service.send_message(
+        LIVE_ANCHOR, pattern=FIVE_FIVE_FIVE, onboarding_completed=False,
+    )
     reply = result["response"]
     lowered = reply.lower()
     assert result["anchor"] == {"date": "2026-10-22", "cycle_day": 1}
@@ -204,7 +215,129 @@ async def test_a_picked_preset_is_known_when_the_anchor_is_typed(monkeypatch):
     assert "5 off" in system
     assert "No rotation is stored" not in system
     assert "no cycle" not in follow["response"].lower()
-    assert "i'll set up the anchor" not in follow["response"].lower()
+    assert "rotation pattern" not in follow["response"].lower()
+
+
+@pytest.mark.asyncio
+async def test_anchor_shortcut_ignores_other_instructions(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(chat_service, "projection_for_user", AsyncMock(return_value={}))
+    called = {"n": 0}
+
+    async def fake_complete(**kwargs):
+        called["n"] += 1
+        return ("Noted.", None)
+
+    monkeypatch.setattr(chat_service, "complete_chat", fake_complete)
+    shift = await service.send_message(
+        "day 1 was Oct 20 so please shift my rotation by one day",
+        onboarding_completed=False,
+    )
+    overtime = await service.send_message(
+        "May 5 is day 2 of my leave, log 3 hours overtime",
+        onboarding_completed=False,
+    )
+    finished = await service.send_message(
+        "Today Oct 22 is day 1",
+        onboarding_completed=True,
+    )
+    assert called["n"] == 3
+    assert "anchor" not in shift
+    assert "anchor" not in overtime
+    assert "anchor" not in finished
+    assert shift["response"] == "Noted."
+    assert overtime["response"] == "Noted."
+
+
+@pytest.mark.asyncio
+async def test_an_anchor_day_outside_the_pattern_is_corrected(monkeypatch):
+    service = _service()
+    service.settings_service.get_snapshot = AsyncMock(return_value={
+        "cycle": {
+            "pattern": [
+                {"label": "work_day", "duration": 14},
+                {"label": "off", "duration": 14},
+            ],
+            "cycle_length": 28,
+        },
+    })
+    monkeypatch.setattr(chat_service, "complete_chat", AsyncMock(return_value=("Noted.", None)))
+    result = await service.send_message("Oct 22 is day 40", onboarding_completed=False)
+    assert "anchor" not in result
+    assert "28" in result["response"]
+    assert "40" in result["response"]
+    chat_service.complete_chat.assert_not_awaited()
+
+
+def test_a_missing_year_uses_the_date_nearest_today_in_the_user_zone():
+    # 2026-10-22 03:00 UTC is still 21 Oct in Honolulu and already 22 Oct in UTC.
+    now = datetime(2026, 10, 22, 3, 0, tzinfo=timezone.utc)
+    honolulu = local_today("Pacific/Honolulu", now)
+    utc = local_today("UTC", now)
+    assert honolulu == date(2026, 10, 21)
+    assert utc == date(2026, 10, 22)
+    # From 21 Oct, 22 Apr this year is nearer. From 22 Oct, next 22 Apr is nearer.
+    assert parse_typed_anchor("Apr 22 is day 1", honolulu)["date"] == "2026-04-22"
+    assert parse_typed_anchor("Apr 22 is day 1", utc)["date"] == "2027-04-22"
+
+
+def test_unknown_is_an_explicit_blank_cue():
+    blank = {"work_type": "blank"}
+    assert unsolicited_blank_override("mark those days unknown", "override_days", blank) is False
+    assert unsolicited_blank_override("Today Oct 22 is day 1", "override_days", blank) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pattern, detail", [
+    ([{"label": "work_day", "duration": 5}] * 11, "at most 10 blocks"),
+    ([{"label": "work_day", "duration": 61}], "1 to 60"),
+    ([{"label": "work_day", "duration": 0}], "1 to 60"),
+    ([
+        {"label": "work_day", "duration": 60},
+        {"label": "off", "duration": 60},
+        {"label": "work_night", "duration": 1},
+    ], "120 days"),
+    ([{"label": "sleep", "duration": 2}], "work_day, work_night, or off"),
+])
+async def test_a_bad_onboarding_pattern_is_rejected(pattern, detail):
+    request = SendMessageRequest(
+        content="Today Oct 22 is day 1",
+        pattern=[PatternBlock(**block) for block in pattern],
+    )
+    with pytest.raises(HTTPException) as rejected:
+        await send_message(request, {"id": "user-1", "tier": "pro", "onboarding_completed": False})
+    assert rejected.value.status_code == 400
+    assert detail in rejected.value.detail
+
+
+@pytest.mark.asyncio
+async def test_a_pattern_can_use_type_and_days_aliases(monkeypatch):
+    request = SendMessageRequest(
+        content="hello",
+        pattern=[PatternBlock(type="work_night", days=4), PatternBlock(type="off", days=3)],
+    )
+    seen = {}
+
+    class Service:
+        async def send_message(self, **kwargs):
+            seen.update(kwargs)
+            return {"response": "ok", "internal": True}
+
+    class DB:
+        def __init__(self, use_admin=False):
+            self.client = SimpleNamespace()
+
+    monkeypatch.setattr("app.routes.chat.Database", DB)
+    monkeypatch.setattr("app.routes.chat.create_chat_service", lambda *args: Service())
+    result = await send_message(
+        request,
+        {"id": "user-1", "tier": "pro", "onboarding_completed": True},
+    )
+    assert result["response"] == "ok"
+    assert seen["pattern"] == [
+        {"label": "work_night", "duration": 4},
+        {"label": "off", "duration": 3},
+    ]
 
 
 def test_the_prompt_does_not_tell_the_model_to_blank_days_before_the_anchor():

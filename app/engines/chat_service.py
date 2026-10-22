@@ -13,7 +13,7 @@ import anthropic
 
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
-from app.engines.calendar_authority import projection_for_user
+from app.engines.calendar_authority import cycle_is_present, projection_for_user
 from app.engines.command_executor import CommandExecutor
 from app.engines.chat_context import (
     INTERNAL_PARSE_MAX_TOKENS,
@@ -23,12 +23,15 @@ from app.engines.chat_context import (
     declined_again_reply,
     repeats_declined_proposal,
     anchor_acknowledgement,
+    anchor_day_correction,
+    chosen_cycle,
+    cycle_length,
     is_hidden_chat_message,
     is_internal_chat_content,
-    chosen_cycle,
-    parse_typed_anchor,
+    local_today,
     rotation_status,
     settings_for_prompt,
+    sole_anchor_statement,
     strip_model_reasoning,
     unsolicited_blank_override,
     with_unsaved_pattern,
@@ -690,6 +693,8 @@ class ChatService:
         content: str,
         auto_execute: bool = False,
         pattern: Optional[list] = None,
+        onboarding_completed: bool = True,
+        timezone_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send a message and get agent response using tool calling.
@@ -697,24 +702,32 @@ class ChatService:
         if is_internal_chat_content(content):
             return await self._complete_internal(content)
 
-        # A typed anchor is the slider: remember the date and cycle day.
-        # The pattern may already have been picked and not saved yet.
-        # Do not ask for the pattern again, and do not open a proposal.
+        # Only an unfinished onboarding turn that is nothing but an anchor
+        # skips the model. The reply is a proposal; the client applies anchor.
         picked = chosen_cycle(pattern)
-        anchor = parse_typed_anchor(content, date.today())
-        if anchor is not None:
-            reply = anchor_acknowledgement(anchor, picked)
-            user_message = await self._save_message("user", content)
-            assistant_message = await self._save_message("assistant", reply)
-            return {
-                "user_message": user_message,
-                "assistant_message": assistant_message,
-                "response": reply,
-                "anchor": anchor,
-                "is_command": False,
-                "command": None,
-                "proposal": None,
-            }
+        if onboarding_completed is False:
+            anchor = sole_anchor_statement(content, local_today(timezone_name))
+            if anchor is not None:
+                cycle = picked or await self._stored_cycle()
+                length = cycle_length(cycle)
+                user_message = await self._save_message("user", content)
+                if length and anchor["cycle_day"] > length:
+                    reply = anchor_day_correction(anchor, length)
+                    anchor = None
+                else:
+                    reply = anchor_acknowledgement(anchor, cycle)
+                assistant_message = await self._save_message("assistant", reply)
+                result = {
+                    "user_message": user_message,
+                    "assistant_message": assistant_message,
+                    "response": reply,
+                    "is_command": False,
+                    "command": None,
+                    "proposal": None,
+                }
+                if anchor is not None:
+                    result["anchor"] = anchor
+                return result
 
         # Save user message
         user_message = await self._save_message("user", content)
@@ -781,7 +794,10 @@ class ChatService:
             response_text = USER_FACING_MODEL_ERROR
             tool = None
 
-        response_text = strip_model_reasoning(response_text)
+        response_text = strip_model_reasoning(
+            response_text,
+            cycle_known=cycle_is_present(master_settings.get("cycle")),
+        )
         if tool and unsolicited_blank_override(content, tool.get("name") or "", tool.get("input") or {}):
             logger.info(
                 f"[CHAT] Dropped unsolicited blank override for {self.user_id}: "
@@ -934,6 +950,15 @@ class ChatService:
         except Exception as exc:
             logger.warning(f"[CHAT] Could not load leave or commitments for {self.user_id}: {exc}")
         return leaves, commitments
+
+    async def _stored_cycle(self) -> Optional[dict]:
+        try:
+            document = await self.settings_service.get_snapshot(self.user_id)
+        except Exception as exc:
+            logger.warning(f"[CHAT] Could not read the cycle for {self.user_id}: {exc}")
+            return None
+        cycle = document.get("cycle") if isinstance(document, dict) else None
+        return cycle if cycle_is_present(cycle) else None
 
     async def _save_message(
         self,
