@@ -21,6 +21,8 @@ PUBLIC_EXACT = {
     ("GET", "/openapi.json"),
     ("GET", "/api/payments/pricing"),
     ("POST", "/api/payments/webhook"),
+    ("GET", "/api/billing/founding"),
+    ("POST", "/api/billing/stripe-webhook"),
     ("GET", "/api/cron/health"),
 }
 

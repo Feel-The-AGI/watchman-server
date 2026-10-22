@@ -32,6 +32,11 @@ CODE_COLUMNS = {
     "subscriptions": {
         "id", "user_id", "tier", "status", "current_period_start",
         "current_period_end", "cancel_at_period_end", "created_at", "updated_at",
+        "plan", "stripe_status", "stripe_customer_id", "stripe_subscription_id",
+    },
+    "stripe_events": {"id", "event_type", "processed_at"},
+    "stripe_founding_seats": {
+        "id", "user_id", "stripe_subscription_id", "status", "created_at",
     },
     "cycles": {
         "id", "user_id", "name", "is_active", "pattern", "cycle_length",

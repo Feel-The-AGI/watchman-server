@@ -33,6 +33,18 @@ class Settings(BaseSettings):
     paystack_secret_key: str = ""  # Set via PAYSTACK_SECRET_KEY env var
     paystack_public_key: str = ""  # Set via PAYSTACK_PUBLIC_KEY env var
     paystack_webhook_secret: str = ""  # Legacy unused setting
+
+    # Stripe card subscriptions. Empty keys make /api/billing return 503.
+    # Price values are Stripe Price ids (price_...), not dollar amounts.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_monthly: str = ""
+    stripe_price_yearly: str = ""
+    stripe_price_founding: str = ""
+    # Empty uses Stripe's API. Local tests point this at stripe-mock.
+    stripe_api_base: str = ""
+    # Checkout success, cancel, and the Customer Portal return here.
+    client_base_url: str = "https://trywatchman.app"
     
     # Exchange Rate API (for USD to GHS conversion)
     exchange_rate_api_key: str = ""  # Set via EXCHANGE_RATE_API_KEY env var
