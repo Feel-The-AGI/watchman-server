@@ -1,9 +1,10 @@
 """
 Watchman Payments Routes
-Paystack charges for Pro access ($12 for PRO_PERIOD_DAYS, charged in GHS).
+Paystack charges for Pro access at a fixed GHS plan price.
 
-A verified charge grants one access period. It does not create a Paystack
+A verified charge grants that plan's days. It does not create a Paystack
 subscription and it does not grant access without a server-created checkout.
+USD amounts are display only and are never sent to Paystack.
 """
 
 import hashlib
@@ -11,16 +12,25 @@ import hmac
 import time
 import httpx
 from datetime import datetime, timezone
+from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
+from pydantic import BaseModel
 
 from app.billing import (
-    PRO_PERIOD_DAYS,
+    PLANS,
+    PlanNotOffered,
+    UnknownPlan,
     access_expired,
     charge_matches,
+    checkout_description,
+    checkout_plan,
     extend_expiry,
-    ghs_pesewas,
+    founding_available,
+    offered_plans,
     parse_timestamp,
+    period_days_for_payment,
+    to_pesewas,
 )
 from app.config import get_settings
 from app.database import Database
@@ -108,13 +118,49 @@ async def paystack_request(method: str, endpoint: str, data: dict = None) -> dic
         return result
 
 
+class CheckoutRequest(BaseModel):
+    """A plan id selects the price. Amount fields are never charged."""
+
+    plan: Optional[str] = None
+    plan_id: Optional[str] = None
+    amount: Optional[Any] = None
+    amount_ghs: Optional[Any] = None
+    amount_usd: Optional[Any] = None
+
+    def requested_plan(self) -> Optional[str]:
+        chosen = self.plan if self.plan not in (None, "") else self.plan_id
+        if chosen in (None, ""):
+            return None
+        return str(chosen)
+
+
+def _pricing_body() -> dict:
+    """Offered plans, plus the monthly fields the current pricing page reads."""
+    monthly = PLANS["monthly"]
+    return {
+        "currency": "GHS",
+        "founding_available": founding_available(),
+        "plans": [plan.as_public() for plan in offered_plans()],
+        "usd_price": float(monthly.display_usd),
+        "ghs_amount": float(monthly.amount_ghs),
+        "display_price": f"${int(monthly.display_usd)}",
+        "display_ghs": f"GHS {monthly.amount_ghs:.2f}",
+        "period_days": monthly.days,
+        "note": "Prices are fixed in GHS. USD amounts are for display only and are not charged.",
+    }
+
+
 @router.post("/create-checkout-session")
-async def create_checkout_session(user: dict = Depends(get_current_user)):
+async def create_checkout_session(
+    user: dict = Depends(get_current_user),
+    body: Optional[CheckoutRequest] = None,
+):
     """
-    Initialize a Paystack transaction for one Pro period.
-    The GHS amount comes from the live exchange rate. The returned reference
-    is stored before the checkout URL is given to the client; a later webhook
-    can grant access only for that stored checkout.
+    Initialize a Paystack transaction for one prepaid Pro period.
+
+    The GHS amount comes from the plan table. A missing plan id is monthly,
+    which is what the current client sends by omitting a body. The returned
+    reference is stored before the checkout URL is given to the client.
     """
     if not settings.paystack_secret_key:
         raise HTTPException(status_code=503, detail="Payment service not configured")
@@ -127,19 +173,31 @@ async def create_checkout_session(user: dict = Depends(get_current_user)):
 
     try:
         try:
-            exchange_rate = await get_usd_to_ghs_rate()
-        except ExchangeRateUnavailable as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            plan = checkout_plan(body.requested_plan() if body else None)
+        except UnknownPlan as exc:
+            raise HTTPException(status_code=400, detail=f"Unknown plan: {exc.plan_id}")
+        except PlanNotOffered as exc:
+            raise HTTPException(status_code=400, detail=f"Plan is not available: {exc.plan_id}")
 
-        usd_price = settings.pro_price_usd
-        ghs_amount, amount_in_pesewas = ghs_pesewas(usd_price, exchange_rate)
-        ghs_amount_rounded = float(ghs_amount)
+        if body and body.amount not in (None, "") and str(body.amount) not in {
+            str(plan.display_usd), str(float(plan.display_usd)), str(int(plan.display_usd)),
+        }:
+            logger.info(
+                f"[PAYMENTS] Ignoring client amount for user {user_id}; charging plan {plan.id}"
+            )
 
-        logger.info(f"[PAYMENTS] Converting ${usd_price} USD → GHS {ghs_amount_rounded} (rate: {exchange_rate})")
+        ghs_amount = float(plan.amount_ghs)
+        display_usd = float(plan.display_usd)
+        amount_in_pesewas = to_pesewas(plan.amount_ghs)
+        logger.info(
+            f"[PAYMENTS] Checkout plan={plan.id} GHS {ghs_amount} for {plan.days} days "
+            f"(display ${display_usd})"
+        )
 
-        # Do not send `channels`. This Ghana Starter Business account rejects
-        # card / apple_pay with "No active channel to process transaction".
-        # Omitting the field lets Paystack offer every channel enabled on the
+        # Do not send `plan` or `channels` at the top level. `plan` would start
+        # a Paystack subscription. This Ghana Starter Business account also
+        # rejects card / apple_pay with "No active channel to process transaction".
+        # Omitting channels lets Paystack offer every channel enabled on the
         # account, including mobile money and bank transfer.
         transaction_data = {
             "email": user_email,
@@ -148,21 +206,20 @@ async def create_checkout_session(user: dict = Depends(get_current_user)):
             "callback_url": "https://trywatchman.app/dashboard/settings?success=true",
             "metadata": {
                 "watchman_user_id": user_id,
-                "plan": "pro",
-                "usd_price": usd_price,
-                "exchange_rate": exchange_rate,
-                "ghs_amount": ghs_amount_rounded,
-                "period_days": PRO_PERIOD_DAYS,
+                "plan": plan.id,
+                "display_usd": display_usd,
+                "ghs_amount": ghs_amount,
+                "period_days": plan.days,
                 "custom_fields": [
                     {
                         "display_name": "Plan",
                         "variable_name": "plan",
-                        "value": f"Watchman Pro ({PRO_PERIOD_DAYS} days)"
+                        "value": f"Watchman Pro {plan.id} ({plan.days} days)"
                     },
                     {
-                        "display_name": "USD Equivalent",
-                        "variable_name": "usd_equivalent",
-                        "value": f"${usd_price}"
+                        "display_name": "USD display",
+                        "variable_name": "usd_display",
+                        "value": f"${display_usd:g} display only"
                     }
                 ]
             },
@@ -181,28 +238,32 @@ async def create_checkout_session(user: dict = Depends(get_current_user)):
         recorded = await db.create_payment_record({
             "user_id": user_id,
             "paystack_reference": reference,
-            "amount": usd_price,
-            "amount_local": ghs_amount_rounded,
+            "plan": plan.id,
+            "amount": display_usd,
+            "amount_local": ghs_amount,
             "currency": "usd",
             "currency_local": "ghs",
-            "exchange_rate": exchange_rate,
             "status": "pending",
-            "description": f"Watchman Pro - ${int(usd_price)} for {PRO_PERIOD_DAYS} days",
+            "description": checkout_description(plan),
         })
         if not recorded:
             logger.error(f"[PAYMENTS] Checkout {reference} was not stored; withholding the payment URL")
             raise HTTPException(status_code=500, detail="Could not start checkout")
 
-        logger.info(f"[PAYMENTS] Paystack transaction initialized for user {user_id}, ref: {reference}, GHS {ghs_amount_rounded}")
+        logger.info(
+            f"[PAYMENTS] Paystack transaction initialized for user {user_id}, "
+            f"ref: {reference}, plan {plan.id}, GHS {ghs_amount}"
+        )
 
         return {
             "checkout_url": authorization_url,
             "access_code": access_code,
             "reference": reference,
-            "amount_ghs": ghs_amount_rounded,
-            "amount_usd": usd_price,
-            "exchange_rate": exchange_rate,
-            "period_days": PRO_PERIOD_DAYS,
+            "plan": plan.id,
+            "amount_ghs": ghs_amount,
+            "amount_usd": display_usd,
+            "display_usd": display_usd,
+            "period_days": plan.days,
         }
 
     except HTTPException:
@@ -215,31 +276,10 @@ async def create_checkout_session(user: dict = Depends(get_current_user)):
 @router.get("/pricing")
 async def get_pricing():
     """
-    Get current pricing information including exchange rate.
-    This endpoint is public (no auth required) so pricing page can use it.
+    Public plan list for the pricing page.
+    Amounts are fixed GHS. founding_yearly is listed only when it is offered.
     """
-    try:
-        exchange_rate = await get_usd_to_ghs_rate()
-        usd_price = settings.pro_price_usd
-        ghs_amount, _pesewas = ghs_pesewas(usd_price, exchange_rate)
-        ghs_value = float(ghs_amount)
-
-        return {
-            "usd_price": usd_price,
-            "ghs_amount": ghs_value,
-            "exchange_rate": exchange_rate,
-            "currency": "GHS",
-            "display_price": f"${int(usd_price)}",
-            "display_ghs": f"GHS {ghs_value:.2f}",
-            "period_days": PRO_PERIOD_DAYS,
-            "note": f"${int(usd_price)} USD for {PRO_PERIOD_DAYS} days at the current exchange rate",
-        }
-    except ExchangeRateUnavailable as e:
-        logger.error(f"[PAYMENTS] Pricing unavailable: {e}")
-        raise HTTPException(status_code=503, detail="Exchange rate is unavailable")
-    except Exception as e:
-        logger.error(f"[PAYMENTS] Error getting pricing: {e}")
-        raise HTTPException(status_code=503, detail="Pricing is temporarily unavailable")
+    return _pricing_body()
 
 
 async def _save_subscription_period(db: Database, user_id: str, until: datetime, *, cancelled: bool = False) -> None:
@@ -259,7 +299,7 @@ async def _save_subscription_period(db: Database, user_id: str, until: datetime,
             **fields,
         })
     if not saved:
-        raise HTTPException(status_code=500, detail="Could not record subscription period")
+        raise HTTPException(status_code=500, detail="Could not record the Pro period")
 
 
 async def _grant_access(
@@ -271,6 +311,7 @@ async def _grant_access(
     notify: bool = False,
     email: str = None,
     usd_amount: float = None,
+    plan_name: str = None,
 ) -> None:
     updates = {"tier": "pro", "pro_expires_at": until.isoformat()}
     if customer_code:
@@ -287,7 +328,12 @@ async def _grant_access(
     user_name = user.get("name") or (recipient.split("@")[0] if recipient else "there")
     if recipient:
         try:
-            await email_service.send_pro_upgrade_email(to=recipient, user_name=user_name)
+            await email_service.send_pro_upgrade_email(
+                to=recipient,
+                user_name=user_name,
+                plan_name=plan_name,
+                ends_on=until,
+            )
         except Exception as e:
             logger.warning(f"[PAYMENTS] Failed to send Pro upgrade email: {e}")
     try:
@@ -295,7 +341,7 @@ async def _grant_access(
             admin_email=ADMIN_EMAIL,
             subscriber_email=recipient,
             subscriber_name=user_name,
-            amount_usd=usd_amount if usd_amount is not None else settings.pro_price_usd,
+            amount_usd=usd_amount if usd_amount is not None else float(PLANS["monthly"].display_usd),
         )
     except Exception as e:
         logger.warning(f"[PAYMENTS] Failed to send admin notification: {e}")
@@ -351,7 +397,9 @@ async def apply_successful_charge(db: Database, reference: str, verified: dict) 
         return {"status": "ignored"}
 
     now = datetime.now(timezone.utc)
-    until = extend_expiry(user.get("pro_expires_at"), now)
+    until = extend_expiry(
+        user.get("pro_expires_at"), now, days=period_days_for_payment(payment)
+    )
     claimed = await db.update_payment_by_reference(
         reference,
         {"status": "paid", "access_until": until.isoformat()},
@@ -376,6 +424,7 @@ async def apply_successful_charge(db: Database, reference: str, verified: dict) 
         notify=not was_active,
         email=customer.get("email") or user.get("email"),
         usd_amount=payment.get("amount"),
+        plan_name=payment.get("plan"),
     )
     logger.info(f"[PAYMENTS] User {user['id']} Pro access until {until.isoformat()}")
     return {"status": "success", "access_until": until.isoformat()}
@@ -407,7 +456,7 @@ async def _store_paystack_subscription(db: Database, data: dict, *, grant_access
 
 
 async def _mark_subscription_cancelled(db: Database, data: dict) -> None:
-    """Stop renewal. Access already paid for lasts until pro_expires_at."""
+    """An old provider notice. Prepaid access already paid for is left as it is."""
     user = await _find_paystack_user(db, data)
     if not user:
         return
@@ -418,7 +467,7 @@ async def _mark_subscription_cancelled(db: Database, data: dict) -> None:
             "cancel_at_period_end": True,
             "status": "active" if not access_expired(user) else "cancelled",
         })
-    logger.info(f"[PAYMENTS] Renewal stopped for user {user['id']}; paid access is unchanged")
+    logger.info(f"[PAYMENTS] Provider notice for user {user['id']}; paid access is unchanged")
 
 
 async def _mark_renewal_failed(db: Database, data: dict) -> None:
@@ -431,7 +480,12 @@ async def _mark_renewal_failed(db: Database, data: dict) -> None:
     subscription = await db.get_subscription(user["id"])
     if subscription and subscription.get("id"):
         await db.update_subscription(subscription["id"], {"status": "past_due"})
-    logger.warning(f"[PAYMENTS] Renewal payment failed for user {user['id']}; current period stays")
+    logger.warning(f"[PAYMENTS] Provider billing notice failed for user {user['id']}; the paid period stays")
+
+
+def _prepaid_message(expires: datetime) -> str:
+    end = f"{expires.day} {expires.strftime('%b %Y')}"
+    return f"Pro is prepaid and ends on {end}. Nothing will be charged again."
 
 
 def _current_paid_expiry(user: dict):
@@ -523,8 +577,8 @@ async def paystack_webhook(request: Request):
         return {"status": "success"}
 
     if event_type == "invoice.update" and data.get("paid"):
-        # A renewal only extends access when it matches a server-created checkout.
-        # Unsolicited invoices are logged and do not grant Pro.
+        # An invoice extends access only when it matches a server-created checkout.
+        # Anything else is logged and does not grant Pro.
         reference = data.get("reference") or (data.get("transaction") or {}).get("reference")
         logger.info(f"[PAYMENTS] Invoice paid reference={reference}; access changes only via a stored checkout")
         if reference:
@@ -578,19 +632,21 @@ async def get_subscription_status(user: dict = Depends(get_current_user)):
         "tier": get_effective_tier(user),
         "current_period_end": expires.isoformat() if expires else None,
         "cancel_at_period_end": bool(subscription and subscription.get("cancel_at_period_end")),
-        "message": "Pro access is active" if active else "No active Pro period",
+        "message": _prepaid_message(expires) if active and expires else (
+            "Pro is active." if active else "No active Pro period. Nothing is scheduled to be charged."
+        ),
     }
 
 
 @router.post("/cancel-subscription")
 async def cancel_subscription(user: dict = Depends(get_current_user)):
-    """Stop renewal. Access already paid for lasts until the period ends."""
+    """Kept for older clients. Pro is prepaid, so this does not stop a renewal."""
     if user.get("tier") == "admin":
-        raise HTTPException(status_code=400, detail="Admin access is not a Paystack subscription")
+        raise HTTPException(status_code=400, detail="Admin access is not a paid plan")
     expires = _current_paid_expiry(user)
     subscription_code = user.get("paystack_subscription_code")
     if expires is None and not subscription_code:
-        raise HTTPException(status_code=400, detail="No active Pro period to cancel")
+        raise HTTPException(status_code=400, detail="No active Pro period")
 
     if subscription_code:
         if not settings.paystack_secret_key:
@@ -599,7 +655,7 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
             result = await paystack_request("GET", f"/subscription/{subscription_code}")
             email_token = (result.get("data") or {}).get("email_token")
             if not email_token:
-                raise HTTPException(status_code=400, detail="Could not retrieve subscription details")
+                raise HTTPException(status_code=400, detail="Could not update billing")
             await paystack_request("POST", "/subscription/disable", {
                 "code": subscription_code,
                 "token": email_token,
@@ -608,18 +664,18 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
             raise
         except Exception as e:
             logger.error(f"[PAYMENTS] Error cancelling Paystack subscription: {e}")
-            raise HTTPException(status_code=500, detail="Failed to cancel subscription")
+            raise HTTPException(status_code=500, detail="Could not update the Pro period")
 
     db = Database(use_admin=True)
     if expires is not None:
         await db.update_user(user["id"], {"paystack_subscription_code": None})
         await _save_subscription_period(db, user["id"], expires, cancelled=True)
-        logger.info(f"[PAYMENTS] Renewal cancelled for user {user['id']}")
+        logger.info(f"[PAYMENTS] Prepaid period left unchanged for user {user['id']}")
         return {
             "status": "cancelled",
             "tier": "pro",
             "access_until": expires.isoformat(),
-            "message": "Renewal is cancelled. Pro access lasts until the end of the paid period.",
+            "message": _prepaid_message(expires),
         }
 
     # A Paystack subscription with no recorded period was the old indefinite grant.
@@ -630,13 +686,13 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
         "paystack_subscription_code": None,
     })
     if not updated:
-        raise HTTPException(status_code=500, detail="Failed to cancel subscription")
-    logger.info(f"[PAYMENTS] Indefinite subscription ended for user {user['id']}")
+        raise HTTPException(status_code=500, detail="Could not update the Pro period")
+    logger.info(f"[PAYMENTS] Open-ended Pro access ended for user {user['id']}")
     return {
         "status": "cancelled",
         "tier": "free",
         "access_until": now.isoformat(),
-        "message": "Subscription cancelled.",
+        "message": "Pro has ended. Nothing will be charged again.",
     }
 
 
@@ -650,23 +706,18 @@ async def get_payment_history(user: dict = Depends(get_current_user)):
 
 @router.get("/manage-subscription")
 async def get_manage_subscription_link(user: dict = Depends(get_current_user)):
-    """
-    Get a link for the user to manage their subscription.
-    Paystack sends users to their hosted portal via email.
-    """
+    """Kept for older clients. There is no renewal to manage."""
     expires = parse_timestamp(user.get("pro_expires_at"))
     if not _period_is_active(user):
         return {
             "has_subscription": False,
-            "message": "No active Pro period. Subscribe to Pro to manage billing."
+            "message": "No active Pro period. Nothing is scheduled to be charged.",
         }
 
-    # One-off charges have no Paystack billing portal. Cancellation keeps the
-    # paid period and stops a future renewal if a Paystack subscription exists.
     return {
         "has_subscription": True,
         "tier": get_effective_tier(user),
         "current_period_end": expires.isoformat() if expires else None,
-        "message": "Pro access lasts until the end of the paid period. Cancel to stop renewal.",
+        "message": _prepaid_message(expires) if expires else "Pro is prepaid. Nothing will be charged again.",
         "cancel_url": "/api/payments/cancel-subscription",
     }

@@ -14,6 +14,22 @@ _supabase_client: Optional[Client] = None
 _supabase_admin_client: Optional[Client] = None
 
 
+def _missing_plan_column(exc: Exception) -> bool:
+    """True when PostgREST rejected payments.plan because the column is not there yet."""
+    code = str(getattr(exc, "code", "") or "")
+    text = " ".join(
+        str(part) for part in (
+            exc,
+            code,
+            getattr(exc, "message", ""),
+            getattr(exc, "details", ""),
+        )
+    ).lower()
+    if "plan" not in text:
+        return False
+    return code == "PGRST204" or "schema cache" in text
+
+
 def _is_missing_row(exc: Exception) -> bool:
     """PostgREST .single() raises PGRST116 when the lookup finds nothing."""
     if not isinstance(exc, APIError) or exc.code != "PGRST116":
@@ -158,13 +174,31 @@ class Database:
             logger.error(f"[DB] Error getting user by email {email}: {e}")
             return None
 
+    def _insert_payment(self, data: dict) -> Optional[dict]:
+        result = self.client.table("payments").insert(data).execute()
+        return result.data[0] if result.data else None
+
     async def create_payment_record(self, data: dict) -> Optional[dict]:
-        """Create a payment record"""
+        """Create a payment record.
+
+        payments.plan is optional until that column exists. A missing column
+        is stored in description instead, so checkout still starts.
+        """
         logger.info(f"[DB] create_payment_record: user={data.get('user_id')}, amount={data.get('amount')}")
         try:
-            result = self.client.table("payments").insert(data).execute()
-            return result.data[0] if result.data else None
+            return self._insert_payment(data)
         except Exception as e:
+            if "plan" in data and _missing_plan_column(e):
+                logger.warning(
+                    "[DB] payments.plan is not in the database yet; "
+                    "the plan id stays in the payment description"
+                )
+                slim = {key: value for key, value in data.items() if key != "plan"}
+                try:
+                    return self._insert_payment(slim)
+                except Exception as retry_error:
+                    logger.error(f"[DB] Error creating payment record: {retry_error}")
+                    return None
             logger.error(f"[DB] Error creating payment record: {e}")
             return None
 
