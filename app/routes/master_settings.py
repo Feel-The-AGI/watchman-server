@@ -3,6 +3,8 @@ Master Settings API Routes
 Single source of truth for all user parameters
 """
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
@@ -11,8 +13,9 @@ from typing import Optional, Any, Dict
 from app.middleware.auth import get_current_user
 from app.database import Database
 from app.engines.calendar_authority import cycle_is_present, sync_cycle_row
-from app.engines.master_settings_service import create_master_settings_service
+from app.engines.master_settings_service import VersionConflictError, create_master_settings_service
 from app.onboarding import finish_onboarding_for_saved_cycle
+from app.routes.cycles import rebuild_for_user
 
 
 router = APIRouter(prefix="/master-settings", tags=["master-settings"])
@@ -25,6 +28,37 @@ def _saved_cycle(result, fallback) -> Optional[dict]:
     if isinstance(saved, dict):
         return saved
     return fallback if isinstance(fallback, dict) else None
+
+
+def _cycle_changed(old, new) -> bool:
+    """True when the saved document has a cycle and it is not the previous one."""
+    if not cycle_is_present(new if isinstance(new, dict) else None):
+        return False
+    old_token = json.dumps(old, sort_keys=True, default=str) if isinstance(old, dict) else None
+    new_token = json.dumps(new, sort_keys=True, default=str)
+    return old_token != new_token
+
+
+async def _stored_cycle(service, user_id: str):
+    try:
+        current = await service.get(user_id)
+    except Exception as exc:
+        logger.warning(f"Could not read settings before save for {user_id}: {exc}")
+        return None
+    if not isinstance(current, dict):
+        return None
+    return (current.get("settings") or {}).get("cycle")
+
+
+async def _sync_changed_cycle(db, user_id: str, saved_cycle, old_cycle) -> None:
+    if cycle_is_present(saved_cycle if isinstance(saved_cycle, dict) else None):
+        try:
+            await sync_cycle_row(db, user_id, saved_cycle, require_id=True)
+        except Exception as exc:
+            logger.warning(f"Could not sync cycles row after settings save for {user_id}: {exc}")
+        await finish_onboarding_for_saved_cycle(db, user_id)
+    if _cycle_changed(old_cycle, saved_cycle):
+        await rebuild_for_user(db, user_id)
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -68,23 +102,23 @@ async def update_master_settings(
     """
     db = Database(use_admin=True)
     service = create_master_settings_service(db)
-    
+    old_cycle = await _stored_cycle(service, user["id"])
+
     try:
         result = await service.update(
-            user["id"], 
+            user["id"],
             request.settings,
             request.expected_version
         )
-        saved = _saved_cycle(result, (request.settings or {}).get("cycle"))
-        if cycle_is_present(saved):
-            await sync_cycle_row(db, user["id"], saved, require_id=True)
-            await finish_onboarding_for_saved_cycle(db, user["id"])
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))  # Conflict
+    except VersionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception as e:
         logger.exception(f"[SETTINGS] Failed to update master settings for {user['id']}: {e}")
         raise HTTPException(status_code=500, detail="Could not save your settings. Please try again.")
+
+    saved = _saved_cycle(result, (request.settings or {}).get("cycle"))
+    await _sync_changed_cycle(db, user["id"], saved, old_cycle)
+    return result
 
 
 @router.patch("/{section}")
@@ -108,18 +142,18 @@ async def update_section(
     
     db = Database(use_admin=True)
     service = create_master_settings_service(db)
-    
+    old_cycle = await _stored_cycle(service, user["id"]) if section == "cycle" else None
+
     try:
         result = await service.update_section(user["id"], section, request.value)
-        if section == "cycle":
-            saved = _saved_cycle(result, request.value if isinstance(request.value, dict) else None)
-            if cycle_is_present(saved):
-                await sync_cycle_row(db, user["id"], saved, require_id=True)
-                await finish_onboarding_for_saved_cycle(db, user["id"])
-        return result
     except Exception as e:
         logger.exception(f"[SETTINGS] Failed to update {section} for {user['id']}: {e}")
         raise HTTPException(status_code=500, detail="Could not save your settings. Please try again.")
+
+    if section == "cycle":
+        saved = _saved_cycle(result, request.value if isinstance(request.value, dict) else None)
+        await _sync_changed_cycle(db, user["id"], saved, old_cycle)
+    return result
 
 
 @router.get("/snapshot")

@@ -327,6 +327,26 @@ async def remember_cycle(db, user_id: str, cycle_row: dict, service=None, *, rep
     return True
 
 
+def pattern_length(pattern) -> Optional[int]:
+    """Sum of block lengths. duration wins over days. None when there is nothing to sum."""
+    if not isinstance(pattern, list) or not pattern:
+        return None
+    total = 0
+    for block in pattern:
+        if not isinstance(block, dict):
+            continue
+        raw = block.get("duration")
+        if raw in (None, ""):
+            raw = block.get("days")
+        if raw in (None, ""):
+            continue
+        try:
+            total += int(raw)
+        except (TypeError, ValueError):
+            continue
+    return total or None
+
+
 def _cycle_row_fields(cycle: dict) -> dict:
     """Settings-cycle fields that belong on the cycles table."""
     anchor_date = None
@@ -346,6 +366,9 @@ def _cycle_row_fields(cycle: dict) -> dict:
     length = cycle.get("total_days")
     if length is None:
         length = cycle.get("cycle_length")
+    # An explicit length is kept even when it disagrees with the pattern.
+    if length is None and cycle.get("pattern") is not None:
+        length = pattern_length(cycle.get("pattern"))
     fields = {}
     if cycle.get("pattern") is not None:
         fields["pattern"] = cycle.get("pattern")

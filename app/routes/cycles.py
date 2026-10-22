@@ -15,6 +15,7 @@ from app.engines.command_executor import create_command_executor
 from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_authority import (
     engine_cycle,
+    pattern_length,
     projection_for_user,
     remember_cycle,
     sync_cycle_row,
@@ -42,6 +43,10 @@ def _overlay_cycle_patch(current_cycle, update_data: dict, cycle_id: str) -> dic
         merged["pattern"] = update_data["pattern"]
     if "cycle_length" in update_data:
         merged["total_days"] = update_data["cycle_length"]
+    elif "pattern" in update_data:
+        derived = pattern_length(update_data["pattern"])
+        if derived is not None:
+            merged["total_days"] = derived
     if "anchor_date" in update_data:
         merged["anchor_date"] = update_data["anchor_date"]
     if "anchor_cycle_day" in update_data:
@@ -49,6 +54,28 @@ def _overlay_cycle_patch(current_cycle, update_data: dict, cycle_id: str) -> dic
     if not merged.get("id"):
         merged["id"] = cycle_id
     return merged
+
+
+async def rebuild_for_user(db, user_id: str) -> None:
+    """Rewrite stored calendar days from the settings cycle.
+
+    PATCH /api/cycles and a changed master-settings cycle both use this.
+    A missing anchor or a failed write is logged and does not undo the save.
+    """
+    try:
+        projection = await projection_for_user(db, user_id)
+        prepared = engine_cycle(projection.get("cycle") or {})
+        anchor_value = prepared.get("anchor_date")
+        if not anchor_value:
+            return
+        anchor_date = anchor_value if not isinstance(anchor_value, str) else date.fromisoformat(str(anchor_value)[:10])
+        start_date, end_date = generation_bounds(anchor_date)
+        logger.info(f"Regenerating calendar from {start_date} to {end_date}")
+        executor = create_command_executor(db, user_id)
+        await executor.rebuild_calendar(start_date, end_date)
+        logger.info(f"Regenerated calendar from {start_date} to {end_date}")
+    except Exception as exc:
+        logger.error(f"Failed to regenerate calendar: {exc}")
 
 
 class CycleBlockSchema(BaseModel):
@@ -278,26 +305,10 @@ async def update_cycle(
             logger.warning(f"Could not mirror cycle {cycle_id} into settings for {user['id']}: {exc}")
     await finish_onboarding_for_saved_cycle(db, user["id"])
     
-    # AUTO-REGENERATE CALENDAR if pattern/anchor changed.
     # Regeneration reads Master Settings, not the relational row, so a different
     # saved cycle cannot be overwritten by this update.
     if needs_regeneration and cycle:
-        projection = await projection_for_user(db, user["id"])
-        prepared = engine_cycle(projection.get("cycle") or cycle)
-        anchor_date_str = prepared.get("anchor_date")
-        if anchor_date_str:
-            from datetime import date as date_module
-            anchor_date = date_module.fromisoformat(str(anchor_date_str)[:10])
-            start_date, end_date = generation_bounds(anchor_date)
-            
-            logger.info(f"Regenerating calendar from {start_date} to {end_date} after cycle update")
-            
-            try:
-                executor = create_command_executor(db, user["id"])
-                await executor.rebuild_calendar(start_date, end_date)
-                logger.info(f"Regenerated calendar from {start_date} to {end_date}")
-            except Exception as e:
-                logger.error(f"Failed to regenerate calendar: {e}")
+        await rebuild_for_user(db, user["id"])
     
     return {
         "success": True,
