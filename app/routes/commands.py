@@ -13,7 +13,7 @@ from uuid import UUID
 
 from app.middleware.auth import get_current_user, get_effective_tier
 from app.database import Database
-from app.engines.command_executor import create_command_executor
+from app.engines.command_executor import UndoConflict, create_command_executor
 from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 
 
@@ -270,6 +270,8 @@ async def undo_command(
     try:
         result = await executor.execute(command, source="api", skip_validation=True)
         return result
+    except UndoConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as e:
         logger.exception(f"[COMMANDS] Undo failed for user {user['id']}: {e}")
         raise HTTPException(status_code=500, detail="That action could not be completed. Please try again.")
@@ -299,6 +301,8 @@ async def redo_command(
     try:
         result = await executor.execute(command, source="api", skip_validation=True)
         return result
+    except UndoConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as e:
         logger.exception(f"[COMMANDS] Redo failed for user {user['id']}: {e}")
         raise HTTPException(status_code=500, detail="That action could not be completed. Please try again.")

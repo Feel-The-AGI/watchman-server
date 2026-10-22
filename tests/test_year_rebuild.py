@@ -1,4 +1,7 @@
-"""GET /year keeps document leave, commitments, and manual overrides."""
+"""GET /year keeps a real commitment and a manual override.
+
+A settings leave with no table row stays in the document and is not painted.
+"""
 
 from types import SimpleNamespace
 
@@ -227,8 +230,9 @@ async def test_v2_year_keeps_document_leave_override_and_commitment(monkeypatch)
     assert "block_day" in blank["state_json"]
     assert "shift_badge" in blank["state_json"]
 
-    assert leave["state_json"]["is_leave"] is True
+    assert leave["state_json"]["is_leave"] is False
     assert leave["state_json"]["engine_version"] == CALENDAR_ENGINE_VERSION
+    assert STORE.settings["leave_blocks"][0]["id"] == "leave-1"
     assert leave["shift_badge"].startswith("D")
     assert leave["block_day"] == leave["state_json"]["block_day"]
 
@@ -244,7 +248,7 @@ async def test_v2_year_keeps_document_leave_override_and_commitment(monkeypatch)
     assert STORE.upserts == upserts_after_first
     assert STORE.deletes == 0
     assert _day(second, "2026-01-01")["work_type"] == "blank"
-    assert _day(second, "2026-11-02")["state_json"]["is_leave"] is True
+    assert _day(second, "2026-11-02")["state_json"]["is_leave"] is False
     assert [chip["name"] for chip in _day(second, "2026-10-27")["state_json"]["commitments"]] == [
         "Dentist appointment"
     ]

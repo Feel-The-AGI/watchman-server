@@ -69,7 +69,13 @@ class _DB:
         }]
 
     async def read_leave_blocks(self, user_id):
-        return []
+        return [{
+            "id": "leave-1",
+            "user_id": user_id,
+            "name": "Annual",
+            "start_date": LEAVE_DAY,
+            "end_date": LEAVE_DAY,
+        }]
 
     async def read_commitments(self, user_id):
         return []
