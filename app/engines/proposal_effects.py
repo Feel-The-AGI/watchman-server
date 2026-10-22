@@ -298,15 +298,13 @@ def _describe_override(payload: dict) -> str:
 
 
 def _describe_cycle(payload: dict) -> str:
-    shift = payload.get("shift_by_days")
-    if shift is not None and shift != "":
-        try:
-            count = int(shift)
-        except (TypeError, ValueError):
-            count = None
-        if count is not None:
-            unit = "day" if abs(count) == 1 else "days"
-            return f"Shift your rotation by {count} {unit}"
+    from app.engines.command_executor import cycle_shift_days
+
+    count = cycle_shift_days(payload)
+    if count is not None:
+        unit = "day" if abs(count) == 1 else "days"
+        direction = "later" if count > 0 else "earlier"
+        return f"Move your rotation {abs(count)} {unit} {direction}"
     pattern = _pattern_phrase(payload.get("pattern"))
     anchor = _as_date(payload.get("anchor_date"))
     cycle_day = payload.get("anchor_cycle_day")

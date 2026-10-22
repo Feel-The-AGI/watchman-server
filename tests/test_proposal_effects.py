@@ -110,7 +110,24 @@ def test_a_commitment_card_shows_the_payload_times():
     ("update_cycle", {
         "name": "14/14",
         "shift_by_days": -1,
-    }, "Shift your rotation by -1 day"),
+    }, "Move your rotation 1 day earlier"),
+    ("update_cycle", {
+        "shift_by_days": 1,
+    }, "Move your rotation 1 day later"),
+    ("update_cycle", {
+        "shift_by_days": -2,
+    }, "Move your rotation 2 days earlier"),
+    ("update_cycle", {"shift_by_days": True}, "Update the rotation"),
+    ("update_cycle", {"shift_by_days": 2.5}, "Update the rotation"),
+    ("update_cycle", {"shift_by_days": 367}, "Update the rotation"),
+    ("update_cycle", {
+        "anchor_date": "2026-11-01",
+        "shift_by_days": 4,
+    }, "Set rotation to anchored on Sun 1 Nov"),
+    ("update_cycle", {
+        "anchor": {"date": "2026-11-01", "cycle_day": 1},
+        "shift_by_days": 4,
+    }, "Set rotation to anchored on Sun 1 Nov as day 1"),
     ("create_daily_log", {
         "date": "2026-10-27",
         "note": "Training",

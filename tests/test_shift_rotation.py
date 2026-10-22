@@ -182,6 +182,21 @@ async def _save(payload):
 
 
 @pytest.mark.asyncio
+async def test_a_nested_anchor_wins_over_a_shift():
+    payload = {
+        "anchor": {"date": "2026-11-01", "cycle_day": 1},
+        "shift_by_days": 4,
+    }
+    saved, records = await _capture(_save(payload))
+    assert saved["cycle"]["anchor_date"] == "2026-11-01"
+    assert saved["cycle"]["anchor_cycle_day"] == 1
+    assert any(
+        "2026-11-01" in record["message"] and "4" in record["message"]
+        for record in records
+    )
+
+
+@pytest.mark.asyncio
 async def test_an_explicit_anchor_wins_over_a_shift():
     payload = {
         "anchor_date": "2026-11-01",
