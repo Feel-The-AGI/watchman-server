@@ -421,15 +421,19 @@ class CommandExecutor:
             else:
                 normalized_pattern.append(block)
         
-        # Build normalized cycle data with flat anchor format
+        # Build normalized cycle data with flat anchor format.
+        # A missing id stays missing. Inventing one would match no cycles row,
+        # so the single active row could not be synced.
+        cycle_id = payload.get("id") or existing_cycle.get("id")
         cycle_data = {
-            "id": payload.get("id", existing_cycle.get("id", str(uuid4()))),
             "name": payload.get("name", existing_cycle.get("name", "My Rotation")),
             "pattern": normalized_pattern,
             "anchor_date": anchor_date,
             "anchor_cycle_day": anchor_cycle_day,
             "total_days": sum(block.get("duration", 0) for block in normalized_pattern) or existing_cycle.get("total_days", 15)
         }
+        if cycle_id not in (None, ""):
+            cycle_data["id"] = cycle_id
         
         await self.settings_service.update_section(self.user_id, "cycle", cycle_data)
         await sync_cycle_row(self.db, self.user_id, cycle_data)

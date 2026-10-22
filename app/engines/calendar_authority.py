@@ -299,24 +299,25 @@ async def projection_for_user(db, user_id: str) -> dict:
     return chosen
 
 
-async def remember_cycle(db, user_id: str, cycle_row: dict, service=None) -> bool:
-    """Copy a cycle create/update into Master Settings when may_replace_cycle allows it.
+async def remember_cycle(db, user_id: str, cycle_row: dict, service=None, *, replace: bool = False) -> bool:
+    """Copy a cycle row into Master Settings.
 
-    An empty document is filled in. A document that already tracks a different
-    cycle id is left alone, so a stale row cannot replace it. The cycles API
-    is the client's one write: it stores the rotation and the route then
-    generates calendar days once. Calendar generate does not call this.
+    replace=True is an explicit new rotation (POST /api/cycles): the settings
+    cycle is always overwritten. Otherwise may_replace_cycle decides. An empty
+    document is filled in, and a different cycle id is left alone so a stale
+    row cannot replace it. Calendar generate does not call this.
     """
     service = service or MasterSettingsService(db)
     incoming = cycle_from_row(cycle_row)
-    try:
-        current = await service.get(user_id)
-        existing = (current.get("settings") or {}).get("cycle") if isinstance(current, dict) else None
-    except Exception as exc:
-        logger.warning(f"Could not read the cycle document for {user_id}: {exc}")
-        return False
-    if not may_replace_cycle(existing, incoming):
-        return False
+    if not replace:
+        try:
+            current = await service.get(user_id)
+            existing = (current.get("settings") or {}).get("cycle") if isinstance(current, dict) else None
+        except Exception as exc:
+            logger.warning(f"Could not read the cycle document for {user_id}: {exc}")
+            return False
+        if not may_replace_cycle(existing, incoming):
+            return False
     try:
         await service.update_section(user_id, "cycle", incoming)
     except Exception as exc:

@@ -163,10 +163,10 @@ async def create_cycle(
     
     # Create the new cycle
     cycle = await db.create_cycle(cycle_data)
-    
-    # Master Settings is the source. This write is skipped when the document
-    # already tracks a different cycle, so a stale row cannot replace it.
-    await remember_cycle(db, user["id"], cycle)
+
+    # Creating a rotation is the user's choice of the active cycle, so the
+    # settings copy is replaced even when it still tracks another id.
+    await remember_cycle(db, user["id"], cycle, replace=True)
     projection = await projection_for_user(db, user["id"])
     source = projection.get("cycle") or cycle
     prepared = engine_cycle(source)

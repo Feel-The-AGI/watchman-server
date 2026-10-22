@@ -185,6 +185,12 @@ async def test_cycle_create_copies_into_an_empty_document_only():
     assert same.cycle["id"] == "chat-cycle"
     assert same.cycle["anchor_date"] == "2026-10-21"
 
+    forced = MemorySettings(dict(ROTATION))
+    wrote = await remember_cycle(None, "user", SAVED_ROW, service=forced, replace=True)
+    assert wrote is True
+    assert forced.cycle["id"] == "saved-row"
+    assert forced.cycle["anchor_date"] == "2026-10-21"
+
 
 @pytest.mark.asyncio
 async def test_agent_blocks_study_on_a_real_night_and_allows_an_off_day():
