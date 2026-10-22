@@ -325,8 +325,35 @@ class EmailService:
         self,
         to: str,
         user_name: str,
+        plan_name: str = None,
+        ends_on=None,
     ) -> bool:
-        """Send thank you email when user upgrades to Pro"""
+        """Send thank you email when a prepaid Pro period is paid."""
+        labels = {
+            "monthly": "Monthly",
+            "yearly": "Yearly",
+            "founding_yearly": "Founding yearly",
+        }
+        bought = labels.get(str(plan_name or ""), "Pro")
+        if hasattr(ends_on, "strftime"):
+            end_text = f"{ends_on.day} {ends_on.strftime('%b %Y')}"
+        else:
+            end_text = str(ends_on) if ends_on else None
+        period = f"{bought}, through {end_text}." if end_text else f"{bought}."
+        features = (
+            "Unlimited rotations and commitments",
+            "Planning beyond 3 months",
+            "Leave planning",
+            "Unlimited chat and full history",
+            "Calendar sharing",
+            "CSV and PDF exports",
+        )
+        feature_rows = "".join(
+            "<div style=\"margin: 12px 0; color: #e5e5e5;\">"
+            "<span style=\"color: #10b981; font-size: 18px; margin-right: 12px;\">✓</span>"
+            f"<span style=\"color: #e5e5e5;\">{feature}</span></div>"
+            for feature in features
+        )
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -342,32 +369,17 @@ class EmailService:
                 <div style="line-height: 1.8; color: #e5e5e5;">
                     <p style="color: #e5e5e5;">Hey {user_name},</p>
 
-                    <p style="color: #e5e5e5;"><strong style="color: #ffffff;">Thank you so much for upgrading to Pro!</strong></p>
+                    <p style="color: #e5e5e5;"><strong style="color: #ffffff;">Thank you for buying Pro.</strong></p>
 
-                    <p style="color: #e5e5e5;">Your support means the world to us. Seriously. We're a small team, and every Pro member helps us keep building and improving Watchman.</p>
+                    <p style="color: #e5e5e5;">This is a one-off payment. Nothing will be charged again. Your plan: {period}</p>
 
                     <div style="background-color: #0a0a0f; border-radius: 12px; padding: 20px; margin: 24px 0;">
-                        <p style="margin: 0 0 16px 0; font-weight: 600; color: #ffffff;">You now have access to:</p>
-                        <div style="margin: 12px 0; color: #e5e5e5;">
-                            <span style="color: #10b981; font-size: 18px; margin-right: 12px;">✓</span>
-                            <span style="color: #e5e5e5;"><strong style="color: #ffffff;">Calendar Sharing</strong> - Share your schedule with anyone</span>
-                        </div>
-                        <div style="margin: 12px 0; color: #e5e5e5;">
-                            <span style="color: #10b981; font-size: 18px; margin-right: 12px;">✓</span>
-                            <span style="color: #e5e5e5;"><strong style="color: #ffffff;">Weighted Constraints</strong> - Advanced scheduling with priorities</span>
-                        </div>
-                        <div style="margin: 12px 0; color: #e5e5e5;">
-                            <span style="color: #10b981; font-size: 18px; margin-right: 12px;">✓</span>
-                            <span style="color: #e5e5e5;"><strong style="color: #ffffff;">PDF Exports</strong> - Beautiful reports for incidents & logs</span>
-                        </div>
-                        <div style="margin: 12px 0; color: #e5e5e5;">
-                            <span style="color: #10b981; font-size: 18px; margin-right: 12px;">✓</span>
-                            <span style="color: #e5e5e5;"><strong style="color: #ffffff;">Priority Support</strong> - We've got your back</span>
-                        </div>
+                        <p style="margin: 0 0 16px 0; font-weight: 600; color: #ffffff;">Pro includes:</p>
+                        {feature_rows}
                     </div>
 
                     <p style="text-align: center;">
-                        <a href="https://trywatchman.app/dashboard" style="display: inline-block; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #ffffff; padding: 14px 28px; border-radius: 12px; text-decoration: none; font-weight: 600; margin: 24px 0;">Explore Pro Features →</a>
+                        <a href="https://trywatchman.app/dashboard" style="display: inline-block; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #ffffff; padding: 14px 28px; border-radius: 12px; text-decoration: none; font-weight: 600; margin: 24px 0;">Open Watchman</a>
                     </p>
 
                     <p style="color: #e5e5e5;">Got ideas for new features? We're all ears. Just reply to this email.</p>
@@ -377,9 +389,6 @@ class EmailService:
                         <p style="margin: 0; color: #ffffff;"><strong>Médina & Jason</strong></p>
                         <p style="color: #9ca3af; font-size: 14px; margin-top: 4px;">Co-founders, Watchman</p>
                     </div>
-                </div>
-                <div style="margin-top: 32px; text-align: center; color: #9ca3af; font-size: 12px;">
-                    <p style="color: #9ca3af;">Manage your subscription at <a href="https://trywatchman.app/dashboard/settings" style="color: #6366f1;">trywatchman.app/settings</a></p>
                 </div>
             </div>
         </body>
