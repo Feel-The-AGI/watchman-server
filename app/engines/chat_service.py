@@ -53,6 +53,7 @@ from app.engines.day_status import (
     status_from_stored,
 )
 from app.engines.proposal_effects import card_command
+from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 from app.prompts.registry import insert_row, load_version, version_for
 
 
@@ -564,6 +565,7 @@ class ChatService:
         pattern: Optional[list] = None,
         onboarding_completed: bool = True,
         timezone_name: Optional[str] = None,
+        effective_tier: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send a message and get agent response using tool calling.
@@ -712,6 +714,14 @@ class ChatService:
                 "it repeats a declined proposal"
             )
             response_text = declined_again_reply(tool["name"], tool.get("input") or {})
+            tool = None
+        if tool and tool.get("name") and leave_blocked(
+            effective_tier or "", tool["name"], tool.get("input") or {}
+        ):
+            logger.info(
+                f"[CHAT] Leave planning blocked for free user {self.user_id}"
+            )
+            response_text = LEAVE_PRO_REPLY
             tool = None
         if tool and tool.get("name"):
             payload = tool.get("input") or {}

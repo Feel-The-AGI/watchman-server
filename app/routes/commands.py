@@ -11,9 +11,10 @@ from typing import Optional, Literal
 from datetime import datetime, timezone
 from uuid import UUID
 
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, get_effective_tier
 from app.database import Database
 from app.engines.command_executor import create_command_executor
+from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 
 
 router = APIRouter(prefix="/commands", tags=["commands"])
@@ -154,6 +155,14 @@ async def review_proposal(
         _restore_pending_proposal(db, proposal_id, user["id"])
         raise HTTPException(status_code=409, detail="Stored proposal command is invalid")
     executor = create_command_executor(db, user["id"])
+    executor.effective_tier = get_effective_tier(user)
+    if isinstance(command, dict) and leave_blocked(
+        executor.effective_tier,
+        command.get("action") or "",
+        command.get("payload") or {},
+    ):
+        _restore_pending_proposal(db, proposal_id, user["id"])
+        raise HTTPException(status_code=403, detail=LEAVE_PRO_REPLY)
     # Revalidate against the current calendar and constraints at approval time.
     # A failed write, including a database error, puts the proposal back to
     # pending and returns an error. The client must not show Done.

@@ -24,6 +24,7 @@ from app.engines.calendar_authority import (
     night_shift_dates,
     sync_cycle_row,
 )
+from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 from app.onboarding import finish_onboarding_for_saved_cycle
 from app.prompts.registry import insert_row
 from app.engines.proposal_effects import (
@@ -194,6 +195,10 @@ class CommandExecutor:
         """
         # The stored card text is the payload summary, not the model's sentence.
         command = card_command(command)
+        action = command.get("action")
+        payload = command.get("payload") or {}
+        if leave_blocked(getattr(self, "effective_tier", None) or "", action, payload):
+            raise ValueError(LEAVE_PRO_REPLY)
         # Validate first
         validation = await self.validate_command(command)
         if prompt_version:
@@ -253,7 +258,9 @@ class CommandExecutor:
         
         if action not in VALID_ACTIONS:
             raise ValueError(f"Unknown action: {action}")
-        
+        if leave_blocked(getattr(self, "effective_tier", None) or "", action, payload):
+            return {"success": False, "error": LEAVE_PRO_REPLY, "code": "leave_pro"}
+
         # Validate unless skipping
         if not skip_validation and action not in ["undo", "redo"]:
             validation = await self.validate_command(command)

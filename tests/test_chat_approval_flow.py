@@ -104,7 +104,9 @@ def test_history_rejects_invalid_limits(flow, limit):
 
 def test_chat_proposes_by_default_and_refuses_auto_execution(flow):
     assert flow.client.post("/api/chat/message", json={"content": "Add leave"}).status_code == 200
-    flow.service.send_message.assert_awaited_once_with(content="Add leave", auto_execute=False)
+    flow.service.send_message.assert_awaited_once_with(
+        content="Add leave", auto_execute=False, effective_tier="pro",
+    )
     assert flow.client.post("/api/chat/message", json={
         "content": "Add leave", "auto_execute": True,
     }).status_code == 422
