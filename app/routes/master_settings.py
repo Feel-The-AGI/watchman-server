@@ -31,9 +31,18 @@ def _has_anchor(cycle: dict) -> bool:
     return cycle.get("anchor_date") not in (None, "")
 
 
-def _require_anchor(cycle) -> None:
-    """A saved rotation object needs a start date. null means no rotation yet."""
-    if isinstance(cycle, dict) and not _has_anchor(cycle):
+class _UnreadableCycle:
+    """The stored cycle could not be read, so it cannot be compared."""
+
+
+_UNREADABLE = _UnreadableCycle()
+
+
+def _reject_changed_cycle_without_anchor(old_cycle, incoming) -> None:
+    """422 only when a no-anchor cycle is new or different. null is allowed."""
+    if not isinstance(incoming, dict) or _has_anchor(incoming):
+        return
+    if old_cycle is _UNREADABLE or _cycle_changed(old_cycle, incoming):
         raise HTTPException(status_code=422, detail=ANCHOR_REQUIRED)
 
 
@@ -60,10 +69,16 @@ async def _stored_cycle(service, user_id: str):
         current = await service.get(user_id)
     except Exception as exc:
         logger.warning(f"Could not read settings before save for {user_id}: {exc}")
-        return None
-    if not isinstance(current, dict):
-        return None
-    return (current.get("settings") or {}).get("cycle")
+        return _UNREADABLE
+    settings = current.get("settings") if isinstance(current, dict) else None
+    if not isinstance(settings, dict):
+        logger.warning(f"Could not read settings before save for {user_id}")
+        return _UNREADABLE
+    return settings.get("cycle")
+
+
+def _comparable_cycle(loaded):
+    return None if loaded is _UNREADABLE else loaded
 
 
 async def _sync_changed_cycle(db, user_id: str, saved_cycle, old_cycle) -> None:
@@ -116,10 +131,11 @@ async def update_master_settings(
     
     Use expected_version for optimistic locking to prevent conflicts.
     """
-    _require_anchor((request.settings or {}).get("cycle"))
     db = Database(use_admin=True)
     service = create_master_settings_service(db)
-    old_cycle = await _stored_cycle(service, user["id"])
+    loaded = await _stored_cycle(service, user["id"])
+    _reject_changed_cycle_without_anchor(loaded, (request.settings or {}).get("cycle"))
+    old_cycle = _comparable_cycle(loaded)
 
     try:
         result = await service.update(
@@ -157,11 +173,12 @@ async def update_section(
             detail=f"Invalid section. Valid sections: {', '.join(valid_sections)}"
         )
     
-    if section == "cycle":
-        _require_anchor(request.value)
     db = Database(use_admin=True)
     service = create_master_settings_service(db)
-    old_cycle = await _stored_cycle(service, user["id"]) if section == "cycle" else None
+    loaded = await _stored_cycle(service, user["id"]) if section == "cycle" else None
+    if section == "cycle":
+        _reject_changed_cycle_without_anchor(loaded, request.value)
+    old_cycle = _comparable_cycle(loaded)
 
     try:
         result = await service.update_section(user["id"], section, request.value)

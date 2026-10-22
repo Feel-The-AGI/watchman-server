@@ -906,3 +906,82 @@ async def test_a_null_cycle_saves_and_an_anchored_cycle_saves(monkeypatch):
     )
     assert db.document["cycle"]["anchor_date"] == ANCHOR
     assert db.rows[0]["anchor_date"] == ANCHOR
+
+
+def _unanchored(off_days=10):
+    return {
+        "name": "Default",
+        "pattern": [
+            {"label": "work_day", "duration": 5},
+            {"label": "work_night", "duration": 5},
+            {"label": "off", "duration": off_days},
+        ],
+        "anchor_date": None,
+        "anchor_cycle_day": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_cycle_without_an_anchor_still_saves_work_hours(monkeypatch):
+    row = _row(ANCHOR)
+    before_row = copy.deepcopy(row)
+    cycle = _unanchored()
+    db = _settings_db([row], {"cycle": copy.deepcopy(cycle), "work": {"shift_hours": 12}})
+    _wire_settings(monkeypatch, db)
+
+    result = await update_master_settings(
+        UpdateSettingsRequest(settings={"cycle": cycle, "work": {"shift_hours": 8}}),
+        {"id": "user-1"},
+    )
+
+    assert result["settings"]["work"]["shift_hours"] == 8
+    assert db.document["work"]["shift_hours"] == 8
+    assert db.document["cycle"] == cycle
+    assert db.rows[0] == before_row
+    assert db.updated == []
+
+
+@pytest.mark.asyncio
+async def test_a_changed_cycle_without_an_anchor_is_not_saved(monkeypatch):
+    row = _row(ANCHOR)
+    before_row = copy.deepcopy(row)
+    original = {"cycle": _unanchored(), "work": {"shift_hours": 12}}
+    db = _settings_db([row], copy.deepcopy(original))
+    _wire_settings(monkeypatch, db)
+
+    with pytest.raises(HTTPException) as exc:
+        await update_master_settings(
+            UpdateSettingsRequest(settings={"cycle": _unanchored(off_days=3), "work": {"shift_hours": 8}}),
+            {"id": "user-1"},
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "Your rotation needs a start date before it can be saved."
+    assert db.document == original
+    assert db.rows[0] == before_row
+    assert db.updated == []
+
+
+@pytest.mark.asyncio
+async def test_a_missing_stored_cycle_rejects_a_cycle_without_an_anchor(monkeypatch):
+    row = _row(ANCHOR)
+    before_row = copy.deepcopy(row)
+    original = {"cycle": _cycle(ANCHOR), "work": {"shift_hours": 12}}
+    db = _settings_db([row], copy.deepcopy(original))
+
+    class _Unread(_SettingsService):
+        async def get(self, user_id):
+            raise RuntimeError("settings unreadable")
+
+    _wire_settings(monkeypatch, db, service=_Unread(db))
+    with pytest.raises(HTTPException) as exc:
+        await update_master_settings(
+            UpdateSettingsRequest(settings={"cycle": _unanchored(), "work": {"shift_hours": 8}}),
+            {"id": "user-1"},
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "Your rotation needs a start date before it can be saved."
+    assert db.document == original
+    assert db.rows[0] == before_row
+    assert db.updated == []
