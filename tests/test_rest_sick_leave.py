@@ -81,6 +81,20 @@ async def test_free_vacation_is_pro_only(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_free_leave_without_a_type_is_refused(monkeypatch):
+    store = _Store()
+    _install(monkeypatch, store)
+
+    with pytest.raises(HTTPException) as exc:
+        await add_leave_block(_request(None), {"id": "alice", "tier": "free"})
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == LEAVE_PRO_REPLY
+    assert store.created is None
+    assert store.days[0]["state_json"]["is_leave"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("leave_type", ["sick", "annual"])
 async def test_pro_can_save_sick_and_vacation(monkeypatch, leave_type):
     store = _Store()
