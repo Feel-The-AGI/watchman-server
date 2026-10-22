@@ -47,6 +47,11 @@ class UndoConflict(Exception):
     """This undo or redo would skip or overwrite another change."""
 
 
+# Newest commands are enough to find the latest applied change and the
+# undone commands that follow it.
+COMMAND_LOG_READ_LIMIT = 100
+
+
 # Command action types
 # A failed commitment delete records ids here until a calendar read finishes the rebuild.
 PENDING_COMMITMENT_REMOVAL = "commitments_pending_removal"
@@ -971,7 +976,7 @@ class CommandExecutor:
     def _user_commands(self) -> list:
         result = self.db.client.table("command_log").select("*").eq(
             "user_id", self.user_id
-        ).execute()
+        ).order("created_at", desc=True).limit(COMMAND_LOG_READ_LIMIT).execute()
         return list(result.data or [])
 
     def _logged_command(self, command_id: str):
@@ -1021,11 +1026,37 @@ class CommandExecutor:
                 return True
         return False
 
+    def _redo_target(self, rows: list) -> Optional[dict]:
+        """The most recently undone command.
+
+        Undo peels applied commands from newest to oldest, so the command to
+        put back is the oldest undone one that is still newer than the latest
+        applied or redone command.
+        """
+        applied = [
+            row for row in rows
+            if row.get("action") not in ("undo", "redo")
+            and row.get("status") in ("applied", "redone")
+        ]
+        latest = max((str(row.get("created_at") or "") for row in applied), default="")
+        undone = [
+            row for row in rows
+            if row.get("action") not in ("undo", "redo")
+            and row.get("status") == "undone"
+            and str(row.get("created_at") or "") > latest
+        ]
+        if not undone:
+            return None
+        undone.sort(key=lambda row: str(row.get("created_at") or ""))
+        return undone[0]
+
     async def _action_undo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Undo the latest real command, or that command when its id is given.
 
         The status is claimed before any row is deleted. A second undo finds
-        nothing, because the undo itself is not logged as applied.
+        nothing, because the undo itself is not logged as applied. If the row
+        delete or the settings restore fails, the status goes back to what it
+        was so the undo can be retried.
         """
         requested = payload.get("command_id") if isinstance(payload, dict) else None
         rows = self._user_commands()
@@ -1040,32 +1071,33 @@ class CommandExecutor:
             if latest is None:
                 return {"message": "Nothing to undo"}
             command = latest
+        previous = command.get("status") or "applied"
         if not self._claim_status(command["id"], ("applied", "redone"), "undone"):
             raise UndoConflict("Only the latest applied change can be undone.")
-        await self._remove_created_row(command)
-
-        before_state = command.get("before_state")
-        if before_state:
-            await self.settings_service.update(self.user_id, before_state)
-            cycle = before_state.get("cycle") if isinstance(before_state, dict) else None
-            await sync_cycle_row(self.db, self.user_id, cycle)
+        try:
+            await self._remove_created_row(command)
+            before_state = command.get("before_state")
+            if before_state:
+                await self.settings_service.update(self.user_id, before_state)
+                cycle = before_state.get("cycle") if isinstance(before_state, dict) else None
+                await sync_cycle_row(self.db, self.user_id, cycle)
+        except Exception:
+            self._claim_status(command["id"], ("undone",), previous)
+            raise
         await self._rebuild_created_span(command)
         return {"undone_command_id": command["id"]}
 
     async def _action_redo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Redo one undone command.
+        """Redo the most recently undone command.
 
-        command_id selects that command. A newer applied or redone command
-        makes the redo a 409 so it cannot overwrite those settings. The status
-        is claimed before any row is inserted.
+        With no id, that is the oldest undone command newer than the latest
+        applied one. An id is accepted only when it is that command. Any other
+        id is a 409, including one blocked by a newer applied command. The
+        status is claimed before any row is inserted.
         """
         requested = payload.get("command_id") if isinstance(payload, dict) else None
         rows = self._user_commands()
-        undone = [
-            row for row in rows
-            if row.get("action") not in ("undo", "redo") and row.get("status") == "undone"
-        ]
-        undone.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        target = self._redo_target(rows)
         if requested not in (None, ""):
             chosen = self._logged_command(requested)
             if (
@@ -1074,13 +1106,15 @@ class CommandExecutor:
                 or chosen.get("status") != "undone"
             ):
                 raise UndoConflict("That change cannot be redone.")
+            if target is None or str(chosen.get("id")) != str(target.get("id")):
+                if self._newer_applied(chosen, rows):
+                    raise UndoConflict("A newer change was applied, so this one cannot be redone.")
+                raise UndoConflict("Only the most recently undone change can be redone.")
             command = chosen
         else:
-            if not undone:
+            if target is None:
                 return {"message": "Nothing to redo"}
-            command = undone[0]
-        if self._newer_applied(command, rows):
-            raise UndoConflict("A newer change was applied, so this one cannot be redone.")
+            command = target
         if not self._claim_status(command["id"], ("undone",), "redone"):
             raise UndoConflict("That change cannot be redone.")
         await self._restore_created_row(command)

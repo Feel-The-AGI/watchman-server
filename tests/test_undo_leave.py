@@ -284,6 +284,59 @@ async def test_undo_and_redo_of_an_approved_sick_day():
 
 
 @pytest.mark.asyncio
+async def test_two_undos_then_redo_restores_the_older_leave_first(monkeypatch):
+    store = _Store()
+    _wire(monkeypatch, store)
+    executor = _executor(store)
+    first = await executor.execute({
+        "action": "add_leave",
+        "payload": {"name": "A", "type": "sick", "date": SICK_DAY},
+        "explanation": "Leave A",
+    })
+    second = await executor.execute({
+        "action": "add_leave",
+        "payload": {
+            "name": "B", "type": "personal",
+            "start_date": OTHER_DAY, "end_date": OTHER_DAY,
+        },
+        "explanation": "Leave B",
+    })
+    assert first["success"] is True and second["success"] is True
+    a_id = first["result"]["inserted_leave_id"]
+    b_id = second["result"]["inserted_leave_id"]
+
+    await executor.execute({"action": "undo", "payload": {}, "explanation": "Undo"}, skip_validation=True)
+    await executor.execute({"action": "undo", "payload": {}, "explanation": "Undo"}, skip_validation=True)
+    assert _leave_ids(store) == set()
+    assert _settings_leave_ids(store) == set()
+
+    with pytest.raises(HTTPException) as exc:
+        await redo_command(RedoRequest(command_id=second["command_id"]), {"id": "user-1"})
+    assert exc.value.status_code == 409
+    assert b_id not in _leave_ids(store)
+
+    first_redo = await executor.execute(
+        {"action": "redo", "payload": {}, "explanation": "Redo"}, skip_validation=True,
+    )
+    assert first_redo["success"] is True
+    assert first_redo["result"]["redone_command_id"] == first["command_id"]
+    assert _leave_ids(store) == {a_id}
+    assert _settings_leave_ids(store) == {a_id}
+    assert _day(store, SICK_DAY)["state_json"]["is_leave"] is True
+    assert _day(store, OTHER_DAY)["state_json"]["is_leave"] is False
+
+    second_redo = await executor.execute(
+        {"action": "redo", "payload": {}, "explanation": "Redo"}, skip_validation=True,
+    )
+    assert second_redo["success"] is True
+    assert second_redo["result"]["redone_command_id"] == second["command_id"]
+    assert _leave_ids(store) == {a_id, b_id}
+    assert _settings_leave_ids(store) == {a_id, b_id}
+    assert _day(store, SICK_DAY)["state_json"]["is_leave"] is True
+    assert _day(store, OTHER_DAY)["state_json"]["is_leave"] is True
+
+
+@pytest.mark.asyncio
 async def test_undo_of_an_older_sick_day_log_removes_only_that_row():
     sick = {
         "id": "leave-sick",
