@@ -14,12 +14,39 @@ _supabase_client: Optional[Client] = None
 _supabase_admin_client: Optional[Client] = None
 
 
+class BillingStorageUnavailable(Exception):
+    """Stripe tables or columns are not in the database yet."""
+
+
 def _is_missing_row(exc: Exception) -> bool:
     """PostgREST .single() raises PGRST116 when the lookup finds nothing."""
     if not isinstance(exc, APIError) or exc.code != "PGRST116":
         return False
     details = f"{exc.message or ''} {exc.details or ''}".lower()
     return "0 rows" in details
+
+
+def _schema_missing(exc: Exception) -> bool:
+    """True when PostgREST or Postgres reports a missing table or column."""
+    code = str(getattr(exc, "code", "") or "")
+    if code in {"PGRST204", "PGRST205", "42P01", "42703"}:
+        return True
+    text = str(exc).lower()
+    return (
+        "does not exist" in text
+        or "schema cache" in text
+        or "could not find the" in text
+    )
+
+
+def _is_unique_violation(exc: Exception) -> bool:
+    code = str(getattr(exc, "code", "") or "")
+    text = str(exc).lower()
+    return code == "23505" or "23505" in text or "duplicate key" in text
+
+
+def _is_founding_cap(exc: Exception) -> bool:
+    return "founding_cap" in str(exc).lower()
 
 
 def init_supabase() -> None:
@@ -157,6 +184,59 @@ class Database:
         except Exception as e:
             logger.error(f"[DB] Error getting user by email {email}: {e}")
             return None
+
+    async def update_user_billing(self, user_id: str, data: dict) -> dict:
+        """Update Stripe ids, tier, or pro_expires_at. Raises if the columns are missing."""
+        try:
+            result = self.client.table("users").update(data).eq("id", user_id).execute()
+            if not result.data:
+                raise RuntimeError(f"user billing update returned no row for {user_id}")
+            return result.data[0]
+        except BillingStorageUnavailable:
+            raise
+        except Exception as e:
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            logger.error(f"[DB] Error updating billing for user {user_id}: {e}")
+            raise
+
+    async def get_user_by_stripe_customer(self, customer_id: str) -> Optional[dict]:
+        """Get user by Stripe customer id."""
+        if not customer_id:
+            return None
+        try:
+            result = (
+                self.client.table("users")
+                .select("*")
+                .eq("stripe_customer_id", customer_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            logger.error(f"[DB] Error getting user by stripe customer: {e}")
+            raise
+
+    async def get_user_by_stripe_subscription(self, subscription_id: str) -> Optional[dict]:
+        """Get user by Stripe subscription id."""
+        if not subscription_id:
+            return None
+        try:
+            result = (
+                self.client.table("users")
+                .select("*")
+                .eq("stripe_subscription_id", subscription_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            logger.error(f"[DB] Error getting user by stripe subscription: {e}")
+            raise
 
     async def create_payment_record(self, data: dict) -> Optional[dict]:
         """Create a payment record"""
@@ -685,6 +765,174 @@ class Database:
         except Exception as e:
             logger.error(f"[DB] Error updating subscription: {e}")
             return None
+
+    async def stripe_billing_ready(self) -> bool:
+        """False when migration 015 has not been applied. Other errors fail closed."""
+        try:
+            self.client.table("stripe_events").select("id").limit(1).execute()
+            self.client.table("stripe_founding_seats").select("user_id").limit(1).execute()
+            self.client.table("subscriptions").select("plan,stripe_status").limit(1).execute()
+            return True
+        except Exception as e:
+            if _schema_missing(e):
+                logger.warning(f"[DB] Stripe billing storage is not ready: {e}")
+                return False
+            logger.error(f"[DB] Stripe billing readiness check failed: {e}")
+            return False
+
+    async def get_stripe_subscription_row(self, user_id: str) -> Optional[dict]:
+        """Latest subscription row for Stripe state. None when the user has none."""
+        try:
+            result = (
+                self.client.table("subscriptions")
+                .select("*")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            logger.error(f"[DB] Error reading subscription for {user_id}: {e}")
+            raise
+
+    async def save_stripe_subscription(self, user_id: str, fields: dict) -> dict:
+        """Insert or update the user's subscription row with Stripe fields."""
+        try:
+            existing = (
+                self.client.table("subscriptions")
+                .select("id")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            payload = dict(fields)
+            if existing.data:
+                result = (
+                    self.client.table("subscriptions")
+                    .update(payload)
+                    .eq("id", existing.data[0]["id"])
+                    .execute()
+                )
+            else:
+                payload["user_id"] = user_id
+                result = self.client.table("subscriptions").insert(payload).execute()
+            if not result.data:
+                raise RuntimeError(f"subscription write returned no row for {user_id}")
+            return result.data[0]
+        except BillingStorageUnavailable:
+            raise
+        except Exception as e:
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            logger.error(f"[DB] Error saving Stripe subscription for {user_id}: {e}")
+            raise
+
+    async def count_founding_seats(self) -> int:
+        """Active and past founding seats. More than 100 still reports as over the cap."""
+        try:
+            result = (
+                self.client.table("stripe_founding_seats")
+                .select("id")
+                .limit(101)
+                .execute()
+            )
+            return len(result.data or [])
+        except Exception as e:
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            logger.error(f"[DB] Error counting founding seats: {e}")
+            raise
+
+    async def user_has_founding_seat(self, user_id: str) -> bool:
+        try:
+            result = (
+                self.client.table("stripe_founding_seats")
+                .select("user_id")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            return bool(result.data)
+        except Exception as e:
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            logger.error(f"[DB] Error reading founding seat for {user_id}: {e}")
+            raise
+
+    async def record_founding_seat(
+        self,
+        user_id: str,
+        subscription_id: Optional[str],
+        status: str,
+    ) -> str:
+        """Record one founding subscriber. Returns recorded, exists, or full."""
+        try:
+            existing = (
+                self.client.table("stripe_founding_seats")
+                .select("user_id")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            fields = {
+                "status": status,
+                "stripe_subscription_id": subscription_id,
+            }
+            # Assign the builder so a later .select() is not parsed as this table's columns.
+            seats = self.client.table("stripe_founding_seats")
+            if existing.data:
+                seats.update(fields).eq("user_id", user_id).execute()
+                return "exists"
+            seats.insert({"user_id": user_id, **fields}).execute()
+            return "recorded"
+        except Exception as e:
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            if _is_founding_cap(e):
+                return "full"
+            if _is_unique_violation(e):
+                seats = self.client.table("stripe_founding_seats")
+                seats.update({
+                    "status": status,
+                    "stripe_subscription_id": subscription_id,
+                }).eq("user_id", user_id).execute()
+                return "exists"
+            logger.error(f"[DB] Error recording founding seat for {user_id}: {e}")
+            raise
+
+    async def get_stripe_event(self, event_id: str) -> Optional[dict]:
+        try:
+            result = (
+                self.client.table("stripe_events")
+                .select("id,event_type")
+                .eq("id", event_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            logger.error(f"[DB] Error reading Stripe event {event_id}: {e}")
+            raise
+
+    async def insert_stripe_event(self, event_id: str, event_type: str) -> bool:
+        """True when this event id was stored. False when it was already stored."""
+        try:
+            result = self.client.table("stripe_events").insert({
+                "id": event_id,
+                "event_type": event_type,
+            }).execute()
+            return bool(result.data)
+        except Exception as e:
+            if _is_unique_violation(e):
+                return False
+            if _schema_missing(e):
+                raise BillingStorageUnavailable(str(e)) from e
+            logger.error(f"[DB] Error storing Stripe event {event_id}: {e}")
+            raise
 
     # ==========================================
     # Account Deletion
