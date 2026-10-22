@@ -157,6 +157,7 @@ def _pricing_body(*, claimed: Optional[int], founding_member: bool = False) -> d
     return {
         "currency": "GHS",
         "founding_available": available,
+        "founding_seats_left": open_seats,
         "seats_left": open_seats,
         "founding_member": founding_member,
         "yearly_amount_ghs": yearly_amount,

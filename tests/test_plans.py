@@ -64,6 +64,7 @@ def test_each_plan_has_a_fixed_ghs_amount_and_day_count():
 def test_pricing_offers_monthly_and_yearly_only():
     body = payments._pricing_body(claimed=100)
     assert body["founding_available"] is False
+    assert body["founding_seats_left"] == 0
     assert body["seats_left"] == 0
     assert [plan["id"] for plan in body["plans"]] == ["monthly", "yearly"]
     assert body["plans"][0]["amount_ghs"] == 70

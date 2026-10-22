@@ -49,11 +49,13 @@ def test_cap_boundary_is_99_open_and_100_closed():
 def test_price_endpoint_shows_seats_and_the_locked_price():
     at_99 = payments._pricing_body(claimed=99, founding_member=False)
     assert at_99["founding_available"] is True
+    assert at_99["founding_seats_left"] == 1
     assert at_99["seats_left"] == 1
     assert any(plan["id"] == "founding_yearly" and plan["amount_ghs"] == 420 for plan in at_99["plans"])
 
     at_100 = payments._pricing_body(claimed=100, founding_member=False)
     assert at_100["founding_available"] is False
+    assert at_100["founding_seats_left"] == 0
     assert at_100["seats_left"] == 0
     assert at_100["yearly_amount_ghs"] == 560
     assert "founding_yearly" not in {plan["id"] for plan in at_100["plans"]}
@@ -191,6 +193,7 @@ def test_pricing_http_reports_seats(monkeypatch):
     response = TestClient(app).get("/api/payments/pricing")
     assert response.status_code == 200
     body = response.json()
+    assert body["founding_seats_left"] == 1
     assert body["seats_left"] == 1
     assert body["founding_available"] is True
     app.dependency_overrides[get_current_user] = lambda: {
@@ -203,4 +206,5 @@ def test_pricing_http_reports_seats(monkeypatch):
     locked = TestClient(app).get("/api/payments/pricing")
     assert locked.status_code == 200
     assert locked.json()["yearly_amount_ghs"] == 420
+    assert locked.json()["founding_seats_left"] == 0
     assert locked.json()["seats_left"] == 0

@@ -186,7 +186,8 @@ def test_pricing_is_fixed_ghs_with_display_usd(live_client):
     plans = {item["id"]: item for item in body["plans"]}
     assert body["currency"] == "GHS"
     assert isinstance(body["founding_available"], bool)
-    assert isinstance(body["seats_left"], int) and body["seats_left"] >= 0
+    assert isinstance(body["founding_seats_left"], int) and body["founding_seats_left"] >= 0
+    assert body["seats_left"] == body["founding_seats_left"]
     assert plans["monthly"]["amount_ghs"] == 70
     assert plans["monthly"]["display_usd"] == 6
     assert plans["monthly"]["days"] == 30
