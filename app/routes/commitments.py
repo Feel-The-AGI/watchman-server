@@ -199,6 +199,8 @@ async def create_commitment(
     if not commitment:
         raise HTTPException(status_code=500, detail="Commitment could not be saved")
     outcome = await _publish_commitment(db, user["id"], commitment)
+    # A rebuild that already wrote the calendar must not be a 500. The client
+    # would retry, and a retry without an Idempotency-Key inserts a second row.
     if outcome == "unrecorded":
         raise HTTPException(status_code=500, detail="Commitment could not be saved")
 
@@ -280,7 +282,7 @@ async def update_commitment(
         raise HTTPException(status_code=500, detail="Commitment could not be saved")
     saved = {**existing, **commitment}
     outcome = await _publish_commitment(db, user["id"], saved)
-    if outcome == "unrecorded":
+    if outcome in ("unrecorded", "visible"):
         raise HTTPException(status_code=500, detail="Commitment could not be saved")
 
     return {
@@ -402,10 +404,12 @@ def _reusable_commitment(
 async def _publish_commitment(db: Database, user_id: str, saved: dict) -> str:
     """Copy the commitment into settings and rebuild the calendar.
 
-    "unrecorded" means the pending id was not saved. The caller returns 500
-    so a retry can finish the job. "pending" means the id was saved and a
-    later calendar read can finish the rebuild. "ready" means it is already
-    on the calendar.
+    "unrecorded" means the settings write and the rebuild both failed. Create
+    returns 500 so a retry with the same key can finish, and no calendar was
+    written for the client to keep. "visible" means the settings copy failed
+    and the rebuild succeeded, so the calendar already shows the row.
+    "pending" means the id was saved and a later calendar read can finish the
+    rebuild. "ready" means it is already on the calendar.
     """
     service = MasterSettingsService(db)
     saved_id = str(saved.get("id") or "")
@@ -442,8 +446,10 @@ async def _publish_commitment(db: Database, user_id: str, saved: dict) -> str:
     except Exception as exc:
         logger.error(f"[COMMITMENTS] Rebuild failed for {saved_id}: {exc}")
 
-    if not recorded:
+    if not recorded and not rebuilt:
         return "unrecorded"
+    if not recorded:
+        return "visible"
     if not rebuilt:
         return "pending"
 
