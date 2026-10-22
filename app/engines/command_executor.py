@@ -1038,13 +1038,20 @@ class CommandExecutor:
             if row.get("action") not in ("undo", "redo")
             and row.get("status") in ("applied", "redone")
         ]
-        latest = max((str(row.get("created_at") or "") for row in applied), default="")
-        undone = [
-            row for row in rows
-            if row.get("action") not in ("undo", "redo")
-            and row.get("status") == "undone"
-            and str(row.get("created_at") or "") > latest
-        ]
+        # No applied command means every undone command is still ahead of it.
+        # A missing timestamp must not look older than that empty boundary.
+        latest = max(
+            (str(row.get("created_at") or "") for row in applied),
+            default=None,
+        )
+        undone = []
+        for row in rows:
+            if row.get("action") in ("undo", "redo") or row.get("status") != "undone":
+                continue
+            stamp = str(row.get("created_at") or "")
+            if latest is not None and stamp <= latest:
+                continue
+            undone.append(row)
         if not undone:
             return None
         undone.sort(key=lambda row: str(row.get("created_at") or ""))
