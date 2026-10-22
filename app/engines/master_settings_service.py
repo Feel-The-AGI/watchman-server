@@ -32,6 +32,10 @@ DEFAULT_MASTER_SETTINGS = {
 }
 
 
+class VersionConflictError(Exception):
+    """expected_version does not match the stored settings document."""
+
+
 class MasterSettingsService:
     """Service for managing master settings"""
     
@@ -115,7 +119,9 @@ class MasterSettingsService:
         current = await self.get(user_id)
         
         if expected_version is not None and current["version"] != expected_version:
-            raise ValueError(f"Version mismatch: expected {expected_version}, got {current['version']}")
+            raise VersionConflictError(
+                f"Version mismatch: expected {expected_version}, got {current['version']}"
+            )
         
         new_version = current["version"] + 1
         

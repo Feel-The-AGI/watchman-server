@@ -432,6 +432,9 @@ class _SettingsService:
     def __init__(self, db):
         self.db = db
 
+    async def get(self, user_id):
+        return {"settings": self.db.document, "version": 1}
+
     async def update(self, user_id, settings, expected_version=None):
         self.db.document = settings
         return {"settings": settings, "version": 2}
@@ -567,12 +570,18 @@ def _fortnight_row():
     }
 
 
-def _wire_settings(monkeypatch, db):
+def _wire_settings(monkeypatch, db, rebuilt=None, service=None):
     monkeypatch.setattr("app.routes.master_settings.Database", lambda **kwargs: db)
     monkeypatch.setattr(
         "app.routes.master_settings.create_master_settings_service",
-        lambda _db: _SettingsService(db),
+        lambda _db: service or _SettingsService(db),
     )
+
+    async def rebuild(db_arg, user_id):
+        if rebuilt is not None:
+            rebuilt.append(user_id)
+
+    monkeypatch.setattr("app.routes.master_settings.rebuild_for_user", rebuild)
 
 
 @pytest.mark.asyncio
@@ -757,3 +766,78 @@ async def test_a_cycle_pattern_patch_sets_the_length_from_the_blocks(monkeypatch
         "cycle-1",
     )
     assert explicit["total_days"] == 99
+
+
+@pytest.mark.asyncio
+async def test_a_changed_settings_cycle_rebuilds_and_an_unchanged_one_does_not(monkeypatch):
+    rebuilt = []
+    row = _row(ANCHOR)
+    same = _cycle(ANCHOR)
+    db = _settings_db([row], {"cycle": same, "work": {"shift_hours": 12}})
+    _wire_settings(monkeypatch, db, rebuilt)
+
+    await update_section("work", UpdateSectionRequest(value={"shift_hours": 8}), {"id": "user-1"})
+    await update_master_settings(
+        UpdateSettingsRequest(settings={"cycle": same, "work": {"shift_hours": 8}}),
+        {"id": "user-1"},
+    )
+    assert rebuilt == []
+
+    changed = _cycle(SHIFTED)
+    await update_section("cycle", UpdateSectionRequest(value=changed), {"id": "user-1"})
+    assert rebuilt == ["user-1"]
+
+    await update_section("cycle", UpdateSectionRequest(value=changed), {"id": "user-1"})
+    assert rebuilt == ["user-1"]
+
+    await update_master_settings(
+        UpdateSettingsRequest(settings={"work": {"shift_hours": 6}}),
+        {"id": "user-1"},
+    )
+    assert rebuilt == ["user-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_version_mismatch_is_409_and_a_later_sync_error_is_not(monkeypatch):
+    from app.engines.master_settings_service import MasterSettingsService, VersionConflictError
+
+    service = MasterSettingsService.__new__(MasterSettingsService)
+
+    async def get(user_id):
+        return {"version": 4, "settings": {"cycle": None}}
+
+    service.get = get
+    with pytest.raises(VersionConflictError) as mismatch:
+        await MasterSettingsService.update(service, "user-1", {"work": {}}, expected_version=1)
+    assert "Version mismatch" in str(mismatch.value)
+
+    row = _row(ANCHOR)
+    db = _settings_db([row], {"cycle": _cycle(ANCHOR), "work": {"shift_hours": 12}})
+
+    class _Conflict(_SettingsService):
+        async def update(self, user_id, settings, expected_version=None):
+            if expected_version not in (None, 1):
+                raise VersionConflictError("Version mismatch: expected 2, got 1")
+            return await super().update(user_id, settings, expected_version)
+
+    _wire_settings(monkeypatch, db, service=_Conflict(db))
+    with pytest.raises(HTTPException) as exc:
+        await update_master_settings(
+            UpdateSettingsRequest(settings={"cycle": _cycle(ANCHOR), "work": {}}, expected_version=2),
+            {"id": "user-1"},
+        )
+    assert exc.value.status_code == 409
+    assert db.document["cycle"]["anchor_date"] == ANCHOR
+
+    async def fail_sync(*args, **kwargs):
+        raise ValueError("changed elsewhere")
+
+    monkeypatch.setattr("app.routes.master_settings.sync_cycle_row", fail_sync)
+    saved = _cycle(SHIFTED)
+    result = await update_master_settings(
+        UpdateSettingsRequest(settings={"cycle": saved, "work": {"shift_hours": 8}}),
+        {"id": "user-1"},
+    )
+    assert result["settings"]["cycle"]["anchor_date"] == SHIFTED
+    assert db.document["cycle"]["anchor_date"] == SHIFTED
+    assert "changed elsewhere" not in str(result)
