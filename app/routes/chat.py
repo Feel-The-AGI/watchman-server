@@ -11,6 +11,7 @@ from datetime import datetime
 
 from app.middleware.auth import get_current_user, get_effective_tier
 from app.database import Database
+from app.engines.chat_context import validate_onboarding_pattern
 from app.engines.chat_service import create_chat_service
 from app.engines.claude_chat import USER_FACING_MODEL_ERROR
 
@@ -21,9 +22,18 @@ FREE_HISTORY_LIMIT = 50   # Max history messages to retrieve
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
+class PatternBlock(BaseModel):
+    label: Optional[str] = None
+    duration: Optional[int] = None
+    type: Optional[str] = None
+    days: Optional[int] = None
+
+
 class SendMessageRequest(BaseModel):
     content: str
     auto_execute: Literal[False] = False
+    # The onboarding preset, sent before the cycle row exists.
+    pattern: Optional[List[PatternBlock]] = None
 
 
 class MessageResponse(BaseModel):
@@ -51,6 +61,19 @@ async def send_message(
     logger.info(f"[CHAT] POST /message - user_id: {user['id']}")
     logger.info(f"[CHAT] Message content: {request.content[:100]}..." if len(request.content) > 100 else f"[CHAT] Message content: {request.content}")
     logger.debug(f"[CHAT] auto_execute: {request.auto_execute}")
+
+    pattern = None
+    if request.pattern:
+        try:
+            pattern = validate_onboarding_pattern([
+                {
+                    "label": block.label if block.label is not None else block.type,
+                    "duration": block.duration if block.duration is not None else block.days,
+                }
+                for block in request.pattern
+            ])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
         db = Database(use_admin=True)
@@ -92,10 +115,17 @@ async def send_message(
         chat_service = create_chat_service(db, user["id"])
 
         logger.info(f"[CHAT] Sending message to Claude for user {user['id']}")
-        result = await chat_service.send_message(
-            content=request.content,
-            auto_execute=request.auto_execute
-        )
+        kwargs = {
+            "content": request.content,
+            "auto_execute": request.auto_execute,
+        }
+        if pattern:
+            kwargs["pattern"] = pattern
+        if user.get("onboarding_completed") is False:
+            kwargs["onboarding_completed"] = False
+        if user.get("timezone"):
+            kwargs["timezone_name"] = user["timezone"]
+        result = await chat_service.send_message(**kwargs)
 
         logger.info(f"[CHAT] Response received - is_command: {result.get('is_command')}")
         if result.get('is_command'):

@@ -13,7 +13,7 @@ import anthropic
 
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
-from app.engines.calendar_authority import projection_for_user
+from app.engines.calendar_authority import cycle_is_present, projection_for_user
 from app.engines.command_executor import CommandExecutor
 from app.engines.chat_context import (
     INTERNAL_PARSE_MAX_TOKENS,
@@ -22,10 +22,20 @@ from app.engines.chat_context import (
     empty_calendar,
     declined_again_reply,
     repeats_declined_proposal,
+    anchor_acknowledgement,
+    anchor_day_correction,
+    chosen_cycle,
+    cycle_length,
     is_hidden_chat_message,
     is_internal_chat_content,
+    local_today,
+    pattern_phrase,
     rotation_status,
     settings_for_prompt,
+    sole_anchor_statement,
+    strip_model_reasoning,
+    unsolicited_blank_override,
+    with_unsaved_pattern,
 )
 from app.engines.claude_chat import (
     USER_FACING_MODEL_ERROR,
@@ -93,7 +103,7 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
 - The anchor_date is when the user's STABLE ROTATION began, not their employment start date
 - Many workers have chaotic/random schedules during onboarding before getting a stable rotation
 - The anchor represents when the repeating pattern became consistent
-- Days BEFORE the anchor can be marked as 'blank' (untracked) if the schedule was unstable""",
+- Days before the anchor stay filled from the pattern. Do not mark them blank unless the user explicitly asks""",
         "parameters": {
             "type": "object",
             "properties": {
@@ -381,7 +391,7 @@ Legend: D=Day Shift, N=Night Shift, O=Off, B=Blank/Untracked
 {logs_and_incidents}
 
 === YOUR CAPABILITIES (TOOLS) ===
-You have direct access to modify the user's calendar and records. A reply that does not call a tool does not change stored data. Data already listed under ROTATION ALREADY ON THE ACCOUNT is saved; do not describe it as missing.
+You have direct access to modify the user's calendar and records. A reply that does not call a tool does not change stored data. Data already listed under ROTATION ALREADY ON THE ACCOUNT is the user's rotation. A status of CHOSEN means they picked it during onboarding and it is not saved yet. Do not describe that rotation as missing. Do not narrate your steps.
 
 CALENDAR MANAGEMENT:
 • override_days - Change date ranges to: day shifts, night shifts, off days, or blank (untracked)
@@ -402,8 +412,8 @@ HISTORY:
 1. ROTATION ANCHOR vs EMPLOYMENT START:
    - The "anchor date" is when the user's STABLE, REPEATING rotation began
    - This is NOT necessarily when they started employment
-   - Many workers have chaotic/random schedules during onboarding before getting assigned a stable shift
-   - If user says their schedule was messy before a certain date, mark those days as 'blank'
+   - Days before the anchor stay filled from the pattern
+   - Do not propose blanking, clearing, or marking those days untracked unless the user explicitly asks
 
 2. "OFF BY ONE DAY" FIXES:
    - If user says "my calendar is one day off" or "shifted by a day"
@@ -417,9 +427,8 @@ HISTORY:
    - Parse natural language descriptions carefully
 
 4. BLANK/UNTRACKED DAYS:
-   - Use work_type="blank" for days where the schedule was unknown or chaotic
-   - Perfect for: onboarding periods, transition periods, before rotation became stable
-   - Blank days show as untracked - no wrong data is better than wrong data
+   - Use work_type="blank" only when the user explicitly asks for blank or untracked days
+   - Do not use it for days before the anchor. Those days stay filled from the pattern
 
 === WHAT YOU MAY PROPOSE ===
 Propose ONLY what the latest message asks.
@@ -497,10 +506,10 @@ User: "My calendar is showing tomorrow as night shift but I'm actually on day sh
 → This means the cycle is shifted by 1 day
 → Call update_cycle with shift_by_days=-1 (or +1 depending on direction)
 
-HANDLING MESSY HISTORY:
-User: "I started working August 1st but my actual rotation only began December 1st. Before that was random."
+HANDLING AN ANCHOR:
+User: "I started working August 1st but my actual rotation only began December 1st."
 → Set anchor_date to December 1st
-→ Optionally mark Aug 1 - Nov 30 as 'blank' using override_days
+→ Leave the earlier days filled from the pattern. Do not call override_days to blank them unless the user explicitly asks to clear those days
 
 COPYING INCIDENTS:
 User: "Copy the incident from the 23rd to the 22nd"
@@ -669,6 +678,7 @@ class ChatService:
         except (ModelRequestError, anthropic.APIError) as exc:
             logger.error(f"[CLAUDE] Internal parse failed for user {self.user_id}: {exc}")
             response_text = USER_FACING_MODEL_ERROR
+        response_text = strip_model_reasoning(response_text) or "Could you tell me a bit more?"
         return {
             "user_message": None,
             "assistant_message": None,
@@ -682,13 +692,44 @@ class ChatService:
     async def send_message(
         self,
         content: str,
-        auto_execute: bool = False
+        auto_execute: bool = False,
+        pattern: Optional[list] = None,
+        onboarding_completed: bool = True,
+        timezone_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send a message and get agent response using tool calling.
         """
         if is_internal_chat_content(content):
             return await self._complete_internal(content)
+
+        # Only an unfinished signup with no saved rotation, and a message that
+        # is nothing but an anchor, skips the model. The reply is a proposal.
+        picked = chosen_cycle(pattern)
+        if onboarding_completed is False:
+            anchor = sole_anchor_statement(content, local_today(timezone_name))
+            stored = await self._stored_cycle() if anchor is not None else None
+            if anchor is not None and stored is None:
+                cycle = picked
+                length = cycle_length(cycle)
+                user_message = await self._save_message("user", content)
+                if length and anchor["cycle_day"] > length:
+                    reply = anchor_day_correction(anchor, length)
+                    anchor = None
+                else:
+                    reply = anchor_acknowledgement(anchor, cycle)
+                assistant_message = await self._save_message("assistant", reply)
+                result = {
+                    "user_message": user_message,
+                    "assistant_message": assistant_message,
+                    "response": reply,
+                    "is_command": False,
+                    "command": None,
+                    "proposal": None,
+                }
+                if anchor is not None:
+                    result["anchor"] = anchor
+                return result
 
         # Save user message
         user_message = await self._save_message("user", content)
@@ -712,6 +753,7 @@ class ChatService:
             recent_proposals,
         )
         master_settings = settings_for_prompt(document, projection)
+        master_settings, pattern_pending = with_unsaved_pattern(master_settings, pattern)
         asked = schedule_question_date(content, date.today())
         if asked is not None:
             answer = await self._answer_about_day(asked, master_settings)
@@ -724,7 +766,9 @@ class ChatService:
                 "command": None,
                 "proposal": None,
             }
-        applied = rotation_status(master_settings.get("cycle"), calendar)
+        applied = rotation_status(
+            master_settings.get("cycle"), calendar, pending=pattern_pending
+        )
 
         logger.info(f"[CHAT] User {self.user_id} message: {content[:100]}")
         logger.info(f"[CHAT] Calendar snapshot length: {len(calendar.get('text') or '')} chars")
@@ -751,6 +795,24 @@ class ChatService:
             logger.error(f"[CLAUDE] API error for user {self.user_id}: {e}")
             response_text = USER_FACING_MODEL_ERROR
             tool = None
+
+        response_text = strip_model_reasoning(
+            response_text,
+            cycle_known=cycle_is_present(master_settings.get("cycle")),
+        )
+        if tool and unsolicited_blank_override(content, tool.get("name") or "", tool.get("input") or {}):
+            logger.info(
+                f"[CHAT] Dropped unsolicited blank override for {self.user_id}: "
+                "days before the anchor stay filled from the pattern"
+            )
+            tool = None
+            response_text = "Days before the anchor stay filled from your pattern."
+        if not response_text and not (tool and tool.get("name")):
+            phrase = pattern_phrase(picked)
+            response_text = (
+                f"Your rotation is already chosen: {phrase}."
+                if phrase else "Could you tell me a bit more?"
+            )
 
         if tool and tool.get("name") == "query_calendar":
             day = date_from_query(tool.get("input") or {}, date.today())
@@ -894,6 +956,15 @@ class ChatService:
         except Exception as exc:
             logger.warning(f"[CHAT] Could not load leave or commitments for {self.user_id}: {exc}")
         return leaves, commitments
+
+    async def _stored_cycle(self) -> Optional[dict]:
+        try:
+            document = await self.settings_service.get_snapshot(self.user_id)
+        except Exception as exc:
+            logger.warning(f"[CHAT] Could not read the cycle for {self.user_id}: {exc}")
+            return None
+        cycle = document.get("cycle") if isinstance(document, dict) else None
+        return cycle if cycle_is_present(cycle) else None
 
     async def _save_message(
         self,

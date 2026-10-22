@@ -10,6 +10,7 @@ import json
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.engines.calendar_authority import cycle_is_present
 from app.engines.proposal_effects import describe_command
@@ -120,7 +121,7 @@ def describe_cycle(cycle: Optional[dict]) -> str:
     )
 
 
-def rotation_status(cycle: Optional[dict], calendar: Optional[dict]) -> str:
+def rotation_status(cycle: Optional[dict], calendar: Optional[dict], pending: bool = False) -> str:
     """Tell the model the schedule it can already see is applied."""
     summary = calendar or {}
     count = int(summary.get("count") or 0)
@@ -136,6 +137,13 @@ def rotation_status(cycle: Optional[dict], calendar: Optional[dict]) -> str:
     else:
         span = "No calendar days are stored in the recent window."
 
+    if cycle_text and pending:
+        return (
+            f"CHOSEN. {cycle_text} {span} "
+            "The user already picked this pattern during onboarding. It is not saved yet. "
+            "Do not say there is no cycle. Do not ask for the pattern again. "
+            "Do not narrate your steps."
+        )
     if cycle_text and count:
         return (
             f"APPLIED. {cycle_text} {span} "
@@ -470,3 +478,285 @@ def _as_datetime(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+_USER_VERBS = (
+    r"says|said|is saying|is asking|wants|asked|mentioned|described|wrote|typed|"
+    r"is describing|is telling"
+)
+# Only a reply that opens with this narration. A full stop is required so a
+# sentence with no ending is left as the model wrote it.
+_LEADING_USER = re.compile(
+    rf"(?i)^the user (?:{_USER_VERBS})\b[^.!?\n]*[.!?]\s*"
+)
+_NO_CYCLE_LINE = re.compile(
+    r"(?i)(?:^|(?<=[.!?]\s)|(?<=\n))"
+    r"(?:"
+    r"(?:but )?i need the rotation pattern\b[^.!?\n]*[.!?]"
+    r"|the calendar has no cycle stored\b[^.!?\n]*[.!?]"
+    r"|could you tell me your (?:full )?rotation pattern\??"
+    r")\s*"
+)
+
+_ANCHOR_MONTHS = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+_MONTH_NAME = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|"
+    r"aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+_MONTH_DAY = rf"({_MONTH_NAME})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(\d{{4}}))?"
+_ANCHOR_TAIL = r"(?:\s+of\s+(?:my|the|your)\s+cycle)?"
+_ANCHOR_IS = re.compile(
+    rf"^\s*(?:please\s+)?(?:today\s*,?\s+)?{_MONTH_DAY}\s*,?\s+is\s+day\s+(\d+){_ANCHOR_TAIL}\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+_ANCHOR_WAS = re.compile(
+    rf"^\s*(?:please\s+)?day\s+(\d+)\s+was\s+(?:on\s+)?{_MONTH_DAY}{_ANCHOR_TAIL}\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+_INSTRUCTION = re.compile(
+    r"\b(?:shift|log|leave|overtime|note|swap|add|remove|delete|change|move|"
+    r"clear|blank|mark|set|update|record|report|regenerate)\b",
+    re.IGNORECASE,
+)
+_LABEL_ALIASES = {
+    "work_day": "work_day",
+    "day_shift": "work_day",
+    "work_night": "work_night",
+    "night_shift": "work_night",
+    "off": "off",
+}
+_BLOCK_WORDS = {
+    "work_day": "day shifts",
+    "work_night": "night shifts",
+    "off": "days off",
+}
+_BLANK_REQUEST = re.compile(
+    r"\b(?:blank|clear|untracked|unknown|wipe|erase)\b",
+    re.IGNORECASE,
+)
+_PATTERN_LABELS = frozenset(_LABEL_ALIASES)
+_MAX_BLOCKS = 10
+_MAX_BLOCK_DAYS = 60
+_MAX_CYCLE_DAYS = 120
+
+
+def strip_model_reasoning(text: Optional[str], cycle_known: bool = False) -> str:
+    """Drop a leading 'The user …' sentence, and a missing-cycle claim when one exists.
+
+    A quote or a later sentence is left alone. A reply with no full stop is
+    left alone. The rotation question is removed only when a cycle is known.
+    """
+    cleaned = text or ""
+    cleaned = _LEADING_USER.sub("", cleaned, count=1)
+    if cycle_known:
+        previous = None
+        while cleaned and previous != cleaned:
+            previous = cleaned
+            cleaned = _NO_CYCLE_LINE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    return cleaned.strip()
+
+
+def local_today(tz_name: Optional[str], now: Optional[datetime] = None) -> date:
+    """Today's date in the user's timezone. Unknown zones use UTC."""
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    try:
+        zone = ZoneInfo(tz_name or "UTC")
+    except ZoneInfoNotFoundError:
+        zone = ZoneInfo("UTC")
+    return moment.astimezone(zone).date()
+
+
+def _nearest_day(month: int, day: int, today: date) -> Optional[date]:
+    candidates = []
+    for year in (today.year - 1, today.year, today.year + 1):
+        try:
+            candidates.append(date(year, month, day))
+        except ValueError:
+            continue
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (abs((item - today).days), item.toordinal()))
+
+
+def _anchor_date(month_name: str, day: str, year: Optional[str], today: date) -> Optional[date]:
+    month = _ANCHOR_MONTHS.get(month_name.lower())
+    if month is None:
+        return None
+    day_number = int(day)
+    if year:
+        try:
+            return date(int(year), month, day_number)
+        except ValueError:
+            return None
+    return _nearest_day(month, day_number, today)
+
+
+def sole_anchor_statement(text: str, today: date) -> Optional[dict]:
+    """An onboarding message that is only an anchor, with no other instruction.
+
+    A year is used as written. Without one, the date is the occurrence nearest today.
+    """
+    if not text or not text.strip() or _INSTRUCTION.search(text):
+        return None
+    was = _ANCHOR_WAS.match(text)
+    if was:
+        cycle_day = int(was.group(1))
+        found = _anchor_date(was.group(2), was.group(3), was.group(4), today)
+    else:
+        is_anchor = _ANCHOR_IS.match(text)
+        if is_anchor is None:
+            return None
+        found = _anchor_date(is_anchor.group(1), is_anchor.group(2), is_anchor.group(3), today)
+        cycle_day = int(is_anchor.group(4))
+    if found is None or cycle_day < 1:
+        return None
+    return {"date": found.isoformat(), "cycle_day": cycle_day}
+
+
+def parse_typed_anchor(text: str, today: date) -> Optional[dict]:
+    """Backward-compatible name for a message that is only an anchor statement."""
+    return sole_anchor_statement(text, today)
+
+
+def validate_onboarding_pattern(pattern: Optional[list]) -> list:
+    """Normalize a client pattern or raise ValueError for a 400 response."""
+    blocks = list(pattern or [])
+    if len(blocks) > _MAX_BLOCKS:
+        raise ValueError("A rotation can have at most 10 blocks.")
+    normalized = []
+    total = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            raise ValueError("Each block needs a label and a duration.")
+        label = _LABEL_ALIASES.get(str(block.get("label") or block.get("type") or "").strip())
+        raw = block.get("duration")
+        if raw is None:
+            raw = block.get("days")
+        try:
+            duration = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError("Each block must be from 1 to 60 days.")
+        if label is None:
+            raise ValueError("Each block must be work_day, work_night, or off.")
+        if duration < 1 or duration > _MAX_BLOCK_DAYS:
+            raise ValueError("Each block must be from 1 to 60 days.")
+        total += duration
+        normalized.append({"label": label, "duration": duration})
+    if total > _MAX_CYCLE_DAYS:
+        raise ValueError("A rotation can be at most 120 days.")
+    return normalized
+
+
+def chosen_cycle(pattern: Optional[list]) -> Optional[dict]:
+    """The rotation the user picked in onboarding, before it is saved."""
+    blocks = []
+    for block in pattern or []:
+        if not isinstance(block, dict):
+            continue
+        label = _LABEL_ALIASES.get(str(block.get("label") or block.get("type") or "").strip())
+        raw = block.get("duration")
+        if raw is None:
+            raw = block.get("days")
+        try:
+            duration = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if label is None or duration < 1:
+            continue
+        blocks.append({"label": label, "duration": duration})
+    if not blocks:
+        return None
+    return {
+        "name": "Rotation",
+        "pattern": blocks,
+        "cycle_length": sum(block["duration"] for block in blocks),
+    }
+
+
+def pattern_phrase(cycle: Optional[dict]) -> str:
+    parts = []
+    for block in (cycle or {}).get("pattern") or []:
+        if not isinstance(block, dict):
+            continue
+        words = _BLOCK_WORDS.get(str(block.get("label") or ""), "days")
+        parts.append(f"{int(block.get('duration') or 0)} {words}")
+    return ", ".join(part for part in parts if not part.startswith("0 "))
+
+
+def with_unsaved_pattern(settings: Optional[dict], pattern: Optional[list]) -> tuple:
+    """Use a picked pattern when the account does not have a cycle yet."""
+    base = dict(settings or {})
+    picked = chosen_cycle(pattern)
+    if not picked or cycle_is_present(base.get("cycle")):
+        return base, False
+    base["cycle"] = picked
+    return base, True
+
+
+def cycle_length(cycle: Optional[dict]) -> Optional[int]:
+    if not isinstance(cycle, dict):
+        return None
+    raw = cycle.get("cycle_length")
+    if raw is None:
+        raw = cycle.get("total_days")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+    total = 0
+    counted = False
+    for block in cycle.get("pattern") or []:
+        if not isinstance(block, dict):
+            continue
+        try:
+            total += int(block.get("duration") if block.get("duration") is not None else block.get("days") or 0)
+            counted = True
+        except (TypeError, ValueError):
+            continue
+    return total if counted and total > 0 else None
+
+
+def anchor_day_correction(anchor: dict, length: int) -> str:
+    return (
+        f"Day {anchor['cycle_day']} is outside this {length}-day rotation. "
+        f"Choose a day from 1 to {length}."
+    )
+
+
+def anchor_acknowledgement(anchor: dict, cycle: Optional[dict] = None) -> str:
+    """A proposal the client applies from response.anchor. Nothing is saved yet."""
+    day = date.fromisoformat(anchor["date"])
+    label = f"{day.strftime('%b')} {day.day}, {day.year}"
+    text = f"Use {label} as day {anchor['cycle_day']}"
+    phrase = pattern_phrase(cycle)
+    if phrase:
+        text += f" ({phrase})"
+    return f"{text}. Apply that anchor, then choose the rules to keep."
+
+
+def unsolicited_blank_override(user_text: str, tool_name: str, payload: Optional[dict]) -> bool:
+    """True when the model wants to blank days the user did not ask to clear."""
+    if tool_name != "override_days":
+        return False
+    work_type = str((payload or {}).get("work_type") or "").strip().lower()
+    if work_type != "blank":
+        return False
+    return _BLANK_REQUEST.search(user_text or "") is None
