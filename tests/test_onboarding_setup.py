@@ -252,21 +252,65 @@ async def test_anchor_shortcut_ignores_other_instructions(monkeypatch):
 @pytest.mark.asyncio
 async def test_an_anchor_day_outside_the_pattern_is_corrected(monkeypatch):
     service = _service()
-    service.settings_service.get_snapshot = AsyncMock(return_value={
-        "cycle": {
-            "pattern": [
-                {"label": "work_day", "duration": 14},
-                {"label": "off", "duration": 14},
-            ],
-            "cycle_length": 28,
-        },
-    })
     monkeypatch.setattr(chat_service, "complete_chat", AsyncMock(return_value=("Noted.", None)))
-    result = await service.send_message("Oct 22 is day 40", onboarding_completed=False)
+    result = await service.send_message(
+        "Oct 22 is day 40",
+        pattern=[
+            {"label": "work_day", "duration": 14},
+            {"label": "off", "duration": 14},
+        ],
+        onboarding_completed=False,
+    )
     assert "anchor" not in result
     assert "28" in result["response"]
     assert "40" in result["response"]
     chat_service.complete_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_saved_rotation_skips_the_anchor_shortcut(monkeypatch):
+    """Signup flag is still false, but the rotation is already stored."""
+    service = _service()
+    service.settings_service.get_snapshot = AsyncMock(return_value={
+        "cycle": {
+            "pattern": [
+                {"label": "work_day", "duration": 5},
+                {"label": "work_night", "duration": 5},
+                {"label": "off", "duration": 5},
+            ],
+            "cycle_length": 15,
+        },
+    })
+    monkeypatch.setattr(chat_service, "projection_for_user", AsyncMock(return_value={}))
+    monkeypatch.setattr(chat_service, "complete_chat", AsyncMock(return_value=("Noted.", None)))
+
+    result = await service.send_message("Oct 20 is day 1", onboarding_completed=False)
+
+    assert "anchor" not in result
+    assert result["response"] == "Noted."
+    chat_service.complete_chat.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_emptied_reply_names_the_picked_pattern(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(chat_service, "projection_for_user", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        chat_service,
+        "complete_chat",
+        AsyncMock(return_value=("Could you tell me your full rotation pattern?", None)),
+    )
+    result = await service.send_message("hello", pattern=FIVE_FIVE_FIVE)
+    assert result["response"] == (
+        "Your rotation is already chosen: 5 day shifts, 5 night shifts, 5 days off."
+    )
+
+
+def test_an_anchor_only_message_may_end_with_an_exclamation():
+    assert parse_typed_anchor("Today Oct 22 is day 1!", TODAY) == {
+        "date": "2026-10-22",
+        "cycle_day": 1,
+    }
 
 
 def test_a_missing_year_uses_the_date_nearest_today_in_the_user_zone():
@@ -314,7 +358,11 @@ async def test_a_bad_onboarding_pattern_is_rejected(pattern, detail):
 async def test_a_pattern_can_use_type_and_days_aliases(monkeypatch):
     request = SendMessageRequest(
         content="hello",
-        pattern=[PatternBlock(type="work_night", days=4), PatternBlock(type="off", days=3)],
+        pattern=[
+            PatternBlock(type="night_shift", days=4),
+            PatternBlock(type="day_shift", days=2),
+            PatternBlock(type="off", days=3),
+        ],
     )
     seen = {}
 
@@ -336,6 +384,7 @@ async def test_a_pattern_can_use_type_and_days_aliases(monkeypatch):
     assert result["response"] == "ok"
     assert seen["pattern"] == [
         {"label": "work_night", "duration": 4},
+        {"label": "work_day", "duration": 2},
         {"label": "off", "duration": 3},
     ]
 

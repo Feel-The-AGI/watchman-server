@@ -519,11 +519,11 @@ _MONTH_NAME = (
 _MONTH_DAY = rf"({_MONTH_NAME})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(\d{{4}}))?"
 _ANCHOR_TAIL = r"(?:\s+of\s+(?:my|the|your)\s+cycle)?"
 _ANCHOR_IS = re.compile(
-    rf"^\s*(?:please\s+)?(?:today\s*,?\s+)?{_MONTH_DAY}\s*,?\s+is\s+day\s+(\d+){_ANCHOR_TAIL}\s*\.?\s*$",
+    rf"^\s*(?:please\s+)?(?:today\s*,?\s+)?{_MONTH_DAY}\s*,?\s+is\s+day\s+(\d+){_ANCHOR_TAIL}\s*[.!]?\s*$",
     re.IGNORECASE,
 )
 _ANCHOR_WAS = re.compile(
-    rf"^\s*(?:please\s+)?day\s+(\d+)\s+was\s+(?:on\s+)?{_MONTH_DAY}{_ANCHOR_TAIL}\s*\.?\s*$",
+    rf"^\s*(?:please\s+)?day\s+(\d+)\s+was\s+(?:on\s+)?{_MONTH_DAY}{_ANCHOR_TAIL}\s*[.!]?\s*$",
     re.IGNORECASE,
 )
 _INSTRUCTION = re.compile(
@@ -531,6 +531,13 @@ _INSTRUCTION = re.compile(
     r"clear|blank|mark|set|update|record|report|regenerate)\b",
     re.IGNORECASE,
 )
+_LABEL_ALIASES = {
+    "work_day": "work_day",
+    "day_shift": "work_day",
+    "work_night": "work_night",
+    "night_shift": "work_night",
+    "off": "off",
+}
 _BLOCK_WORDS = {
     "work_day": "day shifts",
     "work_night": "night shifts",
@@ -540,7 +547,7 @@ _BLANK_REQUEST = re.compile(
     r"\b(?:blank|clear|untracked|unknown|wipe|erase)\b",
     re.IGNORECASE,
 )
-_PATTERN_LABELS = frozenset(_BLOCK_WORDS)
+_PATTERN_LABELS = frozenset(_LABEL_ALIASES)
 _MAX_BLOCKS = 10
 _MAX_BLOCK_DAYS = 60
 _MAX_CYCLE_DAYS = 120
@@ -638,7 +645,7 @@ def validate_onboarding_pattern(pattern: Optional[list]) -> list:
     for block in blocks:
         if not isinstance(block, dict):
             raise ValueError("Each block needs a label and a duration.")
-        label = str(block.get("label") or block.get("type") or "").strip()
+        label = _LABEL_ALIASES.get(str(block.get("label") or block.get("type") or "").strip())
         raw = block.get("duration")
         if raw is None:
             raw = block.get("days")
@@ -646,7 +653,7 @@ def validate_onboarding_pattern(pattern: Optional[list]) -> list:
             duration = int(raw)
         except (TypeError, ValueError):
             raise ValueError("Each block must be from 1 to 60 days.")
-        if label not in _PATTERN_LABELS:
+        if label is None:
             raise ValueError("Each block must be work_day, work_night, or off.")
         if duration < 1 or duration > _MAX_BLOCK_DAYS:
             raise ValueError("Each block must be from 1 to 60 days.")
@@ -663,7 +670,7 @@ def chosen_cycle(pattern: Optional[list]) -> Optional[dict]:
     for block in pattern or []:
         if not isinstance(block, dict):
             continue
-        label = str(block.get("label") or block.get("type") or "").strip()
+        label = _LABEL_ALIASES.get(str(block.get("label") or block.get("type") or "").strip())
         raw = block.get("duration")
         if raw is None:
             raw = block.get("days")
@@ -671,7 +678,7 @@ def chosen_cycle(pattern: Optional[list]) -> Optional[dict]:
             duration = int(raw)
         except (TypeError, ValueError):
             continue
-        if label not in _BLOCK_WORDS or duration < 1:
+        if label is None or duration < 1:
             continue
         blocks.append({"label": label, "duration": duration})
     if not blocks:

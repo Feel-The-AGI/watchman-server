@@ -29,6 +29,7 @@ from app.engines.chat_context import (
     is_hidden_chat_message,
     is_internal_chat_content,
     local_today,
+    pattern_phrase,
     rotation_status,
     settings_for_prompt,
     sole_anchor_statement,
@@ -702,13 +703,14 @@ class ChatService:
         if is_internal_chat_content(content):
             return await self._complete_internal(content)
 
-        # Only an unfinished onboarding turn that is nothing but an anchor
-        # skips the model. The reply is a proposal; the client applies anchor.
+        # Only an unfinished signup with no saved rotation, and a message that
+        # is nothing but an anchor, skips the model. The reply is a proposal.
         picked = chosen_cycle(pattern)
         if onboarding_completed is False:
             anchor = sole_anchor_statement(content, local_today(timezone_name))
-            if anchor is not None:
-                cycle = picked or await self._stored_cycle()
+            stored = await self._stored_cycle() if anchor is not None else None
+            if anchor is not None and stored is None:
+                cycle = picked
                 length = cycle_length(cycle)
                 user_message = await self._save_message("user", content)
                 if length and anchor["cycle_day"] > length:
@@ -806,7 +808,11 @@ class ChatService:
             tool = None
             response_text = "Days before the anchor stay filled from your pattern."
         if not response_text and not (tool and tool.get("name")):
-            response_text = "Could you tell me a bit more?"
+            phrase = pattern_phrase(picked)
+            response_text = (
+                f"Your rotation is already chosen: {phrase}."
+                if phrase else "Could you tell me a bit more?"
+            )
 
         if tool and tool.get("name") == "query_calendar":
             day = date_from_query(tool.get("input") or {}, date.today())
