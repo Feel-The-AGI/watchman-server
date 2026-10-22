@@ -231,7 +231,7 @@ async def test_projecting_saved_events_drops_a_deleted_commitment():
     assert october == ["Gym"]
     later = [chip["name"] for chip in by_date["2026-10-28"]["state_json"]["commitments"]]
     assert "Dentist appointment" not in later
-    assert "From settings" in later
+    assert "From settings" not in later
 
 
 @pytest.mark.asyncio

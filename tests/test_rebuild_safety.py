@@ -270,7 +270,8 @@ async def test_paused_and_completed_commitments_are_not_stamped():
         },
     ]
     # The settings copy of the paused class has no status. The table status wins.
-    await _executor(db, commitments=[
+    # Gym is listed in settings and has no row, so it is not painted or deleted.
+    executor = _executor(db, commitments=[
         {
             "id": "paused-1",
             "name": "Paused class",
@@ -285,6 +286,10 @@ async def test_paused_and_completed_commitments_are_not_stamped():
             "start_date": day,
             "end_date": day,
         },
-    ]).rebuild_calendar(date(2026, 10, 27), date(2026, 10, 27))
+    ])
+    await executor.rebuild_calendar(date(2026, 10, 27), date(2026, 10, 27))
     names = {chip["name"] for chip in db.days[0]["state_json"]["commitments"]}
-    assert names == {"Dentist appointment", "Gym"}
+    assert names == {"Dentist appointment"}
+    assert {row["id"] for row in executor.settings_service.snapshot["commitments"]} == {
+        "paused-1", "legacy-1",
+    }

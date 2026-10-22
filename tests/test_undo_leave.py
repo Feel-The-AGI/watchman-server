@@ -3,9 +3,11 @@
 import copy
 
 import pytest
+from fastapi import HTTPException
 
 from app.engines.command_executor import CommandExecutor
 from app.routes.calendar import delete_leave_block
+from app.routes.commands import UndoRequest, undo_command
 
 
 ANCHOR = "2026-01-05"
@@ -332,33 +334,35 @@ async def test_undo_of_an_older_sick_day_log_removes_only_that_row():
 
 
 @pytest.mark.asyncio
-async def test_undo_does_not_remove_a_row_it_cannot_identify():
-    first = {
+async def test_undo_removes_only_ids_the_snapshot_added():
+    added = {
         "id": "leave-a",
         "user_id": "user-1",
         "name": "A",
         "start_date": SICK_DAY,
         "end_date": SICK_DAY,
     }
-    second = {
-        "id": "leave-b",
+    kept = {
+        "id": "leave-kept",
         "user_id": "user-1",
-        "name": "B",
+        "name": "Kept",
         "start_date": OTHER_DAY,
         "end_date": OTHER_DAY,
     }
-    store = _Store(leaves=[first, second])
-    empty = copy.deepcopy(store.tables["master_settings"][0]["settings"])
-    empty["leave_blocks"] = []
+    before = copy.deepcopy(_Store(leaves=[kept]).tables["master_settings"][0]["settings"])
+    after = copy.deepcopy(before)
+    after["leave_blocks"] = [copy.deepcopy(kept), copy.deepcopy(added)]
+    store = _Store(leaves=[added, kept])
+    store.tables["master_settings"][0]["settings"] = copy.deepcopy(after)
     store.tables["command_log"] = [{
-        "id": "cmd-ambiguous",
+        "id": "cmd-added",
         "user_id": "user-1",
         "action": "add_leave",
         "status": "applied",
         "created_at": "2026-01-05T12:00:00+00:00",
         "payload": {},
-        "before_state": empty,
-        "after_state": copy.deepcopy(store.tables["master_settings"][0]["settings"]),
+        "before_state": before,
+        "after_state": after,
         "source": "chat",
         "message_id": None,
         "explanation": "Leave",
@@ -366,7 +370,47 @@ async def test_undo_does_not_remove_a_row_it_cannot_identify():
 
     await _executor(store)._action_undo({})
 
-    assert _leave_ids(store) == {"leave-a", "leave-b"}
+    assert _leave_ids(store) == {"leave-kept"}
+    assert any(row["id"] == "leave-kept" for row in store.tables["master_settings"][0]["settings"]["leave_blocks"])
+
+
+@pytest.mark.asyncio
+async def test_undo_refuses_a_command_that_is_not_the_latest(monkeypatch):
+    store = _Store(leaves=[_other_leave()])
+    monkeypatch.setattr("app.routes.commands.Database", lambda use_admin=False: store)
+    executor = _executor(store)
+    first = await executor.execute({
+        "action": "add_leave",
+        "payload": {"name": "Sick", "type": "sick", "date": SICK_DAY},
+        "explanation": "Sick day",
+    })
+    second = await executor.execute({
+        "action": "add_leave",
+        "payload": {"name": "Later", "type": "personal", "start_date": "2026-01-09", "end_date": "2026-01-09"},
+        "explanation": "Later leave",
+    })
+    assert first["success"] is True and second["success"] is True
+    older_id = first["command_id"]
+    latest_id = second["command_id"]
+    before_ids = _leave_ids(store)
+
+    with pytest.raises(HTTPException) as exc:
+        await undo_command(UndoRequest(command_id=older_id), {"id": "user-1"})
+
+    assert exc.value.status_code == 409
+    assert "latest" in str(exc.value.detail).lower()
+    assert _leave_ids(store) == before_ids
+    statuses = {row["id"]: row["status"] for row in store.tables["command_log"]}
+    assert statuses[older_id] == "applied"
+    assert statuses[latest_id] == "applied"
+
+    undone = await undo_command(UndoRequest(command_id=latest_id), {"id": "user-1"})
+    assert undone["success"] is True
+    assert second["result"]["inserted_leave_id"] not in _leave_ids(store)
+    assert first["result"]["inserted_leave_id"] in _leave_ids(store)
+    statuses = {row["id"]: row["status"] for row in store.tables["command_log"]}
+    assert statuses[older_id] == "applied"
+    assert statuses[latest_id] == "undone"
 
 
 @pytest.mark.asyncio
@@ -422,14 +466,33 @@ async def test_delete_leave_rebuilds_the_day_back_to_the_rotation(monkeypatch):
         "effects": {"type": "sick"},
         "notes": "",
     }
+    ghost_leave = {
+        "id": "leave-ghost",
+        "name": "Ghost",
+        "start_date": SICK_DAY,
+        "end_date": SICK_DAY,
+    }
+    ghost_commitment = {
+        "id": "commitment-ghost",
+        "name": "Ghost chip",
+        "type": "personal",
+        "status": "active",
+        "start_date": SICK_DAY,
+        "end_date": SICK_DAY,
+    }
     store = _Store(leaves=[sick, _other_leave()])
+    settings = store.tables["master_settings"][0]["settings"]
+    settings["leave_blocks"] = [sick, _other_leave(), ghost_leave]
+    settings["commitments"] = [ghost_commitment]
     store.tables["calendar_days"] = [{
         "user_id": "user-1",
         "date": SICK_DAY,
         "work_type": "off",
         "cycle_id": "cycle-1",
         "cycle_day": 1,
-        "state_json": {"is_leave": True, "tags": ["leave"], "commitments": [], "available_hours": 16.0},
+        "state_json": {"is_leave": True, "tags": ["leave"], "commitments": [
+            {"commitment_id": "commitment-ghost", "name": "Ghost chip"},
+        ], "available_hours": 16.0},
     }]
     monkeypatch.setattr("app.routes.calendar.Database", lambda use_admin=False: store)
 
@@ -437,8 +500,12 @@ async def test_delete_leave_rebuilds_the_day_back_to_the_rotation(monkeypatch):
 
     assert result["success"] is True
     assert _leave_ids(store) == {"leave-other"}
-    settings = store.tables["master_settings"][0]["settings"]
-    assert [row["id"] for row in settings["leave_blocks"]] == ["leave-other"]
+    saved_settings = store.tables["master_settings"][0]["settings"]
+    listed = {row["id"] for row in saved_settings["leave_blocks"]}
+    assert "leave-ghost" in listed
+    assert "leave-other" in listed
+    assert [row["id"] for row in saved_settings["commitments"]] == ["commitment-ghost"]
     restored = _day(store, SICK_DAY)
     assert restored["state_json"]["is_leave"] is False
     assert restored["work_type"] == "work_day"
+    assert restored["state_json"]["commitments"] == []
