@@ -14,7 +14,9 @@ from app.commitment_limit import (
     reused_commitment,
 )
 from app.database import Database
+from app.middleware.auth import get_effective_tier
 from app.engines.master_settings_service import MasterSettingsService
+from app.planning_horizon import horizon_violation, payload_dates
 from app.engines.calendar_engine import (
     CALENDAR_ENGINE_VERSION,
     block_day_for,
@@ -202,12 +204,16 @@ class CommandExecutor:
         command = card_command(command)
         action = command.get("action")
         payload = command.get("payload") or {}
-        if leave_blocked(getattr(self, "effective_tier", None) or "", action, payload):
-            raise ValueError(LEAVE_PRO_REPLY)
-        if action == "add_commitment":
-            limit_reply = await self.commitment_limit_message(payload)
-            if limit_reply:
-                raise ValueError(limit_reply)
+        if action not in ("undo", "redo"):
+            if leave_blocked(getattr(self, "effective_tier", None) or "", action, payload):
+                raise ValueError(LEAVE_PRO_REPLY)
+            if action == "add_commitment":
+                limit_reply = await self.commitment_limit_message(payload)
+                if limit_reply:
+                    raise ValueError(limit_reply)
+            blocked = await self._horizon_block(payload)
+            if blocked:
+                raise ValueError(blocked["message"])
         # Validate first
         validation = await self.validate_command(command)
         if prompt_version:
@@ -267,12 +273,25 @@ class CommandExecutor:
         
         if action not in VALID_ACTIONS:
             raise ValueError(f"Unknown action: {action}")
-        if leave_blocked(getattr(self, "effective_tier", None) or "", action, payload):
-            return {"success": False, "error": LEAVE_PRO_REPLY, "code": "leave_pro"}
-        if action == "add_commitment":
-            limit_reply = await self.commitment_limit_message(payload)
-            if limit_reply:
-                return {"success": False, "error": limit_reply, "code": "commitment_limit"}
+
+        if action not in ("undo", "redo"):
+            if leave_blocked(getattr(self, "effective_tier", None) or "", action, payload):
+                return {"success": False, "error": LEAVE_PRO_REPLY, "code": "leave_pro"}
+            if action == "add_commitment":
+                limit_reply = await self.commitment_limit_message(payload)
+                if limit_reply:
+                    return {"success": False, "error": limit_reply, "code": "commitment_limit"}
+            blocked = await self._horizon_block(payload)
+            if blocked:
+                logger.info(
+                    f"Blocked {action} past the free horizon for user {self.user_id}"
+                )
+                return {
+                    "success": False,
+                    "error": blocked["message"],
+                    "code": blocked["code"],
+                    "horizon_end": blocked["horizon_end"],
+                }
 
         # Validate unless skipping
         if not skip_validation and action not in ["undo", "redo"]:
@@ -489,29 +508,33 @@ class CommandExecutor:
         await self.settings_service.add_to_list(self.user_id, "commitments", saved)
         return {"commitment": saved, "inserted_commitment_id": inserted_id}
 
-    async def _account_tier(self) -> Optional[str]:
-        """Tier for the commitment cap.
+    async def _effective_tier(self) -> Optional[str]:
+        """Effective tier for the commitment cap and the planning horizon.
 
         Chat and proposal review set effective_tier, so a lapsed Pro account
-        is capped there. A caller that did not set it uses the stored tier.
+        is capped there. Otherwise the stored user is read. None means the
+        account could not be read: the commitment cap stays open and the
+        horizon stays unlimited.
         """
         explicit = getattr(self, "effective_tier", None)
         if isinstance(explicit, str) and explicit:
             return explicit
         getter = getattr(self.db, "get_user_by_id", None)
-        if getter is not None:
-            try:
-                user = await getter(self.user_id)
-            except Exception as exc:
-                logger.warning(f"Could not read tier for commitment limit {self.user_id}: {exc}")
-                user = None
-            if isinstance(user, dict):
-                return user.get("tier") or "free"
-        return None
+        if getter is None:
+            return None
+        try:
+            user = await getter(self.user_id)
+        except Exception as exc:
+            logger.warning(f"Could not read effective tier for {self.user_id}: {exc}")
+            return None
+        if not isinstance(user, dict):
+            logger.warning(f"Could not read effective tier for {self.user_id}: no user row")
+            return None
+        return get_effective_tier(user)
 
     async def commitment_limit_message(self, payload: dict) -> Optional[str]:
         """Plain reply when a free account would store a third commitment."""
-        tier = await self._account_tier()
+        tier = await self._effective_tier()
         if tier != "free":
             return None
         reader = getattr(self.db, "read_commitments", None) or getattr(self.db, "get_commitments", None)
@@ -1204,12 +1227,19 @@ class CommandExecutor:
         start_date, end_date = generation_bounds(anchor_date)
         return await self.rebuild_calendar(start_date, end_date)
 
+    async def _horizon_block(self, payload) -> Optional[dict]:
+        # A missing user stays unlimited so a test double or a failed read
+        # does not shorten a rebuild.
+        return horizon_violation(await self._effective_tier() or "pro", payload_dates(payload))
+
     async def rebuild_calendar(self, start_date: date, end_date: date) -> bool:
         """Rewrite one inclusive range from the cycle.
 
         Leave in the settings document and leave_blocks are both applied.
         Commitments are stamped back onto the days. A manual override, including
         a blank mark and a day before the anchor, keeps its work type.
+        A rotation save rewrites the whole requested range, including days a
+        Free plan cannot see yet, so those stored days do not keep an old shift.
         """
         settings = await self.settings_service.get_snapshot(self.user_id)
         cycle = settings.get("cycle")

@@ -4,6 +4,7 @@ from datetime import date, timedelta
 
 from app.engines.calendar_authority import engine_cycle
 from app.engines.calendar_engine import (
+    CALENDAR_ENGINE_VERSION,
     CalendarEngine,
     block_day_for,
     generation_bounds,
@@ -12,7 +13,7 @@ from app.engines.calendar_engine import (
     year_bounds,
 )
 from app.engines.day_status import chat_sample_end
-from app.routes.calendar import _year_is_incomplete
+from app.routes.calendar import _rebuild_span, _span_complete
 
 
 FOURTEEN = {
@@ -152,10 +153,30 @@ def test_horizon_includes_pre_anchor_days_and_the_next_year():
     assert end > date(2026, 12, 20)
 
 
+def _stored_days(start, end):
+    days = []
+    current = start
+    while current <= end:
+        days.append({
+            "date": current.isoformat(),
+            "state_json": {"engine_version": CALENDAR_ENGINE_VERSION},
+        })
+        current += timedelta(days=1)
+    return days
+
+
 def test_a_year_that_starts_at_the_anchor_is_incomplete():
-    partial = [{"date": f"2026-12-{day:02d}"} for day in range(1, 32)]
-    assert _year_is_incomplete(partial, 2026)
-    assert not _year_is_incomplete([{"date": "x"}] * 365, 2026)
+    partial = [
+        {
+            "date": f"2026-12-{day:02d}",
+            "state_json": {"engine_version": CALENDAR_ENGINE_VERSION},
+        }
+        for day in range(1, 32)
+    ]
+    assert _rebuild_span(partial, 2026, "pro") == year_bounds(2026)
+    start, end = year_bounds(2026)
+    assert _span_complete(_stored_days(start, end), start, end)
+    assert _rebuild_span(_stored_days(start, end), 2026, "pro") is None
 
 
 def test_present_calendar_day_exposes_the_badge_beside_cycle_day():

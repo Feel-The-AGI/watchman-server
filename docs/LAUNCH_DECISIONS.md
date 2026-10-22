@@ -46,7 +46,7 @@ A chat change and a later "regenerate from the cycles table" can overwrite each 
 
 Constraints are split the same way. Onboarding inserts relational rules such as `{"type": "no_activity_on", "activity": "study", "work_types": ["work_night"]}`. The command validator does not read that table. It only inspects JSON constraints whose `rule` is the string `"no_study_on_night_shift"`. That branch does not look at calendar days. The comment in `command_executor._check_constraints` says the real day check is still to be done. A hard constraint of that exact string blocks every education commitment. Any other rule, including the system rule created at onboarding, is ignored by the agent path. Overlapping leave is a warning.
 
-Free-tier numbers that are enforced on the server match the client settings table: 100 chat messages per month, 50 history rows, one cycle on the cycles API, and a 6-month generate window. The chat panel's `messageLimit` of 50 is the history window, not a second monthly cap.
+Free-tier numbers that are enforced on the server match the client settings table: 100 chat messages per month, 50 history rows, one cycle on the cycles API, and a 3-month generate window. The chat panel's `messageLimit` of 50 is the history window, not a second monthly cap.
 
 ### Options
 
