@@ -358,5 +358,11 @@ async def test_lapsed_pro_form_is_capped_at_two_commitments(monkeypatch):
             },
         )
     assert exc.value.status_code == 403
-    assert "2 commitment" in exc.value.detail
+    assert exc.value.detail == {
+        "code": "commitment_limit",
+        "message": (
+            "You've hit the 2 commitment limit on the free plan. "
+            "Want to track more? Upgrade to Pro for unlimited commitments."
+        ),
+    }
     assert store.created is False

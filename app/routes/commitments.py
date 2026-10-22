@@ -180,7 +180,10 @@ async def create_commitment(
         logger.warning(f"Free tier user {user['id']} blocked from creating additional commitment")
         raise HTTPException(
             status_code=403,
-            detail="You've hit the 2 commitment limit on the free plan. Want to track more? Upgrade to Pro for unlimited commitments."
+            detail={
+                "code": "commitment_limit",
+                "message": "You've hit the 2 commitment limit on the free plan. Want to track more? Upgrade to Pro for unlimited commitments.",
+            },
         )
     if data.type == "education" and data.status == "active" and reused is None:
         education_count = sum(
