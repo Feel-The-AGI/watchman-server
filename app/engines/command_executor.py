@@ -490,7 +490,14 @@ class CommandExecutor:
         return {"commitment": saved, "inserted_commitment_id": inserted_id}
 
     async def _account_tier(self) -> Optional[str]:
-        """Stored tier, matching the commitments route. Unknown stays unlimited."""
+        """Tier for the commitment cap.
+
+        Chat and proposal review set effective_tier, so a lapsed Pro account
+        is capped there. A caller that did not set it uses the stored tier.
+        """
+        explicit = getattr(self, "effective_tier", None)
+        if isinstance(explicit, str) and explicit:
+            return explicit
         getter = getattr(self.db, "get_user_by_id", None)
         if getter is not None:
             try:
@@ -500,9 +507,6 @@ class CommandExecutor:
                 user = None
             if isinstance(user, dict):
                 return user.get("tier") or "free"
-        explicit = getattr(self, "effective_tier", None)
-        if isinstance(explicit, str) and explicit:
-            return explicit
         return None
 
     async def commitment_limit_message(self, payload: dict) -> Optional[str]:

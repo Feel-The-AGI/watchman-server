@@ -1,16 +1,24 @@
 """Free accounts cannot plan leave from chat. Sick days and other edits stay."""
 
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from loguru import logger
 
 from app.commitment_limit import COMMITMENT_LIMIT_REPLY
 from app.engines.chat_service import ChatService
 from app.engines.command_executor import CommandExecutor
 from app.engines import chat_service
 from app.leave_access import LEAVE_PRO_REPLY
+from app.middleware.auth import get_current_user
 from app.prompts.registry import version_for
+from app.routes import commands
 
 
 def _settings(**overrides):
@@ -182,3 +190,138 @@ async def test_free_chat_cannot_add_a_third_commitment(monkeypatch):
     }) is None
     paid = _limit_executor(rows, tier="pro")
     assert await paid.commitment_limit_message({"name": "Dentist", "type": "personal"}) is None
+
+
+@pytest.mark.asyncio
+async def test_commitment_count_failure_lets_the_chat_turn_through(monkeypatch):
+    service, created, executed = _service()
+
+    async def broken(payload):
+        raise RuntimeError("commitments read failed")
+
+    service.command_executor.commitment_limit_message = broken
+    _install(monkeypatch, "", {
+        "name": "add_commitment",
+        "input": {"name": "Dentist", "type": "personal", "start_date": "2026-12-01"},
+    })
+    records = []
+    handle = logger.add(lambda message: records.append(str(message)), level="WARNING")
+    try:
+        result = await service.send_message("Add a dentist visit", effective_tier="free")
+    finally:
+        logger.remove(handle)
+
+    assert result["proposal"]["id"] == "proposal-1"
+    assert result["is_command"] is True
+    assert COMMITMENT_LIMIT_REPLY not in (result.get("response") or "")
+    created.assert_awaited()
+    executed.assert_not_awaited()
+    assert any("commitments read failed" in line for line in records)
+
+
+def _review_client(monkeypatch, user, command, commitments=None):
+    proposal_id = str(uuid4())
+    rows = [{
+        "id": proposal_id,
+        "user_id": user["id"],
+        "status": "pending",
+        "command": command,
+        "message_id": None,
+        "expires_at": None,
+    }]
+
+    class Query:
+        def __init__(self):
+            self.filters, self.values = {}, None
+
+        def update(self, values):
+            self.values = values
+            return self
+
+        def eq(self, key, value):
+            self.filters[key] = value
+            return self
+
+        def or_(self, expression):
+            return self
+
+        def execute(self):
+            matched = [
+                row for row in rows
+                if all(row.get(key) == value for key, value in self.filters.items())
+            ]
+            for row in matched:
+                if self.values:
+                    row.update(self.values)
+            return SimpleNamespace(data=deepcopy(matched))
+
+    db = SimpleNamespace(
+        client=SimpleNamespace(table=lambda name: Query()),
+        get_user_by_id=AsyncMock(return_value=user),
+        read_commitments=AsyncMock(return_value=list(commitments or [])),
+        create_commitment=AsyncMock(),
+    )
+
+    def make_executor(database, user_id):
+        executor = CommandExecutor.__new__(CommandExecutor)
+        executor.db = database
+        executor.user_id = user_id
+        return executor
+
+    monkeypatch.setattr(commands, "Database", lambda **kwargs: db)
+    monkeypatch.setattr(commands, "create_command_executor", make_executor)
+    app = FastAPI()
+    app.include_router(commands.router, prefix="/api")
+    app.dependency_overrides[get_current_user] = lambda: user
+    return TestClient(app), rows, proposal_id, db
+
+
+def _past():
+    return (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+
+
+@pytest.mark.parametrize("user", [
+    {"id": "alice", "tier": "free"},
+    {"id": "alice", "tier": "pro", "pro_expires_at": _past()},
+])
+def test_review_refuses_leave_for_free_and_lapsed_pro(monkeypatch, user):
+    client, rows, proposal_id, db = _review_client(
+        monkeypatch,
+        user,
+        {"action": "add_leave", "payload": {"name": "Holiday", "type": "annual"}},
+    )
+    response = client.post(
+        f"/api/commands/proposals/{proposal_id}/review",
+        json={"decision": "approve"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == LEAVE_PRO_REPLY
+    assert rows[0]["status"] == "pending"
+    assert rows[0]["reviewed_at"] is None
+    db.create_commitment.assert_not_awaited()
+
+
+@pytest.mark.parametrize("user", [
+    {"id": "alice", "tier": "free"},
+    {"id": "alice", "tier": "pro", "pro_expires_at": _past()},
+])
+def test_review_refuses_a_third_commitment_for_free_and_lapsed_pro(monkeypatch, user):
+    existing = [
+        {"id": "one", "user_id": "alice", "name": "Gym", "type": "personal", "start_date": "2026-11-01"},
+        {"id": "two", "user_id": "alice", "name": "Course", "type": "education", "start_date": "2026-11-02"},
+    ]
+    client, rows, proposal_id, db = _review_client(
+        monkeypatch,
+        user,
+        {"action": "add_commitment", "payload": {"name": "Dentist", "type": "personal", "start_date": "2026-12-01"}},
+        existing,
+    )
+    response = client.post(
+        f"/api/commands/proposals/{proposal_id}/review",
+        json={"decision": "approve"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == COMMITMENT_LIMIT_REPLY
+    assert rows[0]["status"] == "pending"
+    assert rows[0]["reviewed_at"] is None
+    db.create_commitment.assert_not_awaited()

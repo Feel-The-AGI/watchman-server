@@ -725,7 +725,14 @@ class ChatService:
             tool = None
         limit_check = getattr(self.command_executor, "commitment_limit_message", None)
         if tool and tool.get("name") == "add_commitment" and limit_check is not None:
-            limit_reply = await limit_check(tool.get("input") or {})
+            try:
+                limit_reply = await limit_check(tool.get("input") or {})
+            except Exception as exc:
+                logger.warning(
+                    f"[CHAT] Commitment count failed for {self.user_id}; "
+                    f"leaving the message through: {exc}"
+                )
+                limit_reply = None
             if limit_reply:
                 logger.info(f"[CHAT] Commitment limit blocked for free user {self.user_id}")
                 response_text = limit_reply
