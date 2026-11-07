@@ -481,3 +481,63 @@ def test_the_v2_prompt_says_leave_is_on_every_plan():
 
     text = load_version("chat-v2").text
     assert "Never say leave or leave booking is a Pro feature" in text
+
+
+# ------------------------------------------------ whole-calendar correction
+
+
+def test_whole_calendar_correction_drops_earlier_rotations():
+    changed = rh.change_from(
+        FOUR_FOUR,
+        {"pattern": TWO_TWO_THREE, "anchor_date": "2026-12-01", "anchor_cycle_day": 1},
+        d("2026-12-01"),
+    )
+    fixed = rh.correction(changed, {**FOUR_FOUR, "anchor_cycle_day": 2}, whole_calendar=True)
+    assert fixed["history"] == []
+    assert rh.rotation_on(fixed, d("2025-01-01"))["anchor_cycle_day"] == 2
+
+
+@pytest.mark.parametrize("payload", [
+    {"pattern": TWO_TWO_THREE, "whole_calendar": True},
+    {"pattern": TWO_TWO_THREE, "correction": True, "whole_calendar": True, "effective_from": "2026-12-01"},
+])
+def test_whole_calendar_is_never_a_dated_change(payload):
+    from app.engines.command_executor import explicit_change_start
+
+    assert rotation_change_start(payload, FOUR_FOUR, d("2026-11-07")) is None
+    assert explicit_change_start(payload, FOUR_FOUR) is None
+
+
+@pytest.mark.asyncio
+async def test_a_whole_calendar_correction_rewrites_dates_before_an_earlier_change():
+    store, executor = await _seeded()
+    await _run(executor, "update_cycle", {
+        "pattern": [{"label": "work_night", "duration": 2}, {"label": "off", "duration": 1}],
+        "effective_from": "2026-06-01",
+    })
+    await _run(executor, "update_cycle", {
+        "pattern": [{"label": "off", "duration": 2}, {"label": "work_day", "duration": 2}],
+        "anchor_date": "2026-01-05", "anchor_cycle_day": 1,
+        "correction": True, "whole_calendar": True,
+    })
+    days = _days(store)
+    assert [days[f"2026-01-0{n}"] for n in (5, 6, 7, 8)] == ["off", "off", "work_day", "work_day"]
+    assert _settings_cycle(store)["history"] == []
+    assert "work_night" not in set(days.values())
+
+
+@pytest.mark.asyncio
+async def test_a_plain_correction_keeps_an_earlier_change():
+    store, executor = await _seeded()
+    before = _days(store)
+    await _run(executor, "update_cycle", {
+        "pattern": [{"label": "work_night", "duration": 2}, {"label": "off", "duration": 1}],
+        "effective_from": "2026-06-01",
+    })
+    await _run(executor, "update_cycle", {
+        "pattern": [{"label": "work_night", "duration": 2}, {"label": "off", "duration": 1}],
+        "anchor_date": "2026-06-01", "anchor_cycle_day": 2, "correction": True,
+    })
+    after = _days(store)
+    assert all(after[day] == before[day] for day in before if day < "2026-06-01")
+    assert after["2026-06-01"] == "work_night" and after["2026-06-02"] == "off"

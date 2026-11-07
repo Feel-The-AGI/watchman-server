@@ -523,7 +523,9 @@ class CommandExecutor:
         if effective_from is not None:
             cycle_data = rotation_history.change_from(existing_cycle, cycle_data, effective_from)
         else:
-            cycle_data = rotation_history.correction(existing_cycle, cycle_data)
+            cycle_data = rotation_history.correction(
+                existing_cycle, cycle_data, whole_calendar=_truthy(payload.get("whole_calendar")),
+            )
 
         await self.settings_service.update_section(self.user_id, "cycle", cycle_data)
         await sync_cycle_row(self.db, self.user_id, cycle_data)
@@ -2122,7 +2124,7 @@ def rotation_change_start(payload: dict, existing_cycle: Optional[dict], today: 
     existing = rotation_history.flat_rotation(existing_cycle)
     if not existing["pattern"] or not existing["anchor_date"]:
         return None
-    if _truthy(payload.get("correction")):
+    if _truthy(payload.get("correction")) or _truthy(payload.get("whole_calendar")):
         return None
     start = rotation_history.parse_day(payload.get("effective_from"))
     if start is not None:
@@ -2149,7 +2151,7 @@ def explicit_change_start(payload: dict, existing_cycle: Optional[dict]) -> Opti
     existing = rotation_history.flat_rotation(existing_cycle)
     if not existing["pattern"] or not existing["anchor_date"]:
         return None
-    if _truthy(payload.get("correction")):
+    if _truthy(payload.get("correction")) or _truthy(payload.get("whole_calendar")):
         return None
     return rotation_history.parse_day(payload.get("effective_from"))
 
