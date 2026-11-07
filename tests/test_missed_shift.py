@@ -59,3 +59,40 @@ def test_oct_20_and_21_asks():
     asked = calendar_request("I didn't work Oct 20 and 21", TODAY)
     assert asked.payload is None
     assert asked.clarify.strip().endswith("?")
+
+
+NOV_7 = date(2026, 11, 7)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("I called in sick on Monday 2 November", date(2026, 11, 2)),
+        ("I was sick on Monday, 2 November", date(2026, 11, 2)),
+        ("I was off on Mon 2 Nov", date(2026, 11, 2)),
+        ("I was sick on Tuesday 3rd November", date(2026, 11, 3)),
+        ("I didn't work on Wednesday November 4th", date(2026, 11, 4)),
+        ("I didn't work Wednesday the 4th", date(2026, 11, 4)),
+    ],
+)
+def test_a_weekday_before_its_date_names_one_day(text, expected):
+    request = calendar_request(text, NOV_7)
+    assert request.clarify is None
+    assert request.payload["start_date"] == expected.isoformat()
+    assert request.payload["end_date"] == expected.isoformat()
+
+
+def test_weekday_labels_inside_a_range_keep_the_range():
+    span = parse_spoken_span("I was off from Monday 2 Nov to Wednesday 4 Nov", NOV_7, "past")
+    assert (span.start, span.end) == (date(2026, 11, 2), date(2026, 11, 4))
+
+
+def test_a_weekday_that_does_not_match_its_date_says_which_is_wrong():
+    request = calendar_request("I was sick on Tuesday 2 November", NOV_7)
+    assert request.payload is None
+    assert request.clarify == "Mon 2 Nov 2026 is a Monday, not a Tuesday. Which day did you mean?"
+
+
+def test_two_weekdays_are_still_a_range():
+    span = parse_spoken_span("I was off Monday and Tuesday", NOV_7, "past")
+    assert (span.start, span.end) == (date(2026, 11, 2), date(2026, 11, 3))

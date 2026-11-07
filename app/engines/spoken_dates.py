@@ -71,6 +71,9 @@ _RELATIVE = re.compile(r"\byesterday\b|\btoday\b|\btomorrow\b", re.IGNORECASE)
 _BARE_DAY = re.compile(rf"\b(?:the\s+)?(\d{{1,2}})(st|nd|rd|th)\b", re.IGNORECASE)
 _CONNECTOR = re.compile(r"\b(?:to|through|thru|and)\b|[-–—]", re.IGNORECASE)
 _DANGLING_NUMBER = re.compile(r"^\s*(?:and|to)\s+(\d{1,2})\b", re.IGNORECASE)
+# Between "Monday" and the date it names: "Monday 2 Nov", "Mon, Nov 2", "Monday the 2nd".
+_WEEKDAY_LABEL_GAP = re.compile(r"^[\s,.]*(?:the\s+)?$", re.IGNORECASE)
+_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
 class BadDate(Exception):
@@ -156,6 +159,7 @@ def _ordered(start: date, end: date) -> SpokenSpan:
 def _collect(text: str, today: date, direction: str) -> list:
     taken = []
     found = []
+    weekday_spans = {}
 
     def keep(match, start: date, end: Optional[date] = None):
         span = match.span()
@@ -224,6 +228,7 @@ def _collect(text: str, today: date, direction: str) -> list:
         if _overlaps(match.span(), taken):
             continue
         index = _weekday_index(match.group(1))
+        weekday_spans[match.span()[0]] = index
         if direction == "past":
             keep(match, _past_weekday(index, today))
         else:
@@ -235,7 +240,42 @@ def _collect(text: str, today: date, direction: str) -> list:
         keep(match, built)
     _dangling_bare_number(text, found)
     found.sort(key=lambda item: item[0])
-    return found
+    return _absorb_weekday_labels(text, found, weekday_spans)
+
+
+def _absorb_weekday_labels(text: str, found: list, weekday_spans: dict) -> list:
+    """Drop a weekday that only labels the date right after it.
+
+    "Monday 2 November" names one day, not two. When the weekday does not
+    match that date, say so instead of guessing which one was meant.
+    """
+    kept = []
+    skip_next = False
+    for position, item in enumerate(found):
+        if skip_next:
+            skip_next = False
+            continue
+        index = weekday_spans.get(item[0])
+        following = found[position + 1] if position + 1 < len(found) else None
+        labels_next = (
+            index is not None
+            and following is not None
+            and following[0] not in weekday_spans
+            and following[2] == following[3]
+            and _WEEKDAY_LABEL_GAP.match(text[item[1]:following[0]])
+        )
+        if not labels_next:
+            kept.append(item)
+            continue
+        named = following[2]
+        if named.weekday() != index:
+            raise AmbiguousDate(
+                f"{speak(named)} is a {_WEEKDAY_NAMES[named.weekday()]}, not a "
+                f"{_WEEKDAY_NAMES[index]}. Which day did you mean?"
+            )
+        skip_next = True
+        kept.append(following)
+    return kept
 
 
 def _slash(match, today: date, direction: str):
