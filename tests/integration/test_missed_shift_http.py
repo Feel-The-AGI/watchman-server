@@ -104,41 +104,52 @@ async def test_oct_15_off_override_and_expired_proposal(db, monkeypatch):
             "content": "Remove Oct 15th, I didn't go to work that day",
         })
         assert sent.status_code == 200, sent.text
-        command = sent.json()["proposal"]["command"]
-        assert command["payload"] == {
+        body = sent.json()
+        # Chat applies the change in the same request. No card waits for a click.
+        assert body["proposal"] is None
+        applied = body["applied"]
+        assert applied["status"] == "applied"
+        assert applied["changed"] is True
+        assert applied["message"] == "Mark Thu 15 Oct 2026 as Off"
+        assert body["response"].endswith("Done: Mark Thu 15 Oct 2026 as Off.")
+        stored = db.execute(
+            "SELECT status, command FROM proposals WHERE id = %s", (applied["proposal_id"],),
+        ).fetchone()
+        assert stored[0] == "approved"
+        assert stored[1]["payload"] == {
             "start_date": "2026-10-15",
             "end_date": "2026-10-15",
             "work_type": "off",
             "preserve_off_days": False,
         }
-        assert command["explanation"] == "Mark Thu 15 Oct 2026 as Off"
-        review = await client.post(
-            f"/api/commands/proposals/{sent.json()['proposal']['id']}/review",
+        assert stored[1]["explanation"] == "Mark Thu 15 Oct 2026 as Off"
+        replay = await client.post(
+            f"/api/commands/proposals/{applied['proposal_id']}/review",
             json={"decision": "approve"},
         )
-        assert review.status_code == 200, review.text
-        assert review.json()["status"] == "applied"
-        assert review.json()["changed"] is True
+        assert replay.status_code == 409
+        pending = await client.get("/api/commands/proposals/pending")
+        assert pending.json()["proposals"] == []
         day = await client.get("/api/calendar/day/2026-10-15")
         assert day.json()["data"]["work_type"] == "off"
         assert day.json()["data"]["state_json"]["manual_override"] is True
         month = await client.get("/api/calendar/month/2026/10")
         match = next(item for item in month.json()["data"] if str(item["date"])[:10] == "2026-10-15")
         assert match["work_type"] == "off"
+        history = await client.get("/api/chat/history")
+        assert history.json()["messages"][-1]["content"] == body["response"]
 
         _stamp(db, user_id)
-        undo = await client.post("/api/commands/undo", json={})
+        undo = await client.post("/api/commands/undo", json={"command_id": applied["command_id"]})
         assert undo.status_code == 200, undo.text
         restored = await client.get("/api/calendar/day/2026-10-15")
         assert restored.json()["data"]["work_type"] == "work_day"
 
         again = await client.post("/api/chat/message", json={"content": "I was off on Oct 18"})
-        second = await client.post(
-            f"/api/commands/proposals/{again.json()['proposal']['id']}/review",
-            json={"decision": "approve"},
-        )
-        assert second.status_code == 200, second.text
-        assert second.json()["status"] == "no_change"
-        assert second.json()["changed"] is False
-        assert second.json()["message"] == "No change: Sun 18 Oct 2026 was already Off"
-        assert "Done" not in second.json()["message"]
+        assert again.status_code == 200, again.text
+        second = again.json()
+        assert second["proposal"] is None
+        assert second["applied"]["status"] == "no_change"
+        assert second["applied"]["changed"] is False
+        assert second["response"] == "No change: Sun 18 Oct 2026 was already Off"
+        assert "Done" not in second["response"]

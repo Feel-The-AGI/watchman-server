@@ -219,7 +219,9 @@ def work_type_on(cycle: Optional[dict], day: date) -> Optional[str]:
     """Work type for one date from a Master Settings or relational cycle."""
     if not cycle_is_present(cycle):
         return None
-    prepared = engine_cycle(cycle)
+    from app.engines.rotation_history import rotation_on
+
+    prepared = engine_cycle(rotation_on(cycle, day))
     anchor = _parse_day(prepared.get("anchor_date"))
     if anchor is None or not prepared.get("pattern"):
         return None

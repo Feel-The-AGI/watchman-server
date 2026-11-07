@@ -1,11 +1,8 @@
-"""REST leave allows a Free sick day and keeps vacation on Pro."""
+"""REST leave is open on every plan, Free included."""
 
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from fastapi import HTTPException
-
-from app.leave_access import LEAVE_PRO_REPLY
 from app.routes.calendar import LeaveBlockRequest, add_leave_block
 
 
@@ -66,32 +63,26 @@ async def test_free_sick_day_is_saved(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_free_vacation_is_pro_only(monkeypatch):
+async def test_free_vacation_is_saved(monkeypatch):
     store = _Store()
     _install(monkeypatch, store)
 
-    with pytest.raises(HTTPException) as exc:
-        await add_leave_block(_request("annual"), {"id": "alice", "tier": "free"})
+    result = await add_leave_block(_request("annual"), {"id": "alice", "tier": "free"})
 
-    assert exc.value.status_code == 403
-    assert exc.value.detail == LEAVE_PRO_REPLY
-    assert "sick" not in exc.value.detail.lower()
-    assert store.created is None
-    assert store.days[0]["state_json"]["is_leave"] is False
+    assert result["success"] is True
+    assert store.created["effects"]["type"] == "annual"
+    assert store.days[0]["state_json"]["is_leave"] is True
 
 
 @pytest.mark.asyncio
-async def test_free_leave_without_a_type_is_refused(monkeypatch):
+async def test_free_leave_without_a_type_is_saved(monkeypatch):
     store = _Store()
     _install(monkeypatch, store)
 
-    with pytest.raises(HTTPException) as exc:
-        await add_leave_block(_request(None), {"id": "alice", "tier": "free"})
+    result = await add_leave_block(_request(None), {"id": "alice", "tier": "free"})
 
-    assert exc.value.status_code == 403
-    assert exc.value.detail == LEAVE_PRO_REPLY
-    assert store.created is None
-    assert store.days[0]["state_json"]["is_leave"] is False
+    assert result["success"] is True
+    assert store.days[0]["state_json"]["is_leave"] is True
 
 
 @pytest.mark.asyncio
@@ -110,20 +101,13 @@ async def test_pro_can_save_sick_and_vacation(monkeypatch, leave_type):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("leave_type,allowed", [("sick", True), ("annual", False)])
-async def test_expired_pro_is_treated_as_free(monkeypatch, leave_type, allowed):
+@pytest.mark.parametrize("leave_type", ["sick", "annual"])
+async def test_expired_pro_still_plans_leave(monkeypatch, leave_type):
     store = _Store()
     _install(monkeypatch, store)
     user = {"id": "alice", "tier": "pro", "pro_expires_at": _past()}
 
-    if allowed:
-        result = await add_leave_block(_request(leave_type), user)
-        assert result["success"] is True
-        assert store.created["effects"]["type"] == "sick"
-        return
+    result = await add_leave_block(_request(leave_type), user)
 
-    with pytest.raises(HTTPException) as exc:
-        await add_leave_block(_request(leave_type), user)
-    assert exc.value.status_code == 403
-    assert exc.value.detail == LEAVE_PRO_REPLY
-    assert store.created is None
+    assert result["success"] is True
+    assert store.created["effects"]["type"] == leave_type

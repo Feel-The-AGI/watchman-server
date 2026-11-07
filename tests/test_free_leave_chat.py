@@ -1,4 +1,4 @@
-"""Free accounts cannot plan leave from chat. Sick days and other edits stay."""
+"""Free accounts plan leave from chat like every other plan."""
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -81,24 +81,22 @@ async def _send(service, tier):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("version", ["", "chat-v1"])
-async def test_free_leave_via_chat_writes_nothing(monkeypatch, version):
+async def test_free_leave_via_chat_goes_through(monkeypatch, version):
     service, created, executed = _service()
     _install(monkeypatch, version, {
         "name": "add_leave",
         "input": {"name": "Annual Leave", "start_date": "2026-11-01", "end_date": "2026-11-05"},
     })
 
-    result = await _send(service, "free")
+    result = await service.send_message("Book annual leave", effective_tier="free")
 
     expected = "chat-v2" if version == "" else "chat-v1"
     assert version_for("chat").id == expected
-    assert result["proposal"] is None
-    assert result["is_command"] is False
-    assert "execution" not in result
-    assert LEAVE_PRO_REPLY in result["response"]
-    assert "Upgrade to Pro" in result["response"]
-    created.assert_not_awaited()
-    executed.assert_not_awaited()
+    assert result["proposal"]["id"] == "proposal-1"
+    assert result["is_command"] is True
+    assert LEAVE_PRO_REPLY not in (result.get("response") or "")
+    assert "Upgrade to Pro" not in (result.get("response") or "")
+    created.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -284,21 +282,26 @@ def _past():
     {"id": "alice", "tier": "free"},
     {"id": "alice", "tier": "pro", "pro_expires_at": _past()},
 ])
-def test_review_refuses_leave_for_free_and_lapsed_pro(monkeypatch, user):
+def test_review_applies_leave_for_free_and_lapsed_pro(monkeypatch, user):
     client, rows, proposal_id, db = _review_client(
         monkeypatch,
         user,
         {"action": "add_leave", "payload": {"name": "Holiday", "type": "annual"}},
     )
+    applied = {
+        "success": True, "status": "applied", "changed": True,
+        "message": "Add Holiday", "command_id": "cmd-1", "result": {},
+    }
+    executor = SimpleNamespace(execute=AsyncMock(return_value=applied))
+    monkeypatch.setattr(commands, "create_command_executor", lambda database, user_id: executor)
     response = client.post(
         f"/api/commands/proposals/{proposal_id}/review",
         json={"decision": "approve"},
     )
-    assert response.status_code == 403
-    assert response.json()["detail"] == LEAVE_PRO_REPLY
-    assert rows[0]["status"] == "pending"
-    assert rows[0]["reviewed_at"] is None
-    db.create_commitment.assert_not_awaited()
+    assert response.status_code == 200
+    assert response.json()["status"] == "applied"
+    assert rows[0]["status"] == "approved"
+    executor.execute.assert_awaited_once()
 
 
 @pytest.mark.parametrize("user", [

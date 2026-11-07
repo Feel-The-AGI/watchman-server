@@ -5,9 +5,10 @@ Handles conversation with the agent
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import Optional, List, Literal
+from typing import Any, Optional, List, Literal
 from loguru import logger
-from datetime import datetime
+from datetime import datetime, timezone
+from uuid import UUID
 
 from app.middleware.auth import get_current_user, get_effective_tier
 from app.database import Database
@@ -20,6 +21,119 @@ FREE_MESSAGE_LIMIT = 100  # Total messages per month
 FREE_HISTORY_LIMIT = 50   # Max history messages to retrieve
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+APPLY_FAILED_REPLY = "I couldn't make that change just now. Nothing was changed. Please try again."
+
+
+def _failure_text(detail: Any) -> str:
+    """The user-facing sentence from a review error detail."""
+    if isinstance(detail, dict):
+        return str(detail.get("message") or APPLY_FAILED_REPLY)
+    if isinstance(detail, str) and detail.strip():
+        text = detail.strip()
+        # Review errors say the card is still waiting. Chat closes it instead.
+        if "waiting for review" in text or text in {
+            "Command could not be applied", "Proposal unavailable or already reviewed",
+        }:
+            return APPLY_FAILED_REPLY
+        return text
+    return APPLY_FAILED_REPLY
+
+
+def _close_unapplied(db, proposal_id: str, user_id: str) -> None:
+    """A change that could not be applied must not wait as a card."""
+    try:
+        db.client.table("proposals").update({
+            "status": "expired",
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", proposal_id).eq("user_id", user_id).eq("status", "pending").execute()
+    except Exception as exc:
+        logger.warning(f"[CHAT] Could not close proposal {proposal_id}: {exc}")
+
+
+def _rewrite_reply(db, message: Optional[dict], text: str, user_id: str) -> Optional[dict]:
+    """Store the final reply so a reload shows what actually happened."""
+    if not isinstance(message, dict) or not message.get("id"):
+        return message
+    try:
+        db.client.table("chat_messages").update({"content": text}).eq(
+            "id", message["id"]
+        ).eq("user_id", user_id).execute()
+    except Exception as exc:
+        logger.warning(f"[CHAT] Could not update reply {message.get('id')}: {exc}")
+    return {**message, "content": text}
+
+
+async def apply_now(result: dict, user: dict, db) -> dict:
+    """Apply the change a chat turn asked for, through the same review path as Apply.
+
+    The proposal row stays as the audit record. Every check the Apply button
+    runs (expiry, plan limits, the free horizon, validation, a failed write)
+    still runs. The reply says what changed and carries ``applied`` with the
+    command id for Undo. A change that could not be applied is closed and the
+    reply says why. Nothing is left waiting for a click.
+    """
+    proposal = result.get("proposal") if isinstance(result, dict) else None
+    if not isinstance(proposal, dict) or not proposal.get("id"):
+        return result
+    from app.routes.commands import ReviewProposalRequest, review_proposal
+
+    proposal_id = str(proposal["id"])
+    command = proposal.get("command") if isinstance(proposal.get("command"), dict) else {}
+    summary = str(command.get("explanation") or "").strip()
+    try:
+        outcome = await review_proposal(
+            UUID(proposal_id), ReviewProposalRequest(decision="approve"), user
+        )
+    except HTTPException as exc:
+        _close_unapplied(db, proposal_id, user["id"])
+        text = _failure_text(exc.detail)
+        logger.info(f"[CHAT] Change {proposal_id} not applied for {user['id']}: {text}")
+        return {
+            **result,
+            "proposal": None,
+            "is_command": False,
+            "applied": {"status": "failed", "changed": False, "message": text},
+            "response": text,
+            "assistant_message": _rewrite_reply(db, result.get("assistant_message"), text, user["id"]),
+        }
+    except Exception as exc:
+        logger.exception(f"[CHAT] Change {proposal_id} failed for {user['id']}: {exc}")
+        _close_unapplied(db, proposal_id, user["id"])
+        return {
+            **result,
+            "proposal": None,
+            "is_command": False,
+            "applied": {"status": "failed", "changed": False, "message": APPLY_FAILED_REPLY},
+            "response": APPLY_FAILED_REPLY,
+            "assistant_message": _rewrite_reply(
+                db, result.get("assistant_message"), APPLY_FAILED_REPLY, user["id"]
+            ),
+        }
+    outcome = outcome if isinstance(outcome, dict) else {}
+    changed = outcome.get("changed") is not False and outcome.get("status") != "no_change"
+    if changed:
+        done = summary or str(outcome.get("message") or "Done.")
+        text = f"Done: {done}."
+        note = str(command.get("model_text") or "").strip()
+        if note and note.rstrip(".") != done.rstrip("."):
+            text = f"{note}\n\n{text}"
+    else:
+        text = str(outcome.get("message") or "No change.")
+    return {
+        **result,
+        "proposal": None,
+        "applied": {
+            "status": "applied" if changed else "no_change",
+            "changed": changed,
+            "message": summary or str(outcome.get("message") or ""),
+            "command_id": outcome.get("command_id"),
+            "proposal_id": proposal_id,
+            "action": command.get("action"),
+        },
+        "response": text,
+        "assistant_message": _rewrite_reply(db, result.get("assistant_message"), text, user["id"]),
+    }
 
 
 class PatternBlock(BaseModel):
@@ -127,6 +241,7 @@ async def send_message(
             kwargs["timezone_name"] = user["timezone"]
         kwargs["effective_tier"] = effective_tier
         result = await chat_service.send_message(**kwargs)
+        result = await apply_now(result, user, db)
 
         logger.info(f"[CHAT] Response received - is_command: {result.get('is_command')}")
         if result.get('is_command'):

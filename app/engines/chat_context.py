@@ -111,10 +111,24 @@ def describe_cycle(cycle: Optional[dict]) -> str:
     anchor_day = cycle.get("anchor_cycle_day") or anchor.get("cycle_day") or 1
     length = cycle.get("cycle_length") or cycle.get("total_days") or total or 0
     name = cycle.get("name") or "Rotation"
-    return (
+    text = (
         f"{name}: {pattern_text} ({length}-day cycle). "
         f"Anchor {anchor_date} is cycle day {anchor_day}."
     )
+    from app.engines.rotation_history import current_start, history_of
+
+    earlier = history_of(cycle)
+    if earlier:
+        text += f" This rotation applies from {current_start(cycle).isoformat()}."
+        for entry in earlier:
+            blocks = ", then ".join(
+                f"{block['duration']} {block['label']}" for block in entry["pattern"]
+            )
+            text += (
+                f" Earlier rotation until {entry['until']}: {blocks}, "
+                f"anchor {entry['anchor_date']} as cycle day {entry['anchor_cycle_day']}."
+            )
+    return text
 
 
 def rotation_status(cycle: Optional[dict], calendar: Optional[dict], pending: bool = False) -> str:
