@@ -445,3 +445,39 @@ async def test_chat_stamps_effective_from_on_a_rotation_change(monkeypatch, tool
     command = created.await_args.args[0]
     want = "2026-11-07" if expected == "today" else expected
     assert command["payload"].get("effective_from") == want
+
+
+# ------------------------------------------- stale "leave is Pro" history
+
+
+@pytest.mark.parametrize("text", [
+    "Leave planning is a Pro feature. Upgrade to Pro to plan vacation and time off.",
+    "I can't book that. Leave booking is a Pro feature, so nothing has been added to your calendar. Upgrading to Pro would let me set it up for you.",
+    "I can't book that either. Leave booking is a Pro feature, so nothing has been added for 20 March 2027.",
+])
+def test_old_leave_refusals_are_withdrawn_from_model_history(text):
+    from app.engines.claude_chat import STALE_LEAVE_NOTE, history_to_messages
+
+    history = [
+        {"role": "user", "content": "Book leave"},
+        {"role": "assistant", "content": text},
+        {"role": "user", "content": "Book annual leave"},
+    ]
+    messages = history_to_messages(list(reversed(history)), "Book annual leave")
+    assistant = next(m for m in messages if m["role"] == "assistant")
+    assert "pro feature" not in assistant["content"].lower()
+    assert STALE_LEAVE_NOTE in assistant["content"]
+
+
+def test_unrelated_pro_replies_are_kept():
+    from app.engines.claude_chat import without_stale_leave_refusal
+
+    text = "Exports are a Pro feature. Your next off day is Wed 11 Nov."
+    assert without_stale_leave_refusal(text) == text
+
+
+def test_the_v2_prompt_says_leave_is_on_every_plan():
+    from app.prompts.registry import load_version
+
+    text = load_version("chat-v2").text
+    assert "Never say leave or leave booking is a Pro feature" in text

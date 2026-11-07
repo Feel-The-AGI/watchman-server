@@ -725,7 +725,7 @@ class CommandExecutor:
                 await self.settings_service.add_to_list(self.user_id, "leave_blocks", saved)
                 kept.append(str(saved.get("id")))
         if not removed:
-            label = start.isoformat() if start == end else f"{start.isoformat()} to {end.isoformat()}"
+            label = describe_day(start) if start == end else f"{describe_day(start)} to {describe_day(end)}"
             return {"no_change": True, "message": f"No change: there is no leave on {label}"}
         return {"removed_ids": removed, "remainder_ids": kept}
     
@@ -2131,6 +2131,11 @@ def rotation_change_start(payload: dict, existing_cycle: Optional[dict], today: 
     if payload.get("pattern") or anchor_given:
         return today
     return None
+
+
+def describe_day(day: date) -> str:
+    """Tue 24 Nov 2026."""
+    return day.strftime("%a ") + str(day.day) + day.strftime(" %b %Y")
 
 
 def explicit_change_start(payload: dict, existing_cycle: Optional[dict]) -> Optional[date]:
