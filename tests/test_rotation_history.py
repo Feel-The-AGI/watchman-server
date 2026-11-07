@@ -541,3 +541,11 @@ async def test_a_plain_correction_keeps_an_earlier_change():
     after = _days(store)
     assert all(after[day] == before[day] for day in before if day < "2026-06-01")
     assert after["2026-06-01"] == "work_night" and after["2026-06-02"] == "off"
+
+
+def test_the_v2_prompt_books_leave_from_a_date_alone():
+    from app.prompts.registry import load_version
+
+    text = load_version("chat-v2").text
+    assert "Booking leave needs only a date" in text
+    assert "Do not ask what kind of leave it is" in text
