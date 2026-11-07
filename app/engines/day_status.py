@@ -123,8 +123,12 @@ def project_day(
     }
 
 
-def answer_sentence(status: dict) -> str:
-    """One sentence. No second guess about a stored horizon."""
+def answer_sentence(status: dict, yes_no: bool = True) -> str:
+    """One sentence. No second guess about a stored horizon.
+
+    ``yes_no`` is False for "what shift am I on…" questions, which are not
+    answered with "Yes." or "No.".
+    """
     when = status.get("label") or status.get("date") or "That day"
     work_type = status.get("work_type")
     if not work_type:
@@ -136,6 +140,8 @@ def answer_sentence(status: dict) -> str:
         text = f"Yes. {when} is {kind}."
     else:
         text = f"No. {when} is {kind}."
+    if not yes_no:
+        text = text.split(". ", 1)[1] if text.startswith(("Yes. ", "No. ")) else text
     names = [name for name in (status.get("commitment_names") or []) if name]
     if not names:
         return text
@@ -282,3 +288,73 @@ def _safe_date(year: int, month: int, day_number: int) -> Optional[date]:
         return date(year, month, day_number)
     except ValueError:
         return None
+
+
+_YES_NO = re.compile(r"^\s*(?:am|are|is|do|does|did|will|was|were|have|has|can)\b", re.IGNORECASE)
+
+
+def is_yes_no_question(text: str) -> bool:
+    """True for 'Am I working…?'-style questions that a Yes or No answers."""
+    return bool(_YES_NO.search(text or ""))
+
+
+_NEXT_KINDS = (
+    (re.compile(r"\bnext\s+(?:night|nights|night shift|night shifts)\b", re.I), "work_night"),
+    (re.compile(r"\bnext\s+(?:day shift|day shifts|day-shift)\b", re.I), "work_day"),
+    (re.compile(r"\bnext\s+(?:day off|days off|off day|off days|rest day|rest days|off|break)\b", re.I), "off"),
+    (re.compile(r"\bnext\s+(?:leave|holiday|holidays|vacation)\b", re.I), "leave"),
+    (re.compile(r"\bnext\s+(?:shift|work day|working day|workday)\b|\bback (?:at|to) work\b", re.I), "work"),
+)
+_NEXT_LABEL = {
+    "work_night": "night shift",
+    "work_day": "day shift",
+    "off": "day off",
+    "leave": "leave day",
+    "work": "shift",
+}
+
+
+def next_kind_question(text: str) -> Optional[str]:
+    """The kind of day a 'when is my next …?' question asks for, or None."""
+    if not text or _CHANGING.search(text) or not _QUESTION.search(text):
+        return None
+    for pattern, kind in _NEXT_KINDS:
+        if pattern.search(text):
+            return kind
+    return None
+
+
+def _day_matches(row: dict, kind: str) -> bool:
+    state = row.get("state_json") if isinstance(row.get("state_json"), dict) else {}
+    on_leave = bool(state.get("is_leave"))
+    work_type = str(row.get("work_type") or "")
+    if kind == "leave":
+        return on_leave
+    if on_leave:
+        return False
+    if kind == "work":
+        return work_type in {"work_day", "work_night"}
+    return work_type == kind
+
+
+def next_day_answer(kind: str, rows: list, after: date) -> str:
+    """One sentence naming the first stored day of that kind after a date."""
+    label = _NEXT_LABEL.get(kind, "day")
+    days = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        raw = row.get("date")
+        try:
+            day = raw if isinstance(raw, date) else date.fromisoformat(str(raw)[:10])
+        except ValueError:
+            continue
+        if day > after:
+            days.append((day, row))
+    for day, row in sorted(days, key=lambda item: item[0]):
+        if _day_matches(row, kind):
+            if kind == "work":
+                kind_text = _SHIFT.get(str(row.get("work_type")), "a shift")
+                return f"Your next shift is {_format_day(day)} ({kind_text})."
+            return f"Your next {label} is {_format_day(day)}."
+    return f"I can't see a {label} in your calendar after {_format_day(after)}."

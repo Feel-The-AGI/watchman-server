@@ -362,8 +362,13 @@ class CommandExecutor:
                 "result": result,
             }
 
-        # Get after state
-        after_state = await self.settings_service.get_snapshot(self.user_id)
+        # Get after state. The change is already saved, so a failed read must
+        # not turn into "nothing was changed"; log what we have instead.
+        try:
+            after_state = await self.settings_service.get_snapshot(self.user_id)
+        except Exception as e:
+            logger.error(f"After-state read failed once the change was saved: {e}")
+            after_state = {}
         
         # Log the command. Inserted row ids and day snapshots stay on the log
         # so undo can remove or restore them. They are not part of the proposal.
@@ -375,6 +380,9 @@ class CommandExecutor:
             logged_payload[inserted_key] = result.get(inserted_key) or ""
         if isinstance(result, dict) and result.get("previous_days") is not None:
             logged_payload["_previous_days"] = result["previous_days"]
+        if isinstance(result, dict) and result.get("removed_leave") is not None:
+            logged_payload["_removed_leave"] = result["removed_leave"]
+            logged_payload["_remainder_leave"] = result.get("remainder_leave") or []
         try:
             command_log = await self._log_command(
                 action=action,
@@ -500,6 +508,12 @@ class CommandExecutor:
             else:
                 normalized_pattern.append(block)
         
+        if "pattern" in payload and (
+            not normalized_pattern
+            or any(int(block.get("duration") or 0) < 1 for block in normalized_pattern)
+        ):
+            raise ValueError("A rotation needs at least one block of one day or more.")
+
         # Build normalized cycle data with flat anchor format.
         # A missing id stays missing. Inventing one would match no cycles row,
         # so the single active row could not be synced.
@@ -666,13 +680,16 @@ class CommandExecutor:
         return None
     
     async def _action_remove_leave(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove leave by id, or cancel every leave day inside a date range.
+        """Remove leave by id, or cancel leave days inside one or more date ranges.
 
-        A block entirely inside the range is deleted. A block that runs past
-        either end is deleted and the days outside the range are saved again as
-        new blocks with the same name and type, so cancelling one day of a week
-        keeps the rest of the week. Undo restores the removed rows and drops
-        the remainders by comparing the settings snapshots.
+        Ranges come from ``ranges`` ([{start_date, end_date}]) or the top-level
+        start_date/end_date. ``all`` cancels every leave block that ends today
+        or later. A block entirely inside a range is deleted. A block that runs
+        past a range keeps its other days as new blocks with the same name and
+        type. Remainders are saved before the original is deleted, so a failed
+        write never loses leave. The removed and created rows are returned so
+        undo and redo restore exactly them, including rows that were never in
+        the settings document.
         """
         leave_id = payload.get("id")
         if leave_id:
@@ -682,54 +699,66 @@ class CommandExecutor:
             await self.settings_service.remove_from_list(self.user_id, "leave_blocks", leave_id)
             return {"removed_id": leave_id}
 
-        start = _iso_day(payload.get("start_date") or payload.get("date"))
-        end = _iso_day(payload.get("end_date")) or start
-        if start is None:
+        ranges = _leave_ranges(payload)
+        if not ranges:
             raise ValueError("Leave ID or a date is required")
-        if end < start:
-            start, end = end, start
-        rows = await self.db.read_leave_blocks(self.user_id) or []
-        removed, kept = [], []
+        rows = [row for row in (await self.db.read_leave_blocks(self.user_id) or []) if isinstance(row, dict)]
+        removed_rows, remainder_rows = [], []
         for row in rows:
-            if not isinstance(row, dict):
-                continue
             row_start = _iso_day(row.get("start_date"))
             row_end = _iso_day(row.get("end_date")) or row_start
-            if row_start is None or row_end < start or row_start > end:
+            if row_start is None:
                 continue
-            deleted = await self.db.delete_leave_block(row["id"], self.user_id)
-            if deleted is False:
-                raise RuntimeError("Leave could not be removed")
-            await self.settings_service.remove_from_list(self.user_id, "leave_blocks", row["id"])
-            removed.append(str(row["id"]))
-            pieces = []
-            if row_start < start:
-                pieces.append((row_start, start - timedelta(days=1)))
-            if row_end > end:
-                pieces.append((end + timedelta(days=1), row_end))
-            for piece_start, piece_end in pieces:
-                effects = dict(row.get("effects") or {})
-                remainder = leave_record(
-                    self.user_id,
-                    {
-                        "name": row.get("name"),
-                        "start_date": piece_start.isoformat(),
-                        "end_date": piece_end.isoformat(),
-                        "type": effects.get("type"),
-                        "notes": row.get("notes"),
-                    },
-                    str(uuid4()),
-                    proposal_id=getattr(self, "_proposal_id", None),
-                )
-                saved = await self.db.create_leave_block(remainder)
-                if not saved:
+            hits = [(start, end) for start, end in ranges if not (row_end < start or row_start > end)]
+            if not hits:
+                continue
+            pieces = _days_outside(row_start, row_end, hits)
+            created = []
+            try:
+                for piece_start, piece_end in pieces:
+                    effects = dict(row.get("effects") or {})
+                    remainder = leave_record(
+                        self.user_id,
+                        {
+                            "name": row.get("name"),
+                            "start_date": piece_start.isoformat(),
+                            "end_date": piece_end.isoformat(),
+                            "type": effects.get("type"),
+                            "notes": row.get("notes"),
+                        },
+                        str(uuid4()),
+                        proposal_id=getattr(self, "_proposal_id", None),
+                    )
+                    saved = await self.db.create_leave_block(remainder)
+                    if not saved:
+                        raise RuntimeError("Leave could not be removed")
+                    created.append(saved)
+                deleted = await self.db.delete_leave_block(row["id"], self.user_id)
+                if deleted is False:
                     raise RuntimeError("Leave could not be removed")
+            except Exception:
+                for saved in created:
+                    await self.db.delete_leave_block(saved.get("id"), self.user_id)
+                raise
+            await self.settings_service.remove_from_list(self.user_id, "leave_blocks", row["id"])
+            for saved in created:
                 await self.settings_service.add_to_list(self.user_id, "leave_blocks", saved)
-                kept.append(str(saved.get("id")))
-        if not removed:
-            label = describe_day(start) if start == end else f"{describe_day(start)} to {describe_day(end)}"
-            return {"no_change": True, "message": f"No change: there is no leave on {label}"}
-        return {"removed_ids": removed, "remainder_ids": kept}
+            removed_rows.append(row)
+            remainder_rows.extend(created)
+        if not removed_rows:
+            if payload.get("all"):
+                return {"no_change": True, "message": "No change: there is no upcoming leave to cancel"}
+            labels = [
+                describe_day(start) if start == end else f"{describe_day(start)} to {describe_day(end)}"
+                for start, end in ranges
+            ]
+            return {"no_change": True, "message": f"No change: there is no leave on {', '.join(labels)}"}
+        return {
+            "removed_ids": [str(row["id"]) for row in removed_rows],
+            "remainder_ids": [str(row.get("id")) for row in remainder_rows],
+            "removed_leave": removed_rows,
+            "remainder_leave": remainder_rows,
+        }
     
     async def _action_update_constraint(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Add or update a constraint"""
@@ -1297,48 +1326,40 @@ class CommandExecutor:
         """Undo remove_leave: put removed rows back and drop the remainders."""
         if not isinstance(command, dict) or command.get("action") != "remove_leave":
             return
-        before = _snapshot_ids(command.get("before_state"), "leave_blocks")
-        after = _snapshot_ids(command.get("after_state"), "leave_blocks")
-        for row_id in sorted(after - before):
-            await self.db.delete_leave_block(row_id, self.user_id)
-        present = {
-            str(row.get("id"))
-            for row in await self.db.read_leave_blocks(self.user_id) or []
-            if isinstance(row, dict)
-        }
-        for row_id in sorted(before - after):
-            if row_id in present:
-                continue
-            await self._insert_leave_from(command.get("before_state"), row_id)
+        removed, remainders = _logged_leave_change(command)
+        for row in remainders:
+            await self.db.delete_leave_block(str(row.get("id")), self.user_id)
+        present = await self._leave_ids()
+        for row in removed:
+            if str(row.get("id")) not in present:
+                await self._insert_leave_row(row)
 
     async def _repeat_leave_removal(self, command: dict) -> None:
         """Redo remove_leave: remove the rows again and restore the remainders."""
         if not isinstance(command, dict) or command.get("action") != "remove_leave":
             return
-        before = _snapshot_ids(command.get("before_state"), "leave_blocks")
-        after = _snapshot_ids(command.get("after_state"), "leave_blocks")
-        for row_id in sorted(before - after):
-            await self.db.delete_leave_block(row_id, self.user_id)
-        present = {
+        removed, remainders = _logged_leave_change(command)
+        for row in removed:
+            await self.db.delete_leave_block(str(row.get("id")), self.user_id)
+        present = await self._leave_ids()
+        for row in remainders:
+            if str(row.get("id")) not in present:
+                await self._insert_leave_row(row)
+
+    async def _leave_ids(self) -> set:
+        return {
             str(row.get("id"))
             for row in await self.db.read_leave_blocks(self.user_id) or []
             if isinstance(row, dict)
         }
-        for row_id in sorted(after - before):
-            if row_id in present:
-                continue
-            await self._insert_leave_from(command.get("after_state"), row_id)
 
-    async def _insert_leave_from(self, state, row_id: str) -> None:
-        source = _state_row(state, "leave_blocks", row_id)
-        if not isinstance(source, dict):
-            raise RuntimeError("Leave could not be restored")
+    async def _insert_leave_row(self, source: dict) -> None:
         data = {
             key: source.get(key)
             for key in _LEAVE_INSERT_FIELDS
             if key in source and source.get(key) is not None
         }
-        data["id"] = row_id
+        data["id"] = str(source.get("id"))
         data["user_id"] = self.user_id
         if not await self.db.create_leave_block(data):
             raise RuntimeError("Leave could not be restored")
@@ -2133,6 +2154,69 @@ def rotation_change_start(payload: dict, existing_cycle: Optional[dict], today: 
     if payload.get("pattern") or anchor_given:
         return today
     return None
+
+
+def _leave_ranges(payload: dict) -> List[Tuple[date, date]]:
+    """Date ranges a remove_leave payload names, each in order."""
+    payload = payload if isinstance(payload, dict) else {}
+    if _truthy(payload.get("all")):
+        today = date.today()
+        return [(today, date(today.year + 50, 12, 31))]
+    raw = payload.get("ranges")
+    items = raw if isinstance(raw, list) and raw else [payload]
+    ranges = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        start = _iso_day(item.get("start_date") or item.get("date"))
+        end = _iso_day(item.get("end_date")) or start
+        if start is None:
+            continue
+        if end < start:
+            start, end = end, start
+        ranges.append((start, end))
+    return ranges
+
+
+def _days_outside(start: date, end: date, ranges: List[Tuple[date, date]]) -> List[Tuple[date, date]]:
+    """Inclusive pieces of start..end not covered by any of the ranges."""
+    pieces = []
+    cursor = start
+    for cut_start, cut_end in sorted(ranges):
+        if cut_end < cursor:
+            continue
+        if cut_start > end:
+            break
+        if cut_start > cursor:
+            pieces.append((cursor, min(end, cut_start - timedelta(days=1))))
+        cursor = max(cursor, cut_end + timedelta(days=1))
+        if cursor > end:
+            break
+    if cursor <= end:
+        pieces.append((cursor, end))
+    return pieces
+
+
+def _logged_leave_change(command: dict) -> Tuple[list, list]:
+    """Removed rows and created remainders of a remove_leave command.
+
+    Newer logs carry the rows. Older logs fall back to the settings
+    snapshots, which miss rows that were never in the document.
+    """
+    payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+    removed = payload.get("_removed_leave")
+    if isinstance(removed, list):
+        remainders = payload.get("_remainder_leave") or []
+        return (
+            [row for row in removed if isinstance(row, dict) and row.get("id")],
+            [row for row in remainders if isinstance(row, dict) and row.get("id")],
+        )
+    before = _snapshot_ids(command.get("before_state"), "leave_blocks")
+    after = _snapshot_ids(command.get("after_state"), "leave_blocks")
+    return (
+        [_state_row(command.get("before_state"), "leave_blocks", row_id) or {"id": row_id} for row_id in sorted(before - after)],
+        [{"id": row_id} for row_id in sorted(after - before)],
+    )
 
 
 def describe_day(day: date) -> str:
