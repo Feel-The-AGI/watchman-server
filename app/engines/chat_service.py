@@ -175,6 +175,10 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
                 "correction": {
                     "type": "boolean",
                     "description": "True only when the saved rotation was set up wrong, a mistake, and every date including the past should follow the fixed rotation."
+                },
+                "whole_calendar": {
+                    "type": "boolean",
+                    "description": "With correction=true: the user says this was always their rotation, from the very start, so earlier rotation changes are wrong too and every date follows it."
                 }
             },
             "required": []

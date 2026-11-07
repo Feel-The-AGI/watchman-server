@@ -197,6 +197,11 @@ def change_from(existing: Optional[dict], new_rotation: dict, effective_from: da
     return {**new_rotation, "history": kept}
 
 
-def correction(existing: Optional[dict], new_rotation: dict) -> dict:
-    """Replace the current rotation from its own start. History is kept."""
-    return {**new_rotation, "history": history_of(existing)}
+def correction(existing: Optional[dict], new_rotation: dict, whole_calendar: bool = False) -> dict:
+    """Replace the current rotation from its own start.
+
+    History is kept, so fixing today's rotation never rewrites an earlier
+    one. ``whole_calendar`` drops the history too: the user says this was
+    always their rotation, so every date follows it.
+    """
+    return {**new_rotation, "history": [] if whole_calendar else history_of(existing)}

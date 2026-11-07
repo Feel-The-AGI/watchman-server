@@ -8,6 +8,8 @@ reply does not spend the whole client timeout on hidden reasoning.
 
 from typing import Any, Optional
 
+import re
+
 import anthropic
 from loguru import logger
 
@@ -42,6 +44,24 @@ def anthropic_tools(watchman_tools: list) -> list:
     ]
 
 
+# Before leave opened to every plan, Free accounts were told leave was Pro.
+# Those replies are still in chat history, and the model repeats them.
+_STALE_LEAVE_REPLY = re.compile(
+    r"[^.!?\n]*\bleave\b[^.!?\n]*\b(?:a )?pro(?:-only)? feature[^.!?\n]*[.!?]?"
+    r"|[^.!?\n]*\bupgrad\w* to pro\b[^.!?\n]*\b(?:leave|time off|vacation)\b[^.!?\n]*[.!?]?",
+    re.IGNORECASE,
+)
+STALE_LEAVE_NOTE = "(Earlier note withdrawn: leave is available on every plan, including Free.)"
+
+
+def without_stale_leave_refusal(text: str) -> str:
+    """Replace an old 'leave is a Pro feature' reply so the model does not copy it."""
+    if not text or not _STALE_LEAVE_REPLY.search(text):
+        return text
+    cleaned = _STALE_LEAVE_REPLY.sub("", text).strip()
+    return f"{cleaned}\n{STALE_LEAVE_NOTE}".strip() if cleaned else STALE_LEAVE_NOTE
+
+
 def history_to_messages(history: list, latest_content: str) -> list:
     """Build alternating user/assistant turns.
 
@@ -53,6 +73,8 @@ def history_to_messages(history: list, latest_content: str) -> list:
     for msg in prior:
         role = "user" if msg.get("role") == "user" else "assistant"
         text = (msg.get("content") or "").strip()
+        if role == "assistant":
+            text = without_stale_leave_refusal(text)
         if not text:
             continue
         if messages and messages[-1]["role"] == role:

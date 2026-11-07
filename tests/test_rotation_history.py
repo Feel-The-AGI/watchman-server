@@ -445,3 +445,99 @@ async def test_chat_stamps_effective_from_on_a_rotation_change(monkeypatch, tool
     command = created.await_args.args[0]
     want = "2026-11-07" if expected == "today" else expected
     assert command["payload"].get("effective_from") == want
+
+
+# ------------------------------------------- stale "leave is Pro" history
+
+
+@pytest.mark.parametrize("text", [
+    "Leave planning is a Pro feature. Upgrade to Pro to plan vacation and time off.",
+    "I can't book that. Leave booking is a Pro feature, so nothing has been added to your calendar. Upgrading to Pro would let me set it up for you.",
+    "I can't book that either. Leave booking is a Pro feature, so nothing has been added for 20 March 2027.",
+])
+def test_old_leave_refusals_are_withdrawn_from_model_history(text):
+    from app.engines.claude_chat import STALE_LEAVE_NOTE, history_to_messages
+
+    history = [
+        {"role": "user", "content": "Book leave"},
+        {"role": "assistant", "content": text},
+        {"role": "user", "content": "Book annual leave"},
+    ]
+    messages = history_to_messages(list(reversed(history)), "Book annual leave")
+    assistant = next(m for m in messages if m["role"] == "assistant")
+    assert "pro feature" not in assistant["content"].lower()
+    assert STALE_LEAVE_NOTE in assistant["content"]
+
+
+def test_unrelated_pro_replies_are_kept():
+    from app.engines.claude_chat import without_stale_leave_refusal
+
+    text = "Exports are a Pro feature. Your next off day is Wed 11 Nov."
+    assert without_stale_leave_refusal(text) == text
+
+
+def test_the_v2_prompt_says_leave_is_on_every_plan():
+    from app.prompts.registry import load_version
+
+    text = load_version("chat-v2").text
+    assert "Never say leave or leave booking is a Pro feature" in text
+
+
+# ------------------------------------------------ whole-calendar correction
+
+
+def test_whole_calendar_correction_drops_earlier_rotations():
+    changed = rh.change_from(
+        FOUR_FOUR,
+        {"pattern": TWO_TWO_THREE, "anchor_date": "2026-12-01", "anchor_cycle_day": 1},
+        d("2026-12-01"),
+    )
+    fixed = rh.correction(changed, {**FOUR_FOUR, "anchor_cycle_day": 2}, whole_calendar=True)
+    assert fixed["history"] == []
+    assert rh.rotation_on(fixed, d("2025-01-01"))["anchor_cycle_day"] == 2
+
+
+@pytest.mark.parametrize("payload", [
+    {"pattern": TWO_TWO_THREE, "whole_calendar": True},
+    {"pattern": TWO_TWO_THREE, "correction": True, "whole_calendar": True, "effective_from": "2026-12-01"},
+])
+def test_whole_calendar_is_never_a_dated_change(payload):
+    from app.engines.command_executor import explicit_change_start
+
+    assert rotation_change_start(payload, FOUR_FOUR, d("2026-11-07")) is None
+    assert explicit_change_start(payload, FOUR_FOUR) is None
+
+
+@pytest.mark.asyncio
+async def test_a_whole_calendar_correction_rewrites_dates_before_an_earlier_change():
+    store, executor = await _seeded()
+    await _run(executor, "update_cycle", {
+        "pattern": [{"label": "work_night", "duration": 2}, {"label": "off", "duration": 1}],
+        "effective_from": "2026-06-01",
+    })
+    await _run(executor, "update_cycle", {
+        "pattern": [{"label": "off", "duration": 2}, {"label": "work_day", "duration": 2}],
+        "anchor_date": "2026-01-05", "anchor_cycle_day": 1,
+        "correction": True, "whole_calendar": True,
+    })
+    days = _days(store)
+    assert [days[f"2026-01-0{n}"] for n in (5, 6, 7, 8)] == ["off", "off", "work_day", "work_day"]
+    assert _settings_cycle(store)["history"] == []
+    assert "work_night" not in set(days.values())
+
+
+@pytest.mark.asyncio
+async def test_a_plain_correction_keeps_an_earlier_change():
+    store, executor = await _seeded()
+    before = _days(store)
+    await _run(executor, "update_cycle", {
+        "pattern": [{"label": "work_night", "duration": 2}, {"label": "off", "duration": 1}],
+        "effective_from": "2026-06-01",
+    })
+    await _run(executor, "update_cycle", {
+        "pattern": [{"label": "work_night", "duration": 2}, {"label": "off", "duration": 1}],
+        "anchor_date": "2026-06-01", "anchor_cycle_day": 2, "correction": True,
+    })
+    after = _days(store)
+    assert all(after[day] == before[day] for day in before if day < "2026-06-01")
+    assert after["2026-06-01"] == "work_night" and after["2026-06-02"] == "off"

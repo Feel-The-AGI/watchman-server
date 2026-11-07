@@ -372,8 +372,10 @@ def _describe_cycle(payload: dict) -> str:
     starts = _as_date(payload.get("effective_from"))
     if starts is not None:
         text += f", from {_format_day(starts)}"
+    elif str(payload.get("whole_calendar") or "").strip().lower() in {"true", "1", "yes"}:
+        text += ", for every date"
     elif str(payload.get("correction") or "").strip().lower() in {"true", "1", "yes"}:
-        text += ", correcting the whole calendar"
+        text += ", correcting the current rotation"
     return text
 
 

@@ -10,6 +10,7 @@ A ROTATION CHANGE (the default) starts on a date and leaves earlier days alone:
 A CORRECTION replaces the rotation for every date, past included:
 - Only when the user says the saved rotation or anchor was wrong: "that was a mistake", "I set it up wrong", "it was always 5 on 5 off".
 - Send correction=true and no effective_from.
+- A correction fixes the current rotation and keeps earlier roster changes. When the user says it was ALWAYS this rotation, from the very start ("it's always been 5 on 5 off"), also send whole_calendar=true.
 
 ROTATION ANCHOR vs EMPLOYMENT START:
 - The anchor_date is when the user's STABLE ROTATION began, not their employment start date
