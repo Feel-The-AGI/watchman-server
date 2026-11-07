@@ -121,7 +121,7 @@ async def test_query_calendar_tool_is_the_whole_answer(monkeypatch):
         )),
     )
     result = await service.send_message("Look ahead for me", auto_execute=False)
-    assert result["response"] == "Yes. Fri 25 Dec is a day shift."
+    assert result["response"] == "Fri 25 Dec is a day shift."
     assert "Dec 20" not in result["response"]
     assert result["proposal"] is None
     service.command_executor.create_proposal.assert_not_called()

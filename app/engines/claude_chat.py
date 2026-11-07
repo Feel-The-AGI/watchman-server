@@ -46,9 +46,10 @@ def anthropic_tools(watchman_tools: list) -> list:
 
 # Before leave opened to every plan, Free accounts were told leave was Pro.
 # Those replies are still in chat history, and the model repeats them.
+_LEAVE_PLAN = r"(?:leave (?:planning|booking)|book(?:ing)? (?:annual |sick )?leave|plan(?:ning)? (?:your )?leave)"
 _STALE_LEAVE_REPLY = re.compile(
-    r"[^.!?\n]*\bleave\b[^.!?\n]*\b(?:a )?pro(?:-only)? feature[^.!?\n]*[.!?]?"
-    r"|[^.!?\n]*\bupgrad\w* to pro\b[^.!?\n]*\b(?:leave|time off|vacation)\b[^.!?\n]*[.!?]?",
+    rf"[^.!?\n]*\b{_LEAVE_PLAN}\b[^.!?\n]*\bpro\b[^.!?\n]*[.!?]?"
+    rf"|[^.!?\n]*\bupgrad\w* to pro\b[^.!?\n]*\b(?:{_LEAVE_PLAN}|plan (?:your )?(?:vacation|time off))\b[^.!?\n]*[.!?]?",
     re.IGNORECASE,
 )
 STALE_LEAVE_NOTE = "(Earlier note withdrawn: leave is available on every plan, including Free.)"

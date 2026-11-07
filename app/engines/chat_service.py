@@ -49,6 +49,9 @@ from app.engines.day_status import (
     answer_sentence,
     combine_events,
     date_from_query,
+    is_yes_no_question,
+    next_day_answer,
+    next_kind_question,
     project_day,
     schedule_question_date,
     status_from_stored,
@@ -186,7 +189,7 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
     },
     {
         "name": "remove_leave",
-        "description": "Cancel leave on a date or a range of dates. Leave outside the range stays booked. Use this when the user cancels, shortens, or no longer takes leave they booked.",
+        "description": "Cancel leave. Leave outside the dates stays booked. Use this when the user cancels, shortens, or no longer takes leave they booked. One date or range: start_date and end_date. Several separate dates: ranges. Every upcoming leave ('cancel all my leave'): all=true.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -197,9 +200,25 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
                 "end_date": {
                     "type": "string",
                     "description": "Last date to cancel, YYYY-MM-DD. Same as start_date for one day."
+                },
+                "ranges": {
+                    "type": "array",
+                    "description": "Several separate dates or ranges to cancel in one go, e.g. 13 Nov, 28-29 Nov and 4 Dec.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start_date": {"type": "string"},
+                            "end_date": {"type": "string"}
+                        },
+                        "required": ["start_date", "end_date"]
+                    }
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "True to cancel every leave block from today on."
                 }
             },
-            "required": ["start_date", "end_date"]
+            "required": []
         }
     },
     {
@@ -663,9 +682,24 @@ class ChatService:
         )
         master_settings = settings_for_prompt(document, projection)
         master_settings, pattern_pending = with_unsaved_pattern(master_settings, pattern)
+        kind = next_kind_question(content)
+        if kind is not None:
+            rows = await self._stored_days(today, today + timedelta(days=400))
+            if rows is not None:
+                answer = next_day_answer(kind, rows, today)
+                assistant_message = await self._save_message("assistant", answer)
+                return {
+                    "user_message": user_message,
+                    "assistant_message": assistant_message,
+                    "response": answer,
+                    "is_command": False,
+                    "command": None,
+                    "proposal": None,
+                }
+        yes_no = is_yes_no_question(content)
         asked = schedule_question_date(content, today)
         if asked is not None:
-            answer = await self._answer_about_day(asked, master_settings)
+            answer = await self._answer_about_day(asked, master_settings, yes_no=yes_no)
             assistant_message = await self._save_message("assistant", answer)
             return {
                 "user_message": user_message,
@@ -753,7 +787,7 @@ class ChatService:
             if day is None:
                 answer = "I need one date, like 2026-12-25, to say whether you are working."
             else:
-                answer = await self._answer_about_day(day, master_settings)
+                answer = await self._answer_about_day(day, master_settings, yes_no=is_yes_no_question(content))
             assistant_message = await self._save_message("assistant", answer)
             return {
                 "user_message": user_message,
@@ -897,12 +931,29 @@ class ChatService:
             return []
         return result.data or []
 
-    async def _answer_about_day(self, day, master_settings: dict) -> str:
+    async def _stored_days(self, start, end):
+        """Stored calendar rows in a range, or None when they cannot be read."""
+        getter = getattr(self.db, "get_calendar_days", None)
+        if getter is None:
+            return None
+        rows = []
+        try:
+            cursor = start
+            while cursor <= end:
+                chunk_end = min(end, date(cursor.year, 12, 31))
+                rows.extend(await getter(self.user_id, cursor.isoformat(), chunk_end.isoformat()) or [])
+                cursor = chunk_end + timedelta(days=1)
+        except Exception as exc:
+            logger.warning(f"[CHAT] Could not read days for {self.user_id}: {exc}")
+            return None
+        return rows
+
+    async def _answer_about_day(self, day, master_settings: dict, yes_no: bool = True) -> str:
         """One sentence. A manual override wins over the projected cycle."""
         stored = await self._stored_day(day)
         state = (stored or {}).get("state_json") or {}
         if isinstance(state, dict) and state.get("manual_override"):
-            return answer_sentence(status_from_stored(stored))
+            return answer_sentence(status_from_stored(stored), yes_no=yes_no)
         table_leaves, table_commitments = await self._table_events()
         leaves, commitments = combine_events(
             master_settings.get("leave_blocks"),
@@ -915,7 +966,7 @@ class ChatService:
             day,
             leaves,
             commitments,
-        ))
+        ), yes_no=yes_no)
 
     async def _stored_day(self, day):
         getter = getattr(self.db, "get_calendar_day", None)
