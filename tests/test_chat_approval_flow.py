@@ -107,14 +107,60 @@ def test_history_rejects_invalid_limits(flow, limit):
     assert flow.client.get(f"/api/chat/history?limit={limit}").status_code == 422
 
 
-def test_chat_proposes_by_default_and_refuses_auto_execution(flow):
-    assert flow.client.post("/api/chat/message", json={"content": "Add leave"}).status_code == 200
+def test_chat_applies_the_stored_command_once_and_refuses_client_auto_execute(flow):
+    original = deepcopy(flow.rows[0]["command"])
+    response = flow.client.post("/api/chat/message", json={"content": "Add leave"})
+    assert response.status_code == 200
     flow.service.send_message.assert_awaited_once_with(
         content="Add leave", auto_execute=False, effective_tier="pro",
     )
+    # Applied through the review path: the stored command, once, with its proposal id.
+    flow.executor.execute.assert_awaited_once_with(
+        original, source="api", message_id=None, proposal_id=flow.id,
+    )
+    body = response.json()
+    assert body["proposal"] is None
+    assert body["applied"]["status"] == "applied"
+    assert body["applied"]["proposal_id"] == flow.id
+    assert flow.rows[0]["status"] == "approved"
+    # A client still cannot ask the server to skip the stored proposal.
     assert flow.client.post("/api/chat/message", json={
         "content": "Add leave", "auto_execute": True,
     }).status_code == 422
+    assert flow.executor.execute.await_count == 1
+    # The applied proposal cannot be approved a second time.
+    assert review(flow).status_code == 409
+
+
+def test_chat_change_that_fails_is_closed_not_left_pending(flow):
+    flow.executor.execute.return_value = {"success": False, "error": "boom"}
+    response = flow.client.post("/api/chat/message", json={"content": "Add leave"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["proposal"] is None
+    assert body["applied"]["status"] == "failed"
+    assert body["applied"]["changed"] is False
+    assert body["response"] == chat.APPLY_FAILED_REPLY
+    assert flow.rows[0]["status"] == "expired"
+    assert flow.client.get("/api/commands/proposals/pending").json() == {"proposals": []}
+
+
+def test_chat_no_change_is_reported_without_done(flow):
+    flow.executor.execute.return_value = {
+        "success": True, "status": "no_change", "changed": False,
+        "message": "No change: Thu 15 Oct 2026 was already Off",
+    }
+    body = flow.client.post("/api/chat/message", json={"content": "Mark it off"}).json()
+    assert body["applied"]["status"] == "no_change"
+    assert body["response"] == "No change: Thu 15 Oct 2026 was already Off"
+    assert "Done" not in body["response"]
+
+
+def test_chat_turn_without_a_change_is_untouched(flow):
+    flow.service.send_message.return_value = {"is_command": False, "proposal": None, "response": "Hi"}
+    body = flow.client.post("/api/chat/message", json={"content": "Hello"}).json()
+    assert "applied" not in body
+    assert body["response"] == "Hi"
     flow.executor.execute.assert_not_awaited()
 
 

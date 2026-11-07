@@ -799,3 +799,83 @@ async def test_a_second_pending_proposal_stays_pending_after_the_first_is_applie
         chip.get("name") == "Dentist"
         for chip in _day(db, user_id, "2026-01-06")["commitments"]
     )
+
+
+@pytest.mark.integration
+async def test_a_rotation_change_from_a_date_keeps_every_earlier_day(db):
+    pattern = _pattern([("work_day", 4), ("off", 4)])
+    user_id, _cycle_id = _seed(db, pattern, "2026-01-05")
+    await _apply(db, user_id, "update_cycle", {
+        "pattern": pattern, "anchor_date": "2026-01-05", "anchor_cycle_day": 1,
+    })
+    before = {
+        row[0].isoformat(): row[1]
+        for row in db.execute(
+            "SELECT date, work_type::text FROM calendar_days WHERE user_id = %s AND date < '2026-06-01'",
+            (user_id,),
+        ).fetchall()
+    }
+    await _apply(db, user_id, "update_cycle", {
+        "pattern": _pattern([("work_night", 2), ("off", 2)]),
+        "effective_from": "2026-06-01",
+    })
+    after = {
+        row[0].isoformat(): row[1]
+        for row in db.execute(
+            "SELECT date, work_type::text FROM calendar_days WHERE user_id = %s AND date < '2026-06-01'",
+            (user_id,),
+        ).fetchall()
+    }
+    assert after == before
+    assert [_day(db, user_id, f"2026-06-0{n}")["work_type"] for n in (1, 2, 3, 4, 5)] == [
+        "work_night", "work_night", "off", "off", "work_night",
+    ]
+    # A later full rebuild (add_leave) still paints the past from the old rotation.
+    await _apply(db, user_id, "add_leave", {
+        "name": "Trip", "type": "annual", "start_date": "2026-02-10", "end_date": "2026-02-10",
+    })
+    assert _day(db, user_id, "2026-02-10")["is_leave"] is True
+    assert {
+        row[0].isoformat(): row[1]
+        for row in db.execute(
+            "SELECT date, work_type::text FROM calendar_days WHERE user_id = %s AND date < '2026-06-01'",
+            (user_id,),
+        ).fetchall()
+    } == before
+
+
+@pytest.mark.integration
+async def test_cancelling_one_day_of_leave_keeps_the_rest_and_undo_restores_it(db):
+    pattern = _pattern([("work_day", 5), ("off", 2)])
+    user_id, _cycle_id = _seed(db, pattern, "2026-01-05")
+    await _apply(db, user_id, "update_cycle", {
+        "pattern": pattern, "anchor_date": "2026-01-05", "anchor_cycle_day": 1,
+    })
+    await _apply(db, user_id, "add_leave", {
+        "name": "Holiday", "type": "annual", "start_date": "2026-03-09", "end_date": "2026-03-13",
+    })
+    db.execute(
+        "UPDATE command_log SET created_at = created_at - interval '1 hour' WHERE user_id = %s",
+        (user_id,),
+    )
+    await _apply(db, user_id, "remove_leave", {"start_date": "2026-03-11", "end_date": "2026-03-11"})
+    spans = sorted(
+        (row[0].isoformat(), row[1].isoformat())
+        for row in db.execute(
+            "SELECT start_date, end_date FROM leave_blocks WHERE user_id = %s", (user_id,),
+        ).fetchall()
+    )
+    assert spans == [("2026-03-09", "2026-03-10"), ("2026-03-12", "2026-03-13")]
+    assert _day(db, user_id, "2026-03-11")["is_leave"] is False
+    assert _day(db, user_id, "2026-03-10")["is_leave"] is True
+    assert _day(db, user_id, "2026-03-12")["is_leave"] is True
+
+    await _apply(db, user_id, "undo", {})
+    spans = sorted(
+        (row[0].isoformat(), row[1].isoformat())
+        for row in db.execute(
+            "SELECT start_date, end_date FROM leave_blocks WHERE user_id = %s", (user_id,),
+        ).fetchall()
+    )
+    assert spans == [("2026-03-09", "2026-03-13")]
+    assert _day(db, user_id, "2026-03-11")["is_leave"] is True

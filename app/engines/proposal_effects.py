@@ -342,7 +342,11 @@ def _describe_cycle(payload: dict) -> str:
     if count is not None:
         unit = "day" if abs(count) == 1 else "days"
         direction = "later" if count > 0 else "earlier"
-        return f"Move your rotation {abs(count)} {unit} {direction}"
+        text = f"Move your rotation {abs(count)} {unit} {direction}"
+        starts = _as_date(payload.get("effective_from"))
+        if starts is not None:
+            text += f", from {_format_day(starts)}"
+        return text
     pattern = _pattern_phrase(payload.get("pattern"))
     anchor = _as_date(payload.get("anchor_date"))
     cycle_day = payload.get("anchor_cycle_day")
@@ -364,7 +368,13 @@ def _describe_cycle(payload: dict) -> str:
         pieces.append(f"anchor day {cycle_day}")
     if not pieces:
         return "Update the rotation"
-    return "Set rotation to " + ", ".join(pieces)
+    text = "Set rotation to " + ", ".join(pieces)
+    starts = _as_date(payload.get("effective_from"))
+    if starts is not None:
+        text += f", from {_format_day(starts)}"
+    elif str(payload.get("correction") or "").strip().lower() in {"true", "1", "yes"}:
+        text += ", correcting the whole calendar"
+    return text
 
 
 def _describe_daily_log(payload: dict) -> str:

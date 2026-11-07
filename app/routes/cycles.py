@@ -11,6 +11,7 @@ from datetime import date
 from app.database import Database
 from app.middleware.auth import get_current_user
 from app.engines.calendar_engine import create_calendar_engine, generation_bounds
+from app.engines.rotation_history import earliest_anchor
 from app.engines.command_executor import create_command_executor
 from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_authority import (
@@ -69,6 +70,9 @@ async def rebuild_for_user(db, user_id: str) -> None:
         if not anchor_value:
             return
         anchor_date = anchor_value if not isinstance(anchor_value, str) else date.fromisoformat(str(anchor_value)[:10])
+        earliest = earliest_anchor(projection.get("cycle") or {})
+        if earliest is not None and earliest < anchor_date:
+            anchor_date = earliest
         start_date, end_date = generation_bounds(anchor_date)
         logger.info(f"Regenerating calendar from {start_date} to {end_date}")
         executor = create_command_executor(db, user_id)

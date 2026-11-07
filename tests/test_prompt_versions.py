@@ -91,9 +91,10 @@ def test_chat_v1_tools_match_main_and_chat_v2_carries_the_shift_wording():
     v2_update = next(item for item in v2_tools if item["name"] == "update_cycle")
     assert "each shift happens that many days later" in v2_update["description"]
     assert v2_update["parameters"]["properties"]["shift_by_days"]["description"] == (
-        "Move the rotation without editing history. A positive number means each shift "
-        "happens that many days later. A negative number means each shift happens that "
-        "many days earlier."
+        "Move the rotation by whole days. A positive number means each shift happens "
+        "that many days later. A negative number means each shift happens that many days "
+        "earlier. Alone it fixes the whole calendar. With effective_from it moves only the "
+        "days from that date on."
     )
 
 

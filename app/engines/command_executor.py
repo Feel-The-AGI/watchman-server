@@ -33,6 +33,7 @@ from app.engines.calendar_authority import (
     sync_cycle_row,
 )
 from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
+from app.engines import rotation_history
 from app.onboarding import finish_onboarding_for_saved_cycle
 from app.prompts.registry import insert_row
 from app.engines.proposal_effects import (
@@ -512,7 +513,18 @@ class CommandExecutor:
         }
         if cycle_id not in (None, ""):
             cycle_data["id"] = cycle_id
-        
+
+        effective_from = explicit_change_start(payload, existing_cycle)
+        anchor_sent = cycle_anchor(payload)[0] or payload.get("anchor_cycle_day") not in (None, "")
+        if effective_from is not None and payload.get("pattern") and not anchor_sent and not count:
+            # A new pattern from a date, with no anchor: that date is day 1.
+            cycle_data["anchor_date"] = effective_from.isoformat()
+            cycle_data["anchor_cycle_day"] = 1
+        if effective_from is not None:
+            cycle_data = rotation_history.change_from(existing_cycle, cycle_data, effective_from)
+        else:
+            cycle_data = rotation_history.correction(existing_cycle, cycle_data)
+
         await self.settings_service.update_section(self.user_id, "cycle", cycle_data)
         await sync_cycle_row(self.db, self.user_id, cycle_data)
         await finish_onboarding_for_saved_cycle(self.db, self.user_id)
@@ -524,7 +536,10 @@ class CommandExecutor:
             work["shift_start"] = payload.get("shift_start", work.get("shift_start", "06:00"))
             await self.settings_service.update_section(self.user_id, "work", work)
         
-        return {"cycle": cycle_data}
+        result = {"cycle": cycle_data}
+        if effective_from is not None:
+            result["effective_from"] = effective_from.isoformat()
+        return result
     
     async def _action_add_commitment(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Insert a commitment row and keep the settings document in step."""
@@ -649,16 +664,70 @@ class CommandExecutor:
         return None
     
     async def _action_remove_leave(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove a leave block"""
-        leave_id = payload.get("id")
-        if not leave_id:
-            raise ValueError("Leave ID required")
+        """Remove leave by id, or cancel every leave day inside a date range.
 
-        deleted = await self.db.delete_leave_block(leave_id, self.user_id)
-        if deleted is False:
-            raise RuntimeError("Leave could not be removed")
-        await self.settings_service.remove_from_list(self.user_id, "leave_blocks", leave_id)
-        return {"removed_id": leave_id}
+        A block entirely inside the range is deleted. A block that runs past
+        either end is deleted and the days outside the range are saved again as
+        new blocks with the same name and type, so cancelling one day of a week
+        keeps the rest of the week. Undo restores the removed rows and drops
+        the remainders by comparing the settings snapshots.
+        """
+        leave_id = payload.get("id")
+        if leave_id:
+            deleted = await self.db.delete_leave_block(leave_id, self.user_id)
+            if deleted is False:
+                raise RuntimeError("Leave could not be removed")
+            await self.settings_service.remove_from_list(self.user_id, "leave_blocks", leave_id)
+            return {"removed_id": leave_id}
+
+        start = _iso_day(payload.get("start_date") or payload.get("date"))
+        end = _iso_day(payload.get("end_date")) or start
+        if start is None:
+            raise ValueError("Leave ID or a date is required")
+        if end < start:
+            start, end = end, start
+        rows = await self.db.read_leave_blocks(self.user_id) or []
+        removed, kept = [], []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_start = _iso_day(row.get("start_date"))
+            row_end = _iso_day(row.get("end_date")) or row_start
+            if row_start is None or row_end < start or row_start > end:
+                continue
+            deleted = await self.db.delete_leave_block(row["id"], self.user_id)
+            if deleted is False:
+                raise RuntimeError("Leave could not be removed")
+            await self.settings_service.remove_from_list(self.user_id, "leave_blocks", row["id"])
+            removed.append(str(row["id"]))
+            pieces = []
+            if row_start < start:
+                pieces.append((row_start, start - timedelta(days=1)))
+            if row_end > end:
+                pieces.append((end + timedelta(days=1), row_end))
+            for piece_start, piece_end in pieces:
+                effects = dict(row.get("effects") or {})
+                remainder = leave_record(
+                    self.user_id,
+                    {
+                        "name": row.get("name"),
+                        "start_date": piece_start.isoformat(),
+                        "end_date": piece_end.isoformat(),
+                        "type": effects.get("type"),
+                        "notes": row.get("notes"),
+                    },
+                    str(uuid4()),
+                    proposal_id=getattr(self, "_proposal_id", None),
+                )
+                saved = await self.db.create_leave_block(remainder)
+                if not saved:
+                    raise RuntimeError("Leave could not be removed")
+                await self.settings_service.add_to_list(self.user_id, "leave_blocks", saved)
+                kept.append(str(saved.get("id")))
+        if not removed:
+            label = start.isoformat() if start == end else f"{start.isoformat()} to {end.isoformat()}"
+            return {"no_change": True, "message": f"No change: there is no leave on {label}"}
+        return {"removed_ids": removed, "remainder_ids": kept}
     
     async def _action_update_constraint(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Add or update a constraint"""
@@ -1126,6 +1195,7 @@ class CommandExecutor:
             raise UndoConflict("Only the latest applied change can be undone.")
         try:
             await self._remove_created_row(command)
+            await self._reverse_leave_removal(command)
             await self._revert_calendar_effect(command)
             before_state = command.get("before_state")
             if before_state:
@@ -1169,6 +1239,7 @@ class CommandExecutor:
         if not self._claim_status(command["id"], ("undone",), "redone"):
             raise UndoConflict("That change cannot be redone.")
         await self._restore_created_row(command)
+        await self._repeat_leave_removal(command)
 
         after_state = command.get("after_state")
         if after_state:
@@ -1219,6 +1290,56 @@ class CommandExecutor:
                 saved = await self.db.create_commitment(data)
             if not saved:
                 raise RuntimeError("Created row could not be restored")
+
+    async def _reverse_leave_removal(self, command: dict) -> None:
+        """Undo remove_leave: put removed rows back and drop the remainders."""
+        if not isinstance(command, dict) or command.get("action") != "remove_leave":
+            return
+        before = _snapshot_ids(command.get("before_state"), "leave_blocks")
+        after = _snapshot_ids(command.get("after_state"), "leave_blocks")
+        for row_id in sorted(after - before):
+            await self.db.delete_leave_block(row_id, self.user_id)
+        present = {
+            str(row.get("id"))
+            for row in await self.db.read_leave_blocks(self.user_id) or []
+            if isinstance(row, dict)
+        }
+        for row_id in sorted(before - after):
+            if row_id in present:
+                continue
+            await self._insert_leave_from(command.get("before_state"), row_id)
+
+    async def _repeat_leave_removal(self, command: dict) -> None:
+        """Redo remove_leave: remove the rows again and restore the remainders."""
+        if not isinstance(command, dict) or command.get("action") != "remove_leave":
+            return
+        before = _snapshot_ids(command.get("before_state"), "leave_blocks")
+        after = _snapshot_ids(command.get("after_state"), "leave_blocks")
+        for row_id in sorted(before - after):
+            await self.db.delete_leave_block(row_id, self.user_id)
+        present = {
+            str(row.get("id"))
+            for row in await self.db.read_leave_blocks(self.user_id) or []
+            if isinstance(row, dict)
+        }
+        for row_id in sorted(after - before):
+            if row_id in present:
+                continue
+            await self._insert_leave_from(command.get("after_state"), row_id)
+
+    async def _insert_leave_from(self, state, row_id: str) -> None:
+        source = _state_row(state, "leave_blocks", row_id)
+        if not isinstance(source, dict):
+            raise RuntimeError("Leave could not be restored")
+        data = {
+            key: source.get(key)
+            for key in _LEAVE_INSERT_FIELDS
+            if key in source and source.get(key) is not None
+        }
+        data["id"] = row_id
+        data["user_id"] = self.user_id
+        if not await self.db.create_leave_block(data):
+            raise RuntimeError("Leave could not be restored")
 
     async def _rebuild_created_span(self, command: dict) -> None:
         """Rewrite the days the inserted rows covered."""
@@ -1452,6 +1573,9 @@ class CommandExecutor:
         if not anchor_date_str:
             return False
         anchor_date = date.fromisoformat(str(anchor_date_str)[:10])
+        earliest = rotation_history.earliest_anchor(cycle)
+        if earliest is not None and earliest < anchor_date:
+            anchor_date = earliest
         start_date, end_date = generation_bounds(anchor_date)
         return await self.rebuild_calendar(start_date, end_date)
 
@@ -1528,9 +1652,20 @@ class CommandExecutor:
 
         # Generate calendar from anchor date onward. Failures propagate so the
         # approval is not reported as applied when the calendar write did not happen.
-        days = engine.generate_range(
-            start_date, end_date, cycle_for_engine, leave_blocks, constraints
-        )
+        # Each date uses the rotation that governed it, so a rotation change
+        # from a date leaves the days before it as they were.
+        days = []
+        pattern_for_day = {}
+        for piece_start, piece_end, rotation in rotation_history.split_range(
+            cycle, start_date, end_date
+        ):
+            piece_cycle = engine_rotation(rotation, cycle_for_engine)
+            piece_days = engine.generate_range(
+                piece_start, piece_end, piece_cycle, leave_blocks, constraints
+            )
+            for piece_day in piece_days:
+                pattern_for_day[piece_day.date.isoformat()] = piece_cycle["pattern"]
+            days.extend(piece_days)
 
         existing_days = await self._read_existing_days(start_date, end_date)
         existing_by_date = {}
@@ -1568,7 +1703,7 @@ class CommandExecutor:
                 if isinstance(chip, dict) and not chip.get("commitment_id")
             ]
             state = stamp_day_state(base_state, d.date, commitments, leave_blocks)
-            block_day = block_day_for(d.cycle_day, engine_pattern)
+            block_day = block_day_for(d.cycle_day, pattern_for_day.get(date_str) or engine_pattern)
             state["engine_version"] = CALENDAR_ENGINE_VERSION
             state["block_day"] = block_day
             state["shift_badge"] = shift_badge(str(work_type), block_day)
@@ -1965,6 +2100,66 @@ def _iso_day(value) -> Optional[date]:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def rotation_change_start(payload: dict, existing_cycle: Optional[dict], today: date) -> Optional[date]:
+    """First date a rotation change governs, or None for a correction.
+
+    - No saved rotation yet: the new one is the whole calendar.
+    - ``correction`` true: the saved rotation was wrong. Replace it.
+    - ``effective_from`` given: the change starts that day.
+    - A bare ``shift_by_days`` fixes an off-by-N calendar, so it is a correction.
+    - A new pattern or anchor with neither flag starts today. Earlier days
+      keep the rotation they were worked on.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    existing = rotation_history.flat_rotation(existing_cycle)
+    if not existing["pattern"] or not existing["anchor_date"]:
+        return None
+    if _truthy(payload.get("correction")):
+        return None
+    start = rotation_history.parse_day(payload.get("effective_from"))
+    if start is not None:
+        return start
+    anchor_given = cycle_anchor(payload)[0] or payload.get("anchor_cycle_day") not in (None, "")
+    if payload.get("pattern") or anchor_given:
+        return today
+    return None
+
+
+def explicit_change_start(payload: dict, existing_cycle: Optional[dict]) -> Optional[date]:
+    """The executor's rule: only a stated effective_from keeps earlier days.
+
+    Chat sets effective_from (see rotation_change_start) when the user changes
+    their roster from a date. Without it the command rewrites every date, as
+    it always has, so other callers and older saved proposals behave the same.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    existing = rotation_history.flat_rotation(existing_cycle)
+    if not existing["pattern"] or not existing["anchor_date"]:
+        return None
+    if _truthy(payload.get("correction")):
+        return None
+    return rotation_history.parse_day(payload.get("effective_from"))
+
+
+def engine_rotation(rotation: dict, fallback: dict) -> dict:
+    """One flat rotation in the calendar engine's shape."""
+    pattern = rotation.get("pattern") or fallback.get("pattern") or []
+    length = sum(block.get("duration", 0) for block in pattern) or fallback.get("cycle_length") or 1
+    return {
+        "id": fallback.get("id"),
+        "anchor_date": rotation.get("anchor_date") or fallback.get("anchor_date"),
+        "anchor_cycle_day": int(rotation.get("anchor_cycle_day") or 1),
+        "cycle_length": length,
+        "pattern": pattern,
+    }
 
 
 def create_command_executor(db: Database, user_id: str) -> CommandExecutor:

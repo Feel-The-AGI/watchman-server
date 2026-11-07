@@ -15,7 +15,7 @@ import anthropic
 from app.database import Database
 from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_authority import cycle_is_present, projection_for_user
-from app.engines.command_executor import CommandExecutor
+from app.engines.command_executor import CommandExecutor, rotation_change_start
 from app.planning_horizon import horizon_violation, payload_dates
 from app.engines.chat_context import (
     INTERNAL_PARSE_MAX_TOKENS,
@@ -167,9 +167,35 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
                 "shift_by_days": {
                     "type": "integer",
                     "description": "Alternative way to shift the rotation: positive = forward, negative = backward. Use this for 'off by one day' fixes."
+                },
+                "effective_from": {
+                    "type": "string",
+                    "description": "First date the new rotation applies, YYYY-MM-DD. Days before it keep the rotation they were worked on. Use it whenever the roster changes from a date: 'from Monday', 'starting next month', 'as of today'. Leave it out only for a correction."
+                },
+                "correction": {
+                    "type": "boolean",
+                    "description": "True only when the saved rotation was set up wrong, a mistake, and every date including the past should follow the fixed rotation."
                 }
             },
             "required": []
+        }
+    },
+    {
+        "name": "remove_leave",
+        "description": "Cancel leave on a date or a range of dates. Leave outside the range stays booked. Use this when the user cancels, shortens, or no longer takes leave they booked.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_date": {
+                    "type": "string",
+                    "description": "First date to cancel, YYYY-MM-DD"
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Last date to cancel, YYYY-MM-DD. Same as start_date for one day."
+                }
+            },
+            "required": ["start_date", "end_date"]
         }
     },
     {
@@ -778,6 +804,15 @@ class ChatService:
                 )
                 response_text = horizon_block["message"]
                 tool = None
+        if tool and tool.get("name") == "update_cycle":
+            # A rotation change starts on the user's local today unless the
+            # model named a date or a correction. Saved on the command so the
+            # card, the log, and undo all show the same start.
+            body = dict(tool.get("input") or {})
+            starts = rotation_change_start(body, master_settings.get("cycle"), today)
+            if starts is not None and not body.get("effective_from"):
+                body["effective_from"] = starts.isoformat()
+                tool = {**tool, "input": body}
         if tool and tool.get("name"):
             payload = tool.get("input") or {}
             command = card_command({

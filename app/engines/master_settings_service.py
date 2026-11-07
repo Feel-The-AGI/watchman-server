@@ -32,6 +32,20 @@ DEFAULT_MASTER_SETTINGS = {
 }
 
 
+def keep_rotation_history(stored: Any, incoming: Any) -> Any:
+    """Carry the stored rotation history onto a cycle written without one.
+
+    Only the agent's rotation change writes ``history``. Every other writer
+    (the cycles route, the Master Settings editor, the relational sync) sends
+    the current rotation alone, and must not drop the earlier rotations.
+    """
+    if not isinstance(incoming, dict) or "history" in incoming:
+        return incoming
+    if not isinstance(stored, dict) or not stored.get("history"):
+        return incoming
+    return {**incoming, "history": stored["history"]}
+
+
 class VersionConflictError(Exception):
     """expected_version does not match the stored settings document."""
 
@@ -162,8 +176,10 @@ class MasterSettingsService:
         """
         current = await self.get(user_id)
         settings = current["settings"].copy()
+        if section == "cycle":
+            value = keep_rotation_history(settings.get("cycle"), value)
         settings[section] = value
-        
+
         return await self.update(user_id, settings, current["version"])
     
     async def add_to_list(

@@ -94,7 +94,9 @@ def project_day(
             "on_leave": False,
             "commitment_names": [],
         }
-    prepared = engine_cycle(cycle)
+    from app.engines.rotation_history import rotation_on
+
+    prepared = engine_cycle(rotation_on(cycle, day))
     anchor = date.fromisoformat(str(prepared["anchor_date"])[:10])
     engine = CalendarEngine("day-status")
     cycle_day = engine.calculate_cycle_day(
