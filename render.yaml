@@ -36,6 +36,18 @@ services:
         sync: false
       - key: PAYSTACK_PUBLIC_KEY
         sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_MONTHLY
+        sync: false
+      - key: STRIPE_PRICE_YEARLY
+        sync: false
+      - key: STRIPE_PRICE_FOUNDING
+        sync: false
+      - key: CLIENT_BASE_URL
+        value: https://trywatchman.app
       - key: EXCHANGE_RATE_API_KEY
         sync: false
       - key: RESEND_API_KEY

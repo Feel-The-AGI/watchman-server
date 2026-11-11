@@ -34,7 +34,7 @@ Set these on the host. Names match `.env.example`.
 | `APP_ENV` | `production` |
 | `DEBUG` | `false` |
 
-There is no Stripe key. Do not set `STRIPE_*`.
+Stripe is off until `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` are set. Without them, `/api/billing/*` returns 503 and Paystack is unchanged. When the three USD prices exist, also set `STRIPE_PRICE_MONTHLY`, `STRIPE_PRICE_YEARLY`, and `STRIPE_PRICE_FOUNDING` to those Price ids. Apply `migrations/015_stripe_billing.sql` first. The webhook is `POST /api/billing/stripe-webhook`.
 
 `PAYSTACK_WEBHOOK_SECRET` is unused. Paystack signs the raw body with `PAYSTACK_SECRET_KEY` (HMAC SHA-512). The API rejects webhooks when that key or the signature is missing.
 
@@ -51,6 +51,7 @@ Stop after reviewing each statement. None of these statements were run against p
 - `010_pro_access_period.sql` adds `users.pro_expires_at` and `payments.access_until`. For each existing `tier = 'pro'` user who has a paid payment, it sets expiry to the later of (latest payment + 30 days) and (now + 7 days). Complimentary Pro with no payment is left with a null expiry and keeps access. Admin rows are not changed. Users whose paid period is already over get 7 days from the migration, then the API treats them as free on the next request. The unique index on `paystack_reference` fails the migration if duplicate references already exist; inspect those rows before retrying.
 - `011_master_settings_source.sql` copies an active cycle, active constraints, and leave blocks into Master Settings only when that section is empty. Apply it before launch so existing accounts already have one calendar document. The API also reads those tables when the document section is empty, so a short delay does not drop data. Running it twice does not replace a section that was already filled.
 - `012_proposal_expiry.sql` adds `proposals.expires_at` and an index when the column is missing. Migration 002 only creates that column for a new table, so databases created before it was in the `CREATE TABLE` statement reject proposal inserts with PGRST204. The statement is idempotent. It does not rewrite rows.
+- `015_stripe_billing.sql` adds `subscriptions.plan`, `subscriptions.stripe_status`, `stripe_events`, and `stripe_founding_seats`. It does not change Paystack columns or existing rows. The founding trigger keeps a deleted user's seat so the 100 cap does not reopen. Safe to run twice. Run it before setting the Stripe keys; until then the billing routes return 503.
 
 Take a database backup before 009, 010, and 011.
 

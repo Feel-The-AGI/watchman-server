@@ -132,6 +132,14 @@ async def get_shared_calendar(share_code: str):
         raise HTTPException(status_code=404, detail="Share not found or has been revoked")
 
     user_id = share["user_id"]
+    owner = await db.get_user_by_id(user_id)
+    # The share row stays. A lapsed Pro period stops the public calendar
+    # until the owner pays again. Admin and current Pro keep working.
+    if get_effective_tier(owner or {}) not in ("pro", "admin"):
+        return {
+            "success": False,
+            "message": "This shared calendar is no longer available",
+        }
 
     # Get user's name for display
     owner_name = await db.get_user_name_by_id(user_id)

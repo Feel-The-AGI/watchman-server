@@ -23,6 +23,9 @@ passlib[bcrypt]
 httpx
 aiohttp
 
+# Stripe. Paystack stays a separate client in app/routes/payments.py.
+stripe
+
 # Anthropic Claude
 anthropic
 
