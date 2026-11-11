@@ -267,7 +267,7 @@ async def require_pro_tier(
         logger.info(f"Pro feature blocked for user {user.get('id')} (tier: {user.get('tier')})")
         raise HTTPException(
             status_code=403,
-            detail="This feature is part of the Pro plan. Upgrade to unlock intelligent parsing and full statistics."
+            detail="This is a Pro feature. Upgrade to Pro to use it."
         )
     
     return user
@@ -383,7 +383,7 @@ async def require_pro_or_trial(
         logger.info(f"Pro feature blocked for user {user.get('id')} (tier: {user.get('tier')})")
         raise HTTPException(
             status_code=403,
-            detail="This feature is part of the Pro plan. Upgrade to unlock intelligent parsing and full statistics."
+            detail="This is a Pro feature. Upgrade to Pro to use it."
         )
 
     return user

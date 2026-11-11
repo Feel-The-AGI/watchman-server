@@ -1,16 +1,107 @@
 """Paid-access period calculations.
 
-Checkout still creates a one-off Paystack charge. A verified charge grants
-PRO_PERIOD_DAYS of Pro. Recurring Paystack plans are a separate product
-decision and are intentionally not created here.
+Checkout creates a one-off Paystack charge in GHS. The amount comes from
+PLANS, never from a client-supplied price or a live exchange rate. A
+verified charge grants that plan's days. Recurring Paystack plans are a
+separate product decision and are intentionally not created here.
 """
 
+import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
 
 PRO_PERIOD_DAYS = 30
+DEFAULT_PLAN_ID = "monthly"
+
+# Fixed cedis. display_usd is for the pricing page only and is never charged.
+# founding_yearly stays in the table but is not offered until the cap ships.
+_PLAN_ROWS = (
+    ("monthly", "70.00", "6", 30, True),
+    ("yearly", "560.00", "48", 365, True),
+    ("founding_yearly", "420.00", "36", 365, False),
+)
+
+
+class Plan:
+    def __init__(self, plan_id: str, amount_ghs: str, display_usd: str, days: int, offered: bool):
+        self.id = plan_id
+        self.amount_ghs = Decimal(amount_ghs)
+        self.display_usd = Decimal(display_usd)
+        self.days = days
+        self.offered = offered
+
+    def as_public(self) -> dict:
+        return {
+            "id": self.id,
+            "amount_ghs": float(self.amount_ghs),
+            "display_usd": float(self.display_usd),
+            "days": self.days,
+        }
+
+
+class UnknownPlan(Exception):
+    def __init__(self, plan_id: str):
+        self.plan_id = plan_id
+        super().__init__(plan_id)
+
+
+class PlanNotOffered(Exception):
+    def __init__(self, plan_id: str):
+        self.plan_id = plan_id
+        super().__init__(plan_id)
+
+
+PLANS = {
+    plan_id: Plan(plan_id, amount, display, days, offered)
+    for plan_id, amount, display, days, offered in _PLAN_ROWS
+}
+
+_PLAN_IN_TEXT = re.compile(r"plan=([a-z0-9_]+)")
+
+
+def checkout_plan(plan_id: Optional[str]) -> Plan:
+    """The plan a checkout may charge. Missing means the monthly default."""
+    key = (plan_id or DEFAULT_PLAN_ID).strip().lower() or DEFAULT_PLAN_ID
+    plan = PLANS.get(key)
+    if plan is None:
+        raise UnknownPlan(key)
+    if not plan.offered:
+        raise PlanNotOffered(key)
+    return plan
+
+
+def offered_plans() -> list:
+    return [plan for plan in PLANS.values() if plan.offered]
+
+
+def founding_available() -> bool:
+    return PLANS["founding_yearly"].offered
+
+
+def to_pesewas(amount) -> int:
+    """Paystack's integer minor units for a GHS amount."""
+    return int(
+        (Decimal(str(amount)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+
+
+def checkout_description(plan: Plan) -> str:
+    """Human text plus a plan id the grant can read if the plan column is absent."""
+    return f"plan={plan.id}; Watchman Pro {plan.id} for {plan.days} days"
+
+
+def period_days_for_payment(payment: dict) -> int:
+    """Days granted by a stored checkout. A legacy row with no plan stays at 30."""
+    plan_id = payment.get("plan") if isinstance(payment, dict) else None
+    if not plan_id:
+        match = _PLAN_IN_TEXT.search(str((payment or {}).get("description") or ""))
+        plan_id = match.group(1) if match else None
+    plan = PLANS.get(str(plan_id or ""))
+    if plan is not None:
+        return plan.days
+    return PRO_PERIOD_DAYS
 
 
 def as_utc(value: Optional[datetime] = None) -> datetime:

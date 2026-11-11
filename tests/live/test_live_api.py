@@ -6,8 +6,6 @@ import hmac
 import json
 import re
 import time
-from decimal import Decimal, ROUND_HALF_UP
-
 import pytest
 
 APP_ORIGIN = "https://www.trywatchman.app"
@@ -180,21 +178,20 @@ def test_cors_simple_request_does_not_reflect_an_evil_origin(live_client):
     assert allow != "*"
 
 
-def test_pricing_is_twelve_dollars_in_a_sane_ghs_amount(live_client):
+def test_pricing_is_fixed_ghs_with_display_usd(live_client):
     response = live_client.get("/api/payments/pricing")
     assert response.status_code == 200, response.text[:300]
     _assert_no_leak(response)
     body = response.json()
-    assert body["usd_price"] == 12
+    plans = {item["id"]: item for item in body["plans"]}
     assert body["currency"] == "GHS"
-    assert body.get("period_days") == 30
-    rate = body["exchange_rate"]
-    ghs = body["ghs_amount"]
-    assert isinstance(rate, (int, float)) and 5 <= float(rate) <= 40
-    assert isinstance(ghs, (int, float)) and float(ghs) > 0
-    expected = (Decimal("12") * Decimal(str(rate))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    assert Decimal(str(ghs)) == expected
-    print(f"PRICING usd=12 rate={rate} ghs={ghs}")
+    assert body["founding_available"] is False
+    assert "founding_yearly" not in plans
+    assert plans["monthly"] == {"id": "monthly", "amount_ghs": 70, "display_usd": 6, "days": 30}
+    assert plans["yearly"] == {"id": "yearly", "amount_ghs": 560, "display_usd": 48, "days": 365}
+    assert body["ghs_amount"] == 70
+    assert body["usd_price"] == 6
+    assert "exchange_rate" not in body
 
 
 def test_paystack_webhook_rejects_a_missing_signature(live_client):

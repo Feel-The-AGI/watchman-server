@@ -267,26 +267,26 @@ async def test_metadata_user_cannot_redirect_a_stored_checkout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_checkout_refuses_to_charge_without_a_live_rate(monkeypatch):
+async def test_checkout_does_not_need_a_live_exchange_rate(monkeypatch):
     monkeypatch.setattr(payments.settings, "paystack_secret_key", "sk_test_example")
 
-    async def unavailable():
-        raise payments.ExchangeRateUnavailable("rate down")
-
-    paystack = AsyncMock()
-    monkeypatch.setattr(payments, "get_usd_to_ghs_rate", unavailable)
-    monkeypatch.setattr(payments, "paystack_request", paystack)
-    with pytest.raises(HTTPException) as exc:
-        await payments.create_checkout_session({"id": "alice", "email": "alice@example.com"})
-    assert exc.value.status_code == 503
-    paystack.assert_not_awaited()
+    rate = AsyncMock(side_effect=payments.ExchangeRateUnavailable("rate down"))
+    monkeypatch.setattr(payments, "get_usd_to_ghs_rate", rate)
+    monkeypatch.setattr(payments, "paystack_request", AsyncMock(return_value={"data": {
+        "authorization_url": "https://paystack.test/pay",
+        "access_code": "ac",
+        "reference": "ref_1",
+    }}))
+    monkeypatch.setattr(payments, "Database", lambda **kwargs: MemoryDB())
+    result = await payments.create_checkout_session({"id": "alice", "email": "alice@example.com"})
+    assert result["amount_ghs"] == 70
+    assert result["plan"] == "monthly"
+    rate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_checkout_stores_server_price_before_returning_url(monkeypatch):
     monkeypatch.setattr(payments.settings, "paystack_secret_key", "sk_test_example")
-    monkeypatch.setattr(payments.settings, "pro_price_usd", 12.0)
-    monkeypatch.setattr(payments, "get_usd_to_ghs_rate", AsyncMock(return_value=15))
     monkeypatch.setattr(payments, "paystack_request", AsyncMock(return_value={"data": {
         "authorization_url": "https://paystack.test/pay",
         "access_code": "ac",
@@ -296,16 +296,19 @@ async def test_checkout_stores_server_price_before_returning_url(monkeypatch):
     monkeypatch.setattr(payments, "Database", lambda **kwargs: db)
     result = await payments.create_checkout_session({"id": "alice", "email": "alice@example.com"})
     assert result["checkout_url"] == "https://paystack.test/pay"
-    assert result["amount_ghs"] == 180
+    assert result["amount_ghs"] == 70
+    assert result["amount_usd"] == 6
     sent = payments.paystack_request.await_args.args[2]
-    assert sent["amount"] == 18000
+    assert sent["amount"] == 7000
     assert sent["currency"] == "GHS"
     assert "channels" not in sent
+    assert "plan" not in sent
     stored = db.payments["ref_1"]
     assert stored["status"] == "pending"
     assert stored["user_id"] == "alice"
-    assert stored["amount"] == 12
-    assert stored["amount_local"] == 180
+    assert stored["plan"] == "monthly"
+    assert stored["amount"] == 6
+    assert stored["amount_local"] == 70
 
 
 def test_payment_routes_do_not_keep_a_hardcoded_fx_fallback():

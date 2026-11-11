@@ -8,13 +8,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 
-from app.billing import monthly_recurring_revenue, paying_user_count
-from app.config import get_settings
+from app.billing import PLANS, monthly_recurring_revenue, paying_user_count
 from app.database import Database
 from app.middleware.auth import get_current_user
 
 router = APIRouter()
-settings = get_settings()
 
 
 def require_admin(user: dict = Depends(get_current_user)):
@@ -120,7 +118,7 @@ async def get_admin_overview(user: dict = Depends(require_admin)):
         # still counted; migration 010 sets an expiry on users who have paid.
         paying_users = paying_user_count(all_users, now)
         arppu = round(total_revenue_usd / paying_users, 2) if paying_users > 0 else 0
-        mrr = monthly_recurring_revenue(all_users, settings.pro_price_usd, now)
+        mrr = monthly_recurring_revenue(all_users, float(PLANS["monthly"].display_usd), now)
         
         # ARR (Annual Recurring Revenue)
         arr = mrr * 12

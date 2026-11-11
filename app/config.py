@@ -34,9 +34,8 @@ class Settings(BaseSettings):
     paystack_public_key: str = ""  # Set via PAYSTACK_PUBLIC_KEY env var
     paystack_webhook_secret: str = ""  # Legacy unused setting
     
-    # Exchange Rate API (for USD to GHS conversion)
+    # Legacy FX key. Checkout no longer prices from a live USD rate.
     exchange_rate_api_key: str = ""  # Set via EXCHANGE_RATE_API_KEY env var
-    pro_price_usd: float = 12.0  # Pro subscription price in USD
 
     # Email (Resend)
     resend_api_key: str = ""
