@@ -13,7 +13,7 @@ import time
 
 from app.config import get_settings
 from app.routes import auth, cycles, commitments, calendar, stats, settings as settings_routes
-from app.routes import chat, commands, master_settings, daily_logs, incidents, sharing, payments, cron, admin
+from app.routes import chat, commands, master_settings, daily_logs, incidents, sharing, payments, cron, admin, qa
 from app.database import init_supabase
 
 
@@ -124,6 +124,8 @@ def create_app() -> FastAPI:
     app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
     app.include_router(cron.router, prefix="/api/cron", tags=["Cron Jobs"])
     app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
+    # Hidden from the public schema. Answers 404 unless the QA variables are set.
+    app.include_router(qa.router, prefix="/api/qa", include_in_schema=False)
     logger.info("[ROUTES] All routes registered")
 
     @app.get("/", tags=["Health"])
