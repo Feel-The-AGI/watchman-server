@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # Shared secret for /api/cron/*. Required in every deployed environment.
     cron_secret: str = ""
 
+    # Temporary QA accounts (app/routes/qa.py). All three unset means off.
+    qa_bypass_secret: str = ""
+    qa_email_prefix: str = ""
+    qa_email_domain: str = ""
+
     # Trial. TRIAL_ENABLED false means no new trials: an account created
     # at or after the cutoff never starts one, and an earlier free account
     # keeps the rest of its 3 days. TRIAL_END_ALL is the only switch that
