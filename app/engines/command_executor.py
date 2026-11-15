@@ -513,6 +513,8 @@ class CommandExecutor:
             or any(int(block.get("duration") or 0) < 1 for block in normalized_pattern)
         ):
             raise ValueError("A rotation needs at least one block of one day or more.")
+        if sum(int(block.get("duration") or 0) for block in normalized_pattern) > MAX_CYCLE_DAYS:
+            raise ValueError(f"A rotation can repeat over at most {MAX_CYCLE_DAYS} days.")
 
         # Build normalized cycle data with flat anchor format.
         # A missing id stays missing. Inventing one would match no cycles row,
@@ -637,7 +639,7 @@ class CommandExecutor:
         """Remove a commitment"""
         commitment_id = payload.get("id")
         if not commitment_id:
-            raise ValueError("Commitment ID required")
+            commitment_id = await self._commitment_id_by_name(payload.get("name"))
 
         deleted = await self.db.delete_commitment(commitment_id, self.user_id)
         if deleted is False:
@@ -645,6 +647,58 @@ class CommandExecutor:
         await self.settings_service.remove_from_list(self.user_id, "commitments", commitment_id)
         return {"removed_id": commitment_id}
     
+    async def _commitment_id_by_name(self, name: Any) -> str:
+        """The id of the one commitment the user named. Leave is not a commitment here."""
+        wanted = " ".join(str(name or "").lower().split())
+        if not wanted:
+            raise ValueError("Tell me which commitment to remove.")
+        rows = [
+            row for row in await self.db.read_commitments(self.user_id) or []
+            if isinstance(row, dict) and row.get("type") != "leave"
+        ]
+        def label(row):
+            return " ".join(str(row.get("name") or "").lower().split())
+        exact = [row for row in rows if label(row) == wanted]
+        close = exact or [row for row in rows if wanted in label(row) or (label(row) and label(row) in wanted)]
+        if not close:
+            raise ValueError(f"There is no commitment called {str(name).strip()}.")
+        if len(close) > 1:
+            names = ", ".join(sorted({str(row.get("name")) for row in close}))
+            raise ValueError(f"More than one commitment matches: {names}. Tell me which one.")
+        return str(close[0]["id"])
+
+    async def _reverse_commitment_removal(self, command: dict) -> None:
+        """Undo remove_commitment: put the removed rows back."""
+        if not isinstance(command, dict) or command.get("action") != "remove_commitment":
+            return
+        before = _snapshot_ids(command.get("before_state"), "commitments")
+        after = _snapshot_ids(command.get("after_state"), "commitments")
+        present = {
+            str(row.get("id")) for row in await self.db.read_commitments(self.user_id) or []
+            if isinstance(row, dict)
+        }
+        for row_id in sorted(before - after):
+            if row_id in present:
+                continue
+            source = _state_row(command.get("before_state"), "commitments", row_id) or {}
+            data = {
+                key: source.get(key) for key in _COMMITMENT_INSERT_FIELDS
+                if source.get(key) is not None
+            }
+            data["id"] = row_id
+            data["user_id"] = self.user_id
+            if not await self.db.create_commitment(data):
+                raise RuntimeError("Removed commitment could not be restored")
+
+    async def _repeat_commitment_removal(self, command: dict) -> None:
+        """Redo remove_commitment: remove the rows again."""
+        if not isinstance(command, dict) or command.get("action") != "remove_commitment":
+            return
+        before = _snapshot_ids(command.get("before_state"), "commitments")
+        after = _snapshot_ids(command.get("after_state"), "commitments")
+        for row_id in sorted(before - after):
+            await self.db.delete_commitment(row_id, self.user_id)
+
     async def _action_add_leave(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Insert a leave_blocks row. Payload type stays in effects, not commitments.type."""
         record = leave_record(
@@ -973,7 +1027,26 @@ class CommandExecutor:
         if not note:
             raise ValueError("Note content is required")
 
-        # Create the daily log
+        # One log per day. A second note for the same day is added to it.
+        existing = self.db.client.table("daily_logs").select("*").eq(
+            "user_id", self.user_id
+        ).eq("date", date_str).limit(1).execute()
+        rows = existing.data if isinstance(getattr(existing, "data", None), list) else []
+        if rows:
+            current = rows[0]
+            earlier = str(current.get("note") or "").strip()
+            changes = {"note": f"{earlier}\n{note}" if earlier and note not in earlier else (earlier or note)}
+            if actual_hours is not None:
+                changes["actual_hours"] = actual_hours
+            if payload.get("overtime_hours") is not None:
+                changes["overtime_hours"] = overtime_hours
+            updated = self.db.client.table("daily_logs").update(changes).eq(
+                "id", current["id"]
+            ).eq("user_id", self.user_id).execute()
+            if updated.data:
+                return {"daily_log": updated.data[0], "appended": True}
+            raise Exception("Failed to update daily log")
+
         log_data = {
             "id": str(uuid4()),
             "user_id": self.user_id,
@@ -1227,6 +1300,7 @@ class CommandExecutor:
         try:
             await self._remove_created_row(command)
             await self._reverse_leave_removal(command)
+            await self._reverse_commitment_removal(command)
             await self._revert_calendar_effect(command)
             before_state = command.get("before_state")
             if before_state:
@@ -1237,7 +1311,10 @@ class CommandExecutor:
             self._claim_status(command["id"], ("undone",), previous)
             raise
         await self._rebuild_created_span(command)
-        return {"undone_command_id": command["id"]}
+        return {
+            "undone_command_id": command["id"],
+            "undone_explanation": command.get("explanation") or "",
+        }
 
     async def _action_redo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Redo the most recently undone command.
@@ -1271,6 +1348,7 @@ class CommandExecutor:
             raise UndoConflict("That change cannot be redone.")
         await self._restore_created_row(command)
         await self._repeat_leave_removal(command)
+        await self._repeat_commitment_removal(command)
 
         after_state = command.get("after_state")
         if after_state:
@@ -2123,6 +2201,9 @@ def _iso_day(value) -> Optional[date]:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+MAX_CYCLE_DAYS = 366
 
 
 def _truthy(value) -> bool:

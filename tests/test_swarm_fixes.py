@@ -230,3 +230,171 @@ async def test_a_failed_after_state_read_still_reports_the_saved_change():
 ])
 def test_stale_leave_regex_is_narrow(text, kept):
     assert (without_stale_leave_refusal(text) == text) is kept
+
+
+def test_remove_leave_card_names_every_range():
+    from app.engines.proposal_effects import describe_command
+
+    text = describe_command("remove_leave", {"ranges": [
+        {"start_date": "2026-11-23", "end_date": "2026-11-23"},
+        {"start_date": "2026-11-28", "end_date": "2026-11-29"},
+    ]})
+    assert text == "Remove leave on Mon 23 Nov and Sat 28 Nov to Sun 29 Nov"
+    assert describe_command("remove_leave", {"all": True}) == "Cancel all upcoming leave"
+
+
+def test_stats_count_a_leave_day_once():
+    from app.engines.stats_engine import create_stats_engine
+
+    days = [
+        {"date": "2026-11-01", "work_type": "work_day", "state_json": {}},
+        {"date": "2026-11-02", "work_type": "work_day", "state_json": {"is_leave": True}},
+        {"date": "2026-11-03", "work_type": "work_night", "state_json": {"is_leave": True}},
+        {"date": "2026-11-04", "work_type": "off", "state_json": {"is_leave": True}},
+        {"date": "2026-11-05", "work_type": "off", "state_json": None},
+    ]
+    engine = create_stats_engine("user-1")
+    year = engine.compute_yearly_stats(days, 2026)
+    assert (year["total_work_days"], year["total_work_nights"], year["total_off_days"], year["total_leave_days"]) == (1, 0, 1, 3)
+    assert year["total_work_days"] + year["total_work_nights"] + year["total_off_days"] + year["total_leave_days"] == year["total_days"]
+    month = engine.compute_monthly_stats(days, 2026, 11)
+    assert (month["work_days"], month["work_nights"], month["off_days"], month["leave_days"]) == (1, 0, 1, 3)
+
+
+def test_free_stats_stop_at_the_horizon():
+    from datetime import timedelta
+
+    from app.routes.stats import _within_plan
+
+    near = (date.today() + timedelta(days=10)).isoformat()
+    far = (date.today() + timedelta(days=200)).isoformat()
+    days = [{"date": near}, {"date": far}]
+    assert _within_plan({"id": "u", "tier": "free"}, days) == [{"date": near}]
+    assert _within_plan({"id": "u", "tier": "pro"}, days) == days
+
+
+@pytest.mark.asyncio
+async def test_a_rotation_longer_than_a_year_is_refused():
+    store, executor = await _seeded()
+    before = _days(store)
+    out = await executor.execute({
+        "action": "update_cycle",
+        "payload": {"pattern": [{"label": "work_day", "duration": 999}, {"label": "off", "duration": 1}], "correction": True},
+        "explanation": "x",
+    })
+    assert out["success"] is False
+    assert "366" in out["error"]
+    assert _days(store) == before
+
+
+def test_browser_timezone_is_validated():
+    from app.routes.chat import valid_timezone
+
+    assert valid_timezone("Africa/Accra") == "Africa/Accra"
+    assert valid_timezone(" America/Los_Angeles ") == "America/Los_Angeles"
+    for bad in (None, "", "Not/AZone", "x" * 100, 5, "../../etc/passwd"):
+        assert valid_timezone(bad) is None
+
+
+def test_leave_questions_get_a_leave_answer():
+    from app.engines.day_status import is_leave_question
+
+    on_leave = {"label": "Sat 28 Nov", "work_type": "off", "on_leave": True}
+    off = {"label": "Sat 5 Dec", "work_type": "off", "on_leave": False}
+    assert answer_sentence(on_leave, about_leave=True) == "Yes. Sat 28 Nov is a leave day."
+    assert answer_sentence(off, about_leave=True) == "No. Sat 5 Dec is not leave. It is off."
+    assert answer_sentence(on_leave) == "No. Sat 28 Nov is leave, so you are not working."
+    assert is_leave_question("Am I on leave on 28 November?")
+    assert not is_leave_question("Am I working on 28 November?")
+
+
+def test_a_rotation_change_past_the_free_horizon_is_a_planned_date():
+    from datetime import timedelta
+
+    from app.planning_horizon import horizon_violation, payload_dates
+
+    far = (date.today() + timedelta(days=200)).isoformat()
+    payload = {"pattern": [{"label": "work_day", "duration": 7}], "effective_from": far, "anchor_date": far}
+    assert horizon_violation("free", payload_dates(payload)) is not None
+    assert horizon_violation("pro", payload_dates(payload)) is None
+    assert horizon_violation("free", payload_dates({"anchor_date": far})) is None
+
+
+@pytest.mark.asyncio
+async def test_undo_reports_what_it_undid():
+    store, executor = await _seeded()
+    await executor.execute({"action": "add_leave", "payload": {"name": "Trip", "date": "2026-06-01"}, "explanation": "Add Trip on Mon 1 Jun"})
+    out = await executor.execute({"action": "undo", "payload": {}}, skip_validation=True)
+    assert out["result"]["undone_explanation"] == "Add Trip on Mon 1 Jun"
+
+
+class _Rows:
+    def __init__(self, rows):
+        self.rows = rows
+        self.deleted = []
+        self.created = []
+
+    async def read_commitments(self, user_id):
+        return list(self.rows)
+
+    async def delete_commitment(self, commitment_id, user_id):
+        self.deleted.append(commitment_id)
+        self.rows = [row for row in self.rows if row["id"] != commitment_id]
+        return True
+
+    async def create_commitment(self, data):
+        self.created.append(data)
+        self.rows.append(data)
+        return data
+
+
+def _bare_executor(rows):
+    from app.engines.command_executor import CommandExecutor
+
+    executor = CommandExecutor.__new__(CommandExecutor)
+    executor.user_id = "user-1"
+    executor.db = _Rows(rows)
+    return executor
+
+
+@pytest.mark.asyncio
+async def test_commitment_is_found_by_name():
+    executor = _bare_executor([
+        {"id": "a", "name": "Gym", "type": "personal"},
+        {"id": "b", "name": "French class", "type": "education"},
+        {"id": "c", "name": "Gym leave", "type": "leave"},
+    ])
+    assert await executor._commitment_id_by_name("gym") == "a"
+    assert await executor._commitment_id_by_name("the french class") == "b"
+    with pytest.raises(ValueError, match="no commitment called Yoga"):
+        await executor._commitment_id_by_name("Yoga")
+    with pytest.raises(ValueError, match="which commitment"):
+        await executor._commitment_id_by_name("")
+
+
+@pytest.mark.asyncio
+async def test_two_matching_commitments_ask_which():
+    executor = _bare_executor([
+        {"id": "a", "name": "Gym morning", "type": "personal"},
+        {"id": "b", "name": "Gym evening", "type": "personal"},
+    ])
+    with pytest.raises(ValueError, match="More than one"):
+        await executor._commitment_id_by_name("gym")
+
+
+@pytest.mark.asyncio
+async def test_undo_puts_a_removed_commitment_back():
+    row = {"id": "a", "name": "Gym", "type": "personal", "start_date": "2026-11-16"}
+    executor = _bare_executor([])
+    command = {
+        "action": "remove_commitment",
+        "before_state": {"commitments": [row]},
+        "after_state": {"commitments": []},
+    }
+    await executor._reverse_commitment_removal(command)
+    assert executor.db.created[0]["id"] == "a"
+    assert executor.db.created[0]["user_id"] == "user-1"
+    await executor._repeat_commitment_removal(command)
+    assert executor.db.deleted == ["a"]
+    await executor._reverse_commitment_removal({"action": "add_leave"})
+    assert len(executor.db.created) == 1

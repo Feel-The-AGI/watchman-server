@@ -13,11 +13,26 @@ import time
 import json
 
 from app.database import Database
-from app.middleware.auth import get_current_user, require_pro_tier
+from app.middleware.auth import get_current_user, get_effective_tier, require_pro_tier
+from app.planning_horizon import horizon_end, parse_day, unlimited
 from app.engines.stats_engine import create_stats_engine
 
 
+from typing import Annotated
+from fastapi import Path
+
 router = APIRouter()
+
+
+def _within_plan(user: dict, days: list) -> list:
+    """Free accounts get statistics only for the days their calendar shows."""
+    if unlimited(get_effective_tier(user)):
+        return list(days or [])
+    cap = horizon_end()
+    return [
+        day for day in (days or [])
+        if (parsed := parse_day(day.get("date"))) is None or parsed <= cap
+    ]
 
 
 @router.get("/dashboard")
@@ -55,7 +70,7 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
 
 @router.get("/year/{year}")
 async def get_yearly_stats(
-    year: int,
+    year: Annotated[int, Path(ge=2000, le=2100)],
     user: dict = Depends(get_current_user)
 ):
     """Get comprehensive statistics for a full year"""
@@ -67,6 +82,7 @@ async def get_yearly_stats(
         f"{year}-01-01",
         f"{year}-12-31"
     )
+    calendar_days = _within_plan(user, calendar_days)
     
     if not calendar_days:
         return {
@@ -76,7 +92,25 @@ async def get_yearly_stats(
         }
     
     stats = stats_engine.compute_yearly_stats(calendar_days, year)
-    
+
+    # The count and the list come from the same rows, so they always agree.
+    commitments = [
+        row for row in await db.get_commitments(user["id"]) or []
+        if isinstance(row, dict) and row.get("type") != "leave"
+        and (row.get("status") or "active") == "active"
+    ]
+    stats["commitment_count"] = len(commitments)
+    stats["commitment_breakdown"] = [
+        {
+            "id": item["commitment_id"],
+            "name": item["name"],
+            "type": item["type"],
+            "total_hours": item["total_hours"],
+            "sessions_count": item["scheduled_days"],
+        }
+        for item in stats_engine.compute_commitment_stats(commitments, calendar_days)
+    ]
+
     return {
         "success": True,
         "data": stats
@@ -85,8 +119,8 @@ async def get_yearly_stats(
 
 @router.get("/month/{year}/{month}")
 async def get_monthly_stats(
-    year: int,
-    month: int,
+    year: Annotated[int, Path(ge=2000, le=2100)],
+    month: Annotated[int, Path(ge=1, le=12)],
     user: dict = Depends(get_current_user)
 ):
     """Get statistics for a specific month"""
@@ -105,6 +139,7 @@ async def get_monthly_stats(
         end_date = last_day.isoformat()
     
     calendar_days = await db.get_calendar_days(user["id"], start_date, end_date)
+    calendar_days = _within_plan(user, calendar_days)
     
     if not calendar_days:
         return {
@@ -135,6 +170,7 @@ async def get_commitment_stats(user: dict = Depends(get_current_user)):
         f"{year}-01-01",
         f"{year}-12-31"
     )
+    calendar_days = _within_plan(user, calendar_days)
     
     stats = stats_engine.compute_commitment_stats(commitments, calendar_days)
     
@@ -173,7 +209,7 @@ async def get_load_distribution(
 
 @router.get("/export")
 async def export_stats(
-    year: int,
+    year: Annotated[int, Path(ge=2000, le=2100)],
     format: str = Query("csv"),
     user: dict = Depends(require_pro_tier)
 ):
@@ -592,18 +628,23 @@ async def get_quick_summary(user: dict = Depends(get_current_user)):
         f"{year}-01-01",
         f"{year}-12-31"
     )
+    calendar_days = _within_plan(user, calendar_days)
     
     commitments = await db.get_active_commitments(user["id"])
     pending_mutations = await db.get_pending_mutations(user["id"])
     
     # Calculate quick stats
-    work_days = sum(1 for d in calendar_days if d.get("work_type") == "work_day")
-    work_nights = sum(1 for d in calendar_days if d.get("work_type") == "work_night")
-    off_days = sum(1 for d in calendar_days if d.get("work_type") == "off")
-    leave_days = sum(1 for d in calendar_days if d.get("state_json", {}).get("is_leave"))
+    def on_leave(d):
+        return bool((d.get("state_json") or {}).get("is_leave"))
+
+    # A day on leave is counted once, as leave.
+    work_days = sum(1 for d in calendar_days if d.get("work_type") == "work_day" and not on_leave(d))
+    work_nights = sum(1 for d in calendar_days if d.get("work_type") == "work_night" and not on_leave(d))
+    off_days = sum(1 for d in calendar_days if d.get("work_type") == "off" and not on_leave(d))
+    leave_days = sum(1 for d in calendar_days if on_leave(d))
     
     total_study_hours = sum(
-        sum(c.get("hours", 0) for c in d.get("state_json", {}).get("commitments", [])
+        sum(c.get("hours", 0) for c in (d.get("state_json") or {}).get("commitments", [])
             if c.get("type") in ["study", "education"])
         for d in calendar_days
     )

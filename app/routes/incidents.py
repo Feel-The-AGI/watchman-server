@@ -17,30 +17,32 @@ from app.database import Database
 from app.middleware.auth import get_current_user, require_pro_tier
 from app.services.email_service import get_email_service
 
+from app.validation import DayString, LongText, OptionalLongText, OptionalShortText, ShortText
+
 router = APIRouter()
 
 
 class IncidentCreateRequest(BaseModel):
     """Request to create an incident"""
-    date: str
+    date: DayString
     type: str  # overtime, safety, equipment, harassment, injury, policy_violation, other
     severity: str = "medium"  # low, medium, high, critical
-    title: str
-    description: str
-    reported_to: Optional[str] = None
-    witnesses: Optional[str] = None
-    outcome: Optional[str] = None
+    title: ShortText
+    description: LongText
+    reported_to: OptionalShortText = None
+    witnesses: OptionalLongText = None
+    outcome: OptionalLongText = None
 
 
 class IncidentUpdateRequest(BaseModel):
     """Request to update an incident"""
     type: Optional[str] = None
     severity: Optional[str] = None
-    title: Optional[str] = None
-    description: Optional[str] = None
-    reported_to: Optional[str] = None
-    witnesses: Optional[str] = None
-    outcome: Optional[str] = None
+    title: OptionalShortText = None
+    description: OptionalLongText = None
+    reported_to: OptionalShortText = None
+    witnesses: OptionalLongText = None
+    outcome: OptionalLongText = None
 
 
 VALID_TYPES = [

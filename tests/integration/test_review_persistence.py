@@ -217,4 +217,5 @@ def test_dentist_commitment_and_leave_rows_match_the_live_schema(db):
         "SELECT type::text FROM commitments WHERE user_id = %s ORDER BY name",
         (user_id,),
     ).fetchall()
-    assert [row[0] for row in kinds] == ["personal", "other"]
+    # 'other' is stored as 'personal' so it also saves on a database without that label.
+    assert [row[0] for row in kinds] == ["personal", "personal"]

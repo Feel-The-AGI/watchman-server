@@ -15,6 +15,16 @@ _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
 _GENERIC_LEAVE_NAMES = {"", "leave", "other"}
 
 
+def stored_commitment_type(kind: str) -> str:
+    """The label to store. 'other' is saved as 'personal'.
+
+    The 'other' label was added to the enum by a later migration that not
+    every database has, and an insert with it fails there. Nothing in the
+    app treats the two differently.
+    """
+    return "personal" if kind == "other" else kind
+
+
 def commitment_record(
     user_id: str,
     payload: Optional[dict],
@@ -26,6 +36,7 @@ def commitment_record(
     kind = str(payload.get("type") or "personal").strip().lower()
     if kind not in COMMITMENT_TYPES:
         raise ValueError(f"Commitment type {kind!r} is not supported")
+    kind = stored_commitment_type(kind)
     start, end = _written_span(payload)
     days = _weekdays(payload.get("days_of_week"))
     time_start = _clock_value(payload.get("time_start"))
@@ -263,6 +274,15 @@ def _describe_add_leave(payload: dict) -> str:
 
 
 def _describe_remove_leave(payload: dict) -> str:
+    if str(payload.get("all") or "").strip().lower() in {"true", "1", "yes"}:
+        return "Cancel all upcoming leave"
+    ranges = payload.get("ranges")
+    if isinstance(ranges, list) and ranges:
+        parts = [_when_phrase(item) for item in ranges if isinstance(item, dict)]
+        parts = [part for part in parts if part]
+        if parts:
+            listed = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+            return f"Remove leave on {listed}"
     return _describe_removal("leave", payload)
 
 
