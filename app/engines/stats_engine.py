@@ -62,7 +62,7 @@ class StatsEngine:
         for day in year_days:
             date_str = day.get("date", "")
             work_type = day.get("work_type", "off")
-            state = day.get("state_json", {})
+            state = day.get("state_json") or {}
             
             # Get month key (e.g., "2026-01")
             month_key = date_str[:7] if isinstance(date_str, str) else date_str.strftime("%Y-%m")
@@ -70,8 +70,12 @@ class StatsEngine:
             # Get week key
             week_key = self._get_week_key(date_str)
             
-            # Count work types
-            if work_type == "work_day":
+            # Each day is counted once. A day on leave is leave, not a shift
+            # or an off day, so the four totals add up to the days counted.
+            if (state or {}).get("is_leave", False):
+                total_leave_days += 1
+                monthly_stats[month_key]["leave_days"] += 1
+            elif work_type == "work_day":
                 total_work_days += 1
                 monthly_stats[month_key]["work_days"] += 1
             elif work_type == "work_night":
@@ -80,11 +84,6 @@ class StatsEngine:
             elif work_type == "off":
                 total_off_days += 1
                 monthly_stats[month_key]["off_days"] += 1
-            
-            # Count leave days
-            if state.get("is_leave", False):
-                total_leave_days += 1
-                monthly_stats[month_key]["leave_days"] += 1
             
             # Sum study hours
             commitments = state.get("commitments", [])
@@ -157,25 +156,29 @@ class StatsEngine:
             if self._get_month_prefix(d.get("date")) == month_prefix
         ]
         
-        work_days = sum(1 for d in month_days if d.get("work_type") == "work_day")
-        work_nights = sum(1 for d in month_days if d.get("work_type") == "work_night")
-        off_days = sum(1 for d in month_days if d.get("work_type") == "off")
-        leave_days = sum(1 for d in month_days if d.get("state_json", {}).get("is_leave"))
+        def on_leave(d):
+            return bool((d.get("state_json") or {}).get("is_leave"))
+
+        # A day on leave is counted once, as leave.
+        work_days = sum(1 for d in month_days if d.get("work_type") == "work_day" and not on_leave(d))
+        work_nights = sum(1 for d in month_days if d.get("work_type") == "work_night" and not on_leave(d))
+        off_days = sum(1 for d in month_days if d.get("work_type") == "off" and not on_leave(d))
+        leave_days = sum(1 for d in month_days if on_leave(d))
         
         study_hours = sum(
-            sum(c.get("hours", 0) for c in d.get("state_json", {}).get("commitments", [])
+            sum(c.get("hours", 0) for c in (d.get("state_json") or {}).get("commitments", [])
                 if c.get("type") in ["study", "education"])
             for d in month_days
         )
         
         total_commitments = sum(
-            len(d.get("state_json", {}).get("commitments", []))
+            len((d.get("state_json") or {}).get("commitments", []))
             for d in month_days
         )
         
         overload_days = sum(
             1 for d in month_days
-            if d.get("state_json", {}).get("is_overloaded")
+            if (d.get("state_json") or {}).get("is_overloaded")
         )
         
         return {
@@ -242,7 +245,7 @@ class StatsEngine:
         
         # Calculate this week's study hours
         this_week_hours = sum(
-            sum(c.get("hours", 0) for c in d.get("state_json", {}).get("commitments", [])
+            sum(c.get("hours", 0) for c in (d.get("state_json") or {}).get("commitments", [])
                 if c.get("type") in ["study", "education"])
             for d in upcoming_days
         )
@@ -298,7 +301,7 @@ class StatsEngine:
             total_hours = 0.0
             
             for day in calendar_days:
-                state = day.get("state_json", {})
+                state = day.get("state_json") or {}
                 for c in state.get("commitments", []):
                     if c.get("commitment_id") == commitment_id:
                         scheduled_days += 1
@@ -338,7 +341,7 @@ class StatsEngine:
         
         for day in calendar_days:
             work_type = day.get("work_type", "off")
-            state = day.get("state_json", {})
+            state = day.get("state_json") or {}
             used_hours = state.get("used_hours", 0)
             
             if work_type == "off":
@@ -407,7 +410,7 @@ class StatsEngine:
         
         for day in sorted_days:
             work_type = day.get("work_type", "off")
-            state = day.get("state_json", {})
+            state = day.get("state_json") or {}
             commitments = state.get("commitments", [])
             
             has_study = any(

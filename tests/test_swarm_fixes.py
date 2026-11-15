@@ -230,3 +230,44 @@ async def test_a_failed_after_state_read_still_reports_the_saved_change():
 ])
 def test_stale_leave_regex_is_narrow(text, kept):
     assert (without_stale_leave_refusal(text) == text) is kept
+
+
+def test_remove_leave_card_names_every_range():
+    from app.engines.proposal_effects import describe_command
+
+    text = describe_command("remove_leave", {"ranges": [
+        {"start_date": "2026-11-23", "end_date": "2026-11-23"},
+        {"start_date": "2026-11-28", "end_date": "2026-11-29"},
+    ]})
+    assert text == "Remove leave on Mon 23 Nov and Sat 28 Nov to Sun 29 Nov"
+    assert describe_command("remove_leave", {"all": True}) == "Cancel all upcoming leave"
+
+
+def test_stats_count_a_leave_day_once():
+    from app.engines.stats_engine import create_stats_engine
+
+    days = [
+        {"date": "2026-11-01", "work_type": "work_day", "state_json": {}},
+        {"date": "2026-11-02", "work_type": "work_day", "state_json": {"is_leave": True}},
+        {"date": "2026-11-03", "work_type": "work_night", "state_json": {"is_leave": True}},
+        {"date": "2026-11-04", "work_type": "off", "state_json": {"is_leave": True}},
+        {"date": "2026-11-05", "work_type": "off", "state_json": None},
+    ]
+    engine = create_stats_engine("user-1")
+    year = engine.compute_yearly_stats(days, 2026)
+    assert (year["total_work_days"], year["total_work_nights"], year["total_off_days"], year["total_leave_days"]) == (1, 0, 1, 3)
+    assert year["total_work_days"] + year["total_work_nights"] + year["total_off_days"] + year["total_leave_days"] == year["total_days"]
+    month = engine.compute_monthly_stats(days, 2026, 11)
+    assert (month["work_days"], month["work_nights"], month["off_days"], month["leave_days"]) == (1, 0, 1, 3)
+
+
+def test_free_stats_stop_at_the_horizon():
+    from datetime import timedelta
+
+    from app.routes.stats import _within_plan
+
+    near = (date.today() + timedelta(days=10)).isoformat()
+    far = (date.today() + timedelta(days=200)).isoformat()
+    days = [{"date": near}, {"date": far}]
+    assert _within_plan({"id": "u", "tier": "free"}, days) == [{"date": near}]
+    assert _within_plan({"id": "u", "tier": "pro"}, days) == days

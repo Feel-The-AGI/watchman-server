@@ -263,6 +263,15 @@ def _describe_add_leave(payload: dict) -> str:
 
 
 def _describe_remove_leave(payload: dict) -> str:
+    if str(payload.get("all") or "").strip().lower() in {"true", "1", "yes"}:
+        return "Cancel all upcoming leave"
+    ranges = payload.get("ranges")
+    if isinstance(ranges, list) and ranges:
+        parts = [_when_phrase(item) for item in ranges if isinstance(item, dict)]
+        parts = [part for part in parts if part]
+        if parts:
+            listed = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+            return f"Remove leave on {listed}"
     return _describe_removal("leave", payload)
 
 
