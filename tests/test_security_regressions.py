@@ -2,7 +2,7 @@
 
 Copy to tests/test_security_regressions.py, then run pytest -q.
 These are independent route/unit tests with mocked persistence; they do not
-validate production Paystack configuration or a complete checkout journey.
+validate production Stripe configuration or a complete checkout journey.
 """
 import hashlib
 import hmac
@@ -137,7 +137,7 @@ async def test_delete_foreign_leave_is_rejected(monkeypatch):
 def make_request(payload: bytes, signature: str | None) -> Request:
     headers = [(b"content-type", b"application/json")]
     if signature is not None:
-        headers.append((b"x-paystack-signature", signature.encode("latin-1")))
+        headers.append((b"stripe-signature", signature.encode("latin-1")))
     sent = False
 
     async def receive():
@@ -152,36 +152,36 @@ def make_request(payload: bytes, signature: str | None) -> Request:
 
 @pytest.mark.asyncio
 async def test_webhook_rejects_missing_signature(monkeypatch):
-    monkeypatch.setattr(payments.settings, "paystack_secret_key", "sk_test_example")
+    monkeypatch.setattr(payments.settings, "stripe_webhook_secret", "whsec_example")
     with pytest.raises(HTTPException) as exc:
-        await payments.paystack_webhook(make_request(b'{"event":"unknown"}', None))
-    assert exc.value.status_code == 401
+        await payments.stripe_webhook(make_request(b'{"type":"unknown"}', None))
+    assert exc.value.status_code == 400
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("signature", ["0" * 128, "invalid", "é"])
+@pytest.mark.parametrize("signature", ["t=1,v1=" + "0" * 64, "invalid", "é", "v1=abc"])
 async def test_webhook_rejects_bad_signature(monkeypatch, signature):
-    monkeypatch.setattr(payments.settings, "paystack_secret_key", "sk_test_example")
+    monkeypatch.setattr(payments.settings, "stripe_webhook_secret", "whsec_example")
     with pytest.raises(HTTPException) as exc:
-        await payments.paystack_webhook(make_request(b'{"event":"unknown"}', signature))
-    assert exc.value.status_code == 401
+        await payments.stripe_webhook(make_request(b'{"type":"unknown"}', signature))
+    assert exc.value.status_code == 400
 
 
 @pytest.mark.asyncio
-async def test_webhook_rejects_missing_server_key(monkeypatch):
-    monkeypatch.setattr(payments.settings, "paystack_secret_key", "")
+async def test_webhook_rejects_missing_server_secret(monkeypatch):
+    monkeypatch.setattr(payments.settings, "stripe_webhook_secret", "")
     with pytest.raises(HTTPException) as exc:
-        await payments.paystack_webhook(make_request(b'{"event":"unknown"}', "0" * 128))
+        await payments.stripe_webhook(make_request(b'{"type":"unknown"}', "t=1,v1=00"))
     assert exc.value.status_code == 503
 
 
 @pytest.mark.asyncio
 async def test_webhook_accepts_correct_signed_unknown_event(monkeypatch):
-    secret = "sk_test_example"
-    payload = b'{"event":"unknown","data":{}}'
-    signature = hmac.new(secret.encode(), payload, hashlib.sha512).hexdigest()
-    monkeypatch.setattr(payments.settings, "paystack_secret_key", secret)
+    from app.stripe_client import sign_payload
+
+    secret = "whsec_example"
+    payload = b'{"type":"unknown","data":{"object":{}}}'
+    monkeypatch.setattr(payments.settings, "stripe_webhook_secret", secret)
     monkeypatch.setattr(payments, "Database", lambda **kwargs: MagicMock())
-    monkeypatch.setattr(payments, "get_email_service", lambda: MagicMock())
-    response = await payments.paystack_webhook(make_request(payload, signature))
-    assert response == {"status": "success"}
+    response = await payments.stripe_webhook(make_request(payload, sign_payload(payload, secret)))
+    assert response == {"status": "ignored"}

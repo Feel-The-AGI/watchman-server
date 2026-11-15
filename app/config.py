@@ -29,14 +29,17 @@ class Settings(BaseSettings):
     anthropic_chat_max_tokens: int = 2048
     anthropic_timeout_seconds: float = 30
 
-    # Paystack. Webhook signatures use paystack_secret_key.
-    paystack_secret_key: str = ""  # Set via PAYSTACK_SECRET_KEY env var
-    paystack_public_key: str = ""  # Set via PAYSTACK_PUBLIC_KEY env var
-    paystack_webhook_secret: str = ""  # Legacy unused setting
-    
-    # Exchange Rate API (for USD to GHS conversion)
-    exchange_rate_api_key: str = ""  # Set via EXCHANGE_RATE_API_KEY env var
-    pro_price_usd: float = 12.0  # Pro subscription price in USD
+    # Stripe. STRIPE_SECRET_KEY is the account's secret (sk_live_ or sk_test_)
+    # key; STRIPE_WEBHOOK_SECRET is the signing secret (whsec_) of the
+    # webhook endpoint pointed at /api/payments/webhook.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    # Prices in USD. Products and prices are created in Stripe on first use.
+    pro_price_usd: float = 12.0
+    pro_annual_price_usd: float = 96.0
+
+    # Public site, used for checkout return links.
+    app_url: str = "https://www.trywatchman.app"
 
     # Email (Resend)
     resend_api_key: str = ""

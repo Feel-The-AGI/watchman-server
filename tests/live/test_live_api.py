@@ -6,7 +6,6 @@ import hmac
 import json
 import re
 import time
-from decimal import Decimal, ROUND_HALF_UP
 
 import pytest
 
@@ -30,7 +29,8 @@ LEAK_MARKERS = (
     "sk_test",
     "service_role",
     "supabase_service",
-    "paystack_secret",
+    "whsec_",
+    "stripe_secret",
     "anthropic_api_key",
     'file "',
 )
@@ -180,43 +180,34 @@ def test_cors_simple_request_does_not_reflect_an_evil_origin(live_client):
     assert allow != "*"
 
 
-def test_pricing_is_twelve_dollars_in_a_sane_ghs_amount(live_client):
+def test_pricing_lists_monthly_and_annual_in_usd(live_client):
     response = live_client.get("/api/payments/pricing")
     assert response.status_code == 200, response.text[:300]
     _assert_no_leak(response)
     body = response.json()
-    assert body["usd_price"] == 12
-    assert body["currency"] == "GHS"
-    assert body.get("period_days") == 30
-    rate = body["exchange_rate"]
-    ghs = body["ghs_amount"]
-    assert isinstance(rate, (int, float)) and 5 <= float(rate) <= 40
-    assert isinstance(ghs, (int, float)) and float(ghs) > 0
-    expected = (Decimal("12") * Decimal(str(rate))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    assert Decimal(str(ghs)) == expected
-    print(f"PRICING usd=12 rate={rate} ghs={ghs}")
+    assert body["currency"] == "usd"
+    assert body["monthly"]["amount"] == 12
+    assert body["annual"]["amount"] > 0
+    assert body["annual"]["per_month"] < body["monthly"]["amount"]
 
 
-def test_paystack_webhook_rejects_a_missing_signature(live_client):
-    response = live_client.post(
-        "/api/payments/webhook",
-        json={"event": "charge.success", "data": {"reference": "qa-live-invalid-signature"}},
-    )
-    assert response.status_code == 401
+def test_stripe_webhook_rejects_a_missing_signature(live_client):
+    response = live_client.post("/api/payments/webhook", json={"type": "invoice.paid", "data": {"object": {}}})
+    # 503 until STRIPE_WEBHOOK_SECRET is set, 400 after.
+    assert response.status_code in (400, 503)
     _assert_no_leak(response)
     assert response.json().get("detail")
 
 
-def test_paystack_webhook_rejects_a_bad_signature_twice(live_client):
-    payload = {"event": "charge.success", "data": {"reference": "qa-live-invalid-signature"}}
-    headers = {"x-paystack-signature": "0" * 128}
+def test_stripe_webhook_rejects_a_bad_signature_twice(live_client):
+    payload = {"type": "invoice.paid", "data": {"object": {"id": "in_qa"}}}
+    headers = {"stripe-signature": "t=1,v1=" + "0" * 64}
     first = live_client.post("/api/payments/webhook", json=payload, headers=headers)
     second = live_client.post("/api/payments/webhook", json=payload, headers=headers)
-    assert first.status_code == 401
-    assert second.status_code == 401
+    assert first.status_code in (400, 503)
+    assert first.status_code == second.status_code
     assert first.json() == second.json()
     _assert_no_leak(first)
-    assert "invalid signature" in first.text.lower()
 
 
 def test_cron_summary_rejects_a_missing_or_wrong_secret(live_client):

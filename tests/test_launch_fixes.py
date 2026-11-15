@@ -1,4 +1,4 @@
-"""Launch fixes: Paystack channels, chat leaks, onboarding history, applied cycle."""
+"""Launch fixes: chat leaks, onboarding history, applied cycle."""
 
 from datetime import date
 from types import SimpleNamespace
@@ -42,11 +42,6 @@ FOURTEEN = {
     "anchor_cycle_day": 1,
     "cycle_length": 28,
 }
-
-
-def test_checkout_source_does_not_send_a_channels_list():
-    source = open("app/routes/payments.py", encoding="utf-8").read()
-    assert '"channels"' not in source
 
 
 def test_proposal_expiry_migration_is_idempotent():

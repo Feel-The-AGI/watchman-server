@@ -1,7 +1,7 @@
 """Black-box tests for a deployed Watchman API.
 
 Skipped unless LIVE_BASE_URL is set. They do not use a user token, do not
-create accounts, and do not send a valid Paystack signature.
+create accounts, and do not send a valid Stripe signature.
 """
 
 import os

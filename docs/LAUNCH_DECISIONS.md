@@ -1,37 +1,21 @@
 # Launch decisions left open
 
-Two designs were not rewritten. Each one is verified against the current code, with the options and a recommendation.
+Two designs were open. Billing is now decided. Each one is verified against the current code, with the options and a recommendation.
 
-## Recurring billing
+## Recurring billing (decided: Stripe subscriptions)
 
-### What is true today
+Pro is a Stripe subscription: $12 a month or $96 a year in USD, set by `PRO_PRICE_USD` and `PRO_ANNUAL_PRICE_USD`. The server finds or creates the product and the two prices by lookup key (`watchman_pro_monthly`, `watchman_pro_annual`) on the first checkout. Changing an amount creates a new price for new subscribers; existing subscribers keep theirs.
 
-Checkout calls Paystack `POST /transaction/initialize`. That is a one-off charge in GHS, not a Paystack plan or subscription. The amount is `$12 * live USD→GHS rate`. If the rate cannot be fetched, checkout and the pricing endpoint return 503. There is no hardcoded charge rate.
+Access only comes from Stripe:
 
-A `charge.success` webhook grants Pro only when all of these hold:
+- `invoice.paid`, `checkout.session.completed` and `customer.subscription.*` webhooks, with a valid `Stripe-Signature` checked against `STRIPE_WEBHOOK_SECRET`;
+- or the return from checkout, where the server fetches the session itself and checks it belongs to the signed-in user.
 
-- the raw body has a valid HMAC-SHA512 signature from `PAYSTACK_SECRET_KEY`;
-- Paystack's verify API reports `success` for that reference;
-- the reference was stored by our checkout as `pending`;
-- the charged currency is GHS and the pesewa amount matches the stored price.
+Each case reads the subscription from Stripe and sets `users.pro_expires_at` to the end of the paid period plus two days of grace. Access only moves forward: a late or repeated event never shortens it. Cancelling sets `cancel_at_period_end`; access lasts until the paid period ends, then the account is Free. A failed renewal marks the subscription `past_due` while Stripe retries.
 
-The grant is 30 days from the later of now and the current `users.pro_expires_at`. The same reference does not extend the period again. Daily-log export, incident export, and the existing stats export require current Pro. Admin accounts are not counted in MRR.
+Customers change card, switch plan, download invoices or cancel in the Stripe customer portal (Manage billing).
 
-Cancellation of a paid period sets `cancel_at_period_end` and leaves access until `pro_expires_at`. A Paystack `subscription.disable` event does the same. Failed renewal marks the subscription `past_due` and does not cut off a period that was already paid.
-
-This is prepaid access, not a subscription that renews itself. The client copy still says the plan is monthly and the legal pages in `watchman-client` still name Stripe. Those client changes are outside this repository.
-
-`subscriptions` rows are updated so the settings screen, which already reads `current_period_end`, can show the period. They are not Paystack plan subscriptions.
-
-### Options
-
-1. **Keep prepaid 30-day charges.** Checkout stays as it is. The user pays again when the period ends. No card-on-file renewal, no dunning. The in-app "cancel" only means "do not expect another charge" unless a Paystack subscription code already exists.
-2. **Paystack Plans.** Create a GHS plan in the Paystack dashboard and initialize a subscription instead of a one-off transaction. Paystack then sends `invoice.update`, `invoice.payment_failed`, and `subscription.disable`, which this API already records without granting access from an invoice that we did not create. Renewal can extend `pro_expires_at` by the plan interval after the same amount check. Price the plan in GHS directly so a failed FX call cannot block renewal. Review that GHS price when the dollar price needs to move.
-3. **A merchant of record (Lemon Squeezy or Paddle).** They collect tax and handle cards outside Ghana. This replaces Paystack, the webhook, the GHS conversion, and the client checkout. It is a new vendor and a new review of who the mining/FIFO customers can actually pay.
-
-### Recommendation
-
-Stay on Paystack. The product's first customers pay in Ghana, and the server already speaks Paystack. Move from one-off charges to a **Paystack plan priced in GHS** when renewal should be automatic. Do not adopt a merchant of record unless the audience moves out of Ghana or tax handling becomes the larger problem. Until that plan exists, the 30-day prepaid period is the behavior to ship: one payment is not indefinite Pro, and a missing exchange rate does not invent a price.
+The old Paystack columns (`paystack_customer_code`, `paystack_subscription_code`, `payments.paystack_reference` and the GHS columns) are no longer read. They are left in place so no migration is needed; they can be dropped later.
 
 ## Two calendar sources
 

@@ -1,12 +1,11 @@
 """Paid-access period calculations.
 
-Checkout still creates a one-off Paystack charge. A verified charge grants
-PRO_PERIOD_DAYS of Pro. Recurring Paystack plans are a separate product
-decision and are intentionally not created here.
+Pro is a Stripe subscription. Each paid invoice moves pro_expires_at to the
+end of the period it paid for, plus a short grace for a late renewal.
+Cancelling stops the next renewal; access already paid for stays.
 """
 
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
 
@@ -22,7 +21,7 @@ def as_utc(value: Optional[datetime] = None) -> datetime:
 
 
 def parse_timestamp(value) -> Optional[datetime]:
-    """Parse an ISO timestamp from the database or Paystack."""
+    """Parse an ISO timestamp from the database."""
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
@@ -53,31 +52,15 @@ def extend_expiry(current, now: Optional[datetime] = None, days: int = PRO_PERIO
     return base + timedelta(days=days)
 
 
-def ghs_pesewas(usd_price: float, rate: float) -> tuple[Decimal, int]:
-    """Convert a USD price to a 2-decimal GHS amount and Paystack pesewas."""
-    ghs = (Decimal(str(usd_price)) * Decimal(str(rate))).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
-    )
-    pesewas = int((ghs * Decimal("100")).to_integral_value(rounding=ROUND_HALF_UP))
-    return ghs, pesewas
+# A renewal can land a little after the period ends. Access holds until then.
+RENEWAL_GRACE = timedelta(days=2)
+
+PLANS = ("monthly", "annual")
 
 
-def charge_matches(amount_local, webhook_amount, currency: Optional[str]) -> bool:
-    """True when a Paystack charge matches the server-priced GHS amount."""
-    if str(currency or "").upper() != "GHS":
-        return False
-    if amount_local is None or webhook_amount is None:
-        return False
-    try:
-        expected = int(
-            (Decimal(str(amount_local)) * Decimal("100")).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
-            )
-        )
-        actual = int(webhook_amount)
-    except (ArithmeticError, ValueError):
-        return False
-    return actual == expected
+def access_until(period_end: datetime) -> datetime:
+    """Access for a paid period: its end plus the renewal grace."""
+    return as_utc(period_end) + RENEWAL_GRACE
 
 
 def is_active_paying_user(user: dict, now: Optional[datetime] = None) -> bool:
