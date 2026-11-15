@@ -326,3 +326,75 @@ async def test_undo_reports_what_it_undid():
     await executor.execute({"action": "add_leave", "payload": {"name": "Trip", "date": "2026-06-01"}, "explanation": "Add Trip on Mon 1 Jun"})
     out = await executor.execute({"action": "undo", "payload": {}}, skip_validation=True)
     assert out["result"]["undone_explanation"] == "Add Trip on Mon 1 Jun"
+
+
+class _Rows:
+    def __init__(self, rows):
+        self.rows = rows
+        self.deleted = []
+        self.created = []
+
+    async def read_commitments(self, user_id):
+        return list(self.rows)
+
+    async def delete_commitment(self, commitment_id, user_id):
+        self.deleted.append(commitment_id)
+        self.rows = [row for row in self.rows if row["id"] != commitment_id]
+        return True
+
+    async def create_commitment(self, data):
+        self.created.append(data)
+        self.rows.append(data)
+        return data
+
+
+def _bare_executor(rows):
+    from app.engines.command_executor import CommandExecutor
+
+    executor = CommandExecutor.__new__(CommandExecutor)
+    executor.user_id = "user-1"
+    executor.db = _Rows(rows)
+    return executor
+
+
+@pytest.mark.asyncio
+async def test_commitment_is_found_by_name():
+    executor = _bare_executor([
+        {"id": "a", "name": "Gym", "type": "personal"},
+        {"id": "b", "name": "French class", "type": "education"},
+        {"id": "c", "name": "Gym leave", "type": "leave"},
+    ])
+    assert await executor._commitment_id_by_name("gym") == "a"
+    assert await executor._commitment_id_by_name("the french class") == "b"
+    with pytest.raises(ValueError, match="no commitment called Yoga"):
+        await executor._commitment_id_by_name("Yoga")
+    with pytest.raises(ValueError, match="which commitment"):
+        await executor._commitment_id_by_name("")
+
+
+@pytest.mark.asyncio
+async def test_two_matching_commitments_ask_which():
+    executor = _bare_executor([
+        {"id": "a", "name": "Gym morning", "type": "personal"},
+        {"id": "b", "name": "Gym evening", "type": "personal"},
+    ])
+    with pytest.raises(ValueError, match="More than one"):
+        await executor._commitment_id_by_name("gym")
+
+
+@pytest.mark.asyncio
+async def test_undo_puts_a_removed_commitment_back():
+    row = {"id": "a", "name": "Gym", "type": "personal", "start_date": "2026-11-16"}
+    executor = _bare_executor([])
+    command = {
+        "action": "remove_commitment",
+        "before_state": {"commitments": [row]},
+        "after_state": {"commitments": []},
+    }
+    await executor._reverse_commitment_removal(command)
+    assert executor.db.created[0]["id"] == "a"
+    assert executor.db.created[0]["user_id"] == "user-1"
+    await executor._repeat_commitment_removal(command)
+    assert executor.db.deleted == ["a"]
+    await executor._reverse_commitment_removal({"action": "add_leave"})
+    assert len(executor.db.created) == 1

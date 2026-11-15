@@ -223,6 +223,20 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
         }
     },
     {
+        "name": "remove_commitment",
+        "description": "Remove a commitment (class, gym, appointment) the user no longer has. Give its name as the user or the settings above call it. Not for leave: use remove_leave.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the commitment to remove, e.g. 'Gym'"
+                }
+            },
+            "required": ["name"]
+        }
+    },
+    {
         "name": "copy_incident",
         "description": """Copy an incident report from one date to another. Use when user says things like 'copy the incident from the 23rd to the 22nd'.""",
         "parameters": {

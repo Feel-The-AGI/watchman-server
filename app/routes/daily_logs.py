@@ -313,7 +313,15 @@ async def create_daily_log(
         "overtime_hours": request.overtime_hours
     }
 
-    result = await db.create_daily_log(log_data)
+    # One log per day: a second save for the same day updates the first.
+    existing = await db.get_daily_log_by_date(user["id"], request.date)
+    if existing:
+        result = await db.update_daily_log(existing["id"], {
+            key: value for key, value in log_data.items()
+            if key not in ("user_id", "date") and value is not None
+        })
+    else:
+        result = await db.create_daily_log(log_data)
 
     elapsed = (time.time() - start_time) * 1000
     if not result:
