@@ -283,7 +283,7 @@ IMPORTANT CONCEPT - ROTATION ANCHOR vs EMPLOYMENT START:
     },
     {
         "name": "add_commitment",
-        "description": "Add a recurring commitment like a course, class, or regular appointment",
+        "description": "Add a commitment: a recurring one like a course or class, or a one-off like an appointment. For a one-off, start_date and end_date are the same day.",
         "parameters": {
             "type": "object",
             "properties": {
