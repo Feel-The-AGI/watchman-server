@@ -138,14 +138,15 @@ class Database:
         await self.complete_onboarding(user_id)
         return True
 
-    async def get_user_by_paystack_customer(self, paystack_customer_code: str) -> Optional[dict]:
-        """Get user by Paystack customer code"""
-        logger.debug(f"[DB] get_user_by_paystack_customer: {paystack_customer_code}")
+    async def get_user_by_stripe_customer(self, stripe_customer_id: str) -> Optional[dict]:
+        """Get the user a Stripe customer belongs to."""
         try:
-            result = self.client.table("users").select("*").eq("paystack_customer_code", paystack_customer_code).single().execute()
-            return result.data if result.data else None
+            result = self.client.table("users").select("*").eq(
+                "stripe_customer_id", stripe_customer_id
+            ).limit(1).execute()
+            return result.data[0] if result.data else None
         except Exception as e:
-            logger.error(f"[DB] Error getting user by paystack_customer_code {paystack_customer_code}: {e}")
+            logger.error(f"[DB] Error getting user by stripe customer {stripe_customer_id}: {e}")
             return None
 
     async def get_user_by_email(self, email: str) -> Optional[dict]:
@@ -168,32 +169,15 @@ class Database:
             logger.error(f"[DB] Error creating payment record: {e}")
             return None
 
-    async def get_payment_by_reference(self, reference: str) -> Optional[dict]:
-        """Get a payment recorded for a Paystack reference."""
+    async def get_payment_by_invoice(self, invoice_id: str) -> Optional[dict]:
+        """Get the payment recorded for a Stripe invoice."""
         try:
             result = self.client.table("payments").select("*").eq(
-                "paystack_reference", reference
+                "stripe_invoice_id", invoice_id
             ).limit(1).execute()
             return result.data[0] if result.data else None
         except Exception as e:
-            logger.error(f"[DB] Error getting payment {reference}: {e}")
-            return None
-
-    async def update_payment_by_reference(
-        self,
-        reference: str,
-        data: dict,
-        status: Optional[str] = None,
-    ) -> Optional[dict]:
-        """Update a payment. Optional status makes the write a compare-and-set."""
-        try:
-            query = self.client.table("payments").update(data).eq("paystack_reference", reference)
-            if status is not None:
-                query = query.eq("status", status)
-            result = query.execute()
-            return result.data[0] if result.data else None
-        except Exception as e:
-            logger.error(f"[DB] Error updating payment {reference}: {e}")
+            logger.error(f"[DB] Error getting payment for invoice {invoice_id}: {e}")
             return None
 
     async def get_payment_history(self, user_id: str) -> list:

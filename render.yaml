@@ -32,11 +32,9 @@ services:
         sync: false
       - key: ANTHROPIC_MODEL
         value: claude-haiku-5-5
-      - key: PAYSTACK_SECRET_KEY
+      - key: STRIPE_SECRET_KEY
         sync: false
-      - key: PAYSTACK_PUBLIC_KEY
-        sync: false
-      - key: EXCHANGE_RATE_API_KEY
+      - key: STRIPE_WEBHOOK_SECRET
         sync: false
       - key: RESEND_API_KEY
         sync: false
