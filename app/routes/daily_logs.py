@@ -16,28 +16,41 @@ import time
 from app.database import Database
 from app.middleware.auth import get_current_user, require_pro_tier
 
+from app.validation import DayString, Hours, LongText, OptionalHours, OptionalLongText
+
 router = APIRouter()
+
+
+def _real_day(value: str) -> str:
+    """A real YYYY-MM-DD date from the URL, or a 422."""
+    try:
+        parsed = date.fromisoformat(str(value)[:10])
+    except ValueError:
+        raise HTTPException(status_code=422, detail="That is not a real date. Use YYYY-MM-DD.")
+    if not (2000 <= parsed.year <= 2100):
+        raise HTTPException(status_code=422, detail="The year must be between 2000 and 2100.")
+    return parsed.isoformat()
 
 
 class DailyLogCreateRequest(BaseModel):
     """Request to create a daily log"""
-    date: str
-    note: str
-    actual_hours: Optional[float] = None
-    overtime_hours: Optional[float] = None
+    date: DayString
+    note: LongText
+    actual_hours: OptionalHours = None
+    overtime_hours: OptionalHours = None
 
 
 class DailyLogUpdateRequest(BaseModel):
     """Request to update a daily log"""
-    note: Optional[str] = None
-    actual_hours: Optional[float] = None
-    overtime_hours: Optional[float] = None
+    note: OptionalLongText = None
+    actual_hours: OptionalHours = None
+    overtime_hours: OptionalHours = None
 
 
 class HoursUpdateRequest(BaseModel):
     """Request to update hours for a date"""
-    actual_hours: float
-    overtime_hours: Optional[float] = 0
+    actual_hours: Hours
+    overtime_hours: OptionalHours = 0
 
 
 @router.get("/daily-logs")
@@ -254,6 +267,7 @@ async def get_daily_log_by_date(
     user: dict = Depends(get_current_user)
 ):
     """Get daily log for a specific date"""
+    date_str = _real_day(date_str)
     start_time = time.time()
     logger.info(f"[DAILY_LOGS] === GET LOG BY DATE ===")
     logger.info(f"[DAILY_LOGS] User: {user['id']}")
@@ -366,6 +380,7 @@ async def update_daily_hours(
     user: dict = Depends(get_current_user)
 ):
     """Update or create hours for a specific date"""
+    date_str = _real_day(date_str)
     start_time = time.time()
     logger.info(f"[DAILY_LOGS] === UPDATE DAILY HOURS ===")
     logger.info(f"[DAILY_LOGS] User: {user['id']}")

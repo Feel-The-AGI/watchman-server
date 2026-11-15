@@ -6,8 +6,8 @@ Endpoints for managing commitments (education, personal, etc.)
 import hashlib
 import json
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, Field, model_validator
+from typing import Literal, Optional, List
 from datetime import date
 from uuid import UUID, uuid4
 
@@ -23,6 +23,13 @@ from app.middleware.auth import get_current_user, get_effective_tier
 from app.planning_horizon import horizon_violation
 from loguru import logger
 
+
+from app.validation import Name, OptionalLongText, OptionalSaneDate, OptionalShortText, check_span
+
+CommitmentType = Literal["education", "personal", "study", "sleep", "work", "leave", "other"]
+CommitmentStatus = Literal["active", "queued", "completed", "paused"]
+
+from app.engines.proposal_effects import stored_commitment_type
 
 router = APIRouter()
 
@@ -40,32 +47,42 @@ class CommitmentConstraintsSchema(BaseModel):
 
 class CreateCommitmentRequest(BaseModel):
     id: Optional[str] = None
-    name: str
-    type: str  # education, personal, study, sleep
-    priority: int = 1
+    name: Name
+    type: CommitmentType
+    priority: int = Field(1, ge=0, le=100)
     constraints_json: Optional[dict] = None
-    start_date: Optional[date] = None
-    end_date: Optional[date] = None
+    start_date: OptionalSaneDate = None
+    end_date: OptionalSaneDate = None
     recurrence: Optional[dict] = None
-    total_sessions: Optional[int] = None
-    color: Optional[str] = None
-    icon: Optional[str] = None
-    notes: Optional[str] = None
-    status: str = "active"
+    total_sessions: Optional[int] = Field(None, ge=0, le=100000)
+    color: OptionalShortText = None
+    icon: OptionalShortText = None
+    notes: OptionalLongText = None
+    status: CommitmentStatus = "active"
+
+    @model_validator(mode="after")
+    def _dates_in_order(self):
+        check_span(self.start_date, self.end_date)
+        return self
 
 
 class UpdateCommitmentRequest(BaseModel):
-    name: Optional[str] = None
-    type: Optional[str] = None
-    status: Optional[str] = None
-    priority: Optional[int] = None
+    name: Optional[Name] = None
+    type: Optional[CommitmentType] = None
+    status: Optional[CommitmentStatus] = None
+    priority: Optional[int] = Field(None, ge=0, le=100)
     constraints_json: Optional[dict] = None
-    start_date: Optional[date] = None
-    end_date: Optional[date] = None
+    start_date: OptionalSaneDate = None
+    end_date: OptionalSaneDate = None
     recurrence: Optional[dict] = None
-    completed_sessions: Optional[int] = None
-    color: Optional[str] = None
-    notes: Optional[str] = None
+    completed_sessions: Optional[int] = Field(None, ge=0, le=100000)
+    color: OptionalShortText = None
+    notes: OptionalLongText = None
+
+    @model_validator(mode="after")
+    def _dates_in_order(self):
+        check_span(self.start_date, self.end_date)
+        return self
 
 
 @router.get("")
@@ -148,7 +165,7 @@ async def create_commitment(
     commitment_data = {
         "user_id": user["id"],
         "name": data.name,
-        "type": data.type,
+        "type": stored_commitment_type(data.type),
         "status": data.status,
         "priority": data.priority,
         "constraints_json": data.constraints_json or {
@@ -264,7 +281,7 @@ async def update_commitment(
     if data.name is not None:
         update_data["name"] = data.name
     if data.type is not None:
-        update_data["type"] = data.type
+        update_data["type"] = stored_commitment_type(data.type)
     if data.status is not None:
         update_data["status"] = data.status
     if data.priority is not None:

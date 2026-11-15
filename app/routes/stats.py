@@ -18,6 +18,9 @@ from app.planning_horizon import horizon_end, parse_day, unlimited
 from app.engines.stats_engine import create_stats_engine
 
 
+from typing import Annotated
+from fastapi import Path
+
 router = APIRouter()
 
 
@@ -67,7 +70,7 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
 
 @router.get("/year/{year}")
 async def get_yearly_stats(
-    year: int,
+    year: Annotated[int, Path(ge=2000, le=2100)],
     user: dict = Depends(get_current_user)
 ):
     """Get comprehensive statistics for a full year"""
@@ -98,8 +101,8 @@ async def get_yearly_stats(
 
 @router.get("/month/{year}/{month}")
 async def get_monthly_stats(
-    year: int,
-    month: int,
+    year: Annotated[int, Path(ge=2000, le=2100)],
+    month: Annotated[int, Path(ge=1, le=12)],
     user: dict = Depends(get_current_user)
 ):
     """Get statistics for a specific month"""
@@ -188,7 +191,7 @@ async def get_load_distribution(
 
 @router.get("/export")
 async def export_stats(
-    year: int,
+    year: Annotated[int, Path(ge=2000, le=2100)],
     format: str = Query("csv"),
     user: dict = Depends(require_pro_tier)
 ):

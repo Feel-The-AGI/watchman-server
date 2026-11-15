@@ -18,6 +18,8 @@ from app.engines.command_executor import UndoConflict, create_command_executor
 from app.leave_access import LEAVE_PRO_REPLY, leave_blocked
 
 
+from fastapi import Query
+
 router = APIRouter(prefix="/commands", tags=["commands"])
 
 
@@ -55,7 +57,7 @@ def _restore_pending_proposal(db: Database, proposal_id: UUID, user_id: str) -> 
 
 @router.get("")
 async def list_commands(
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
     status: Optional[str] = None,
     user: dict = Depends(get_current_user)
 ):
@@ -82,14 +84,14 @@ async def list_commands(
 
 @router.get("/{command_id}")
 async def get_command(
-    command_id: str,
+    command_id: UUID,
     user: dict = Depends(get_current_user)
 ):
     """Get a specific command by ID"""
     db = Database(use_admin=True)
     
     result = db.client.table("command_log").select("*").eq(
-        "id", command_id
+        "id", str(command_id)
     ).eq("user_id", user["id"]).execute()
     
     if not result.data or len(result.data) == 0:
@@ -279,7 +281,7 @@ async def execute_command(
 
 
 class UndoRequest(BaseModel):
-    command_id: Optional[str] = None  # If not provided, undo last command
+    command_id: Optional[UUID] = None  # If not provided, undo last command
 
 
 @router.post("/undo")
@@ -295,7 +297,7 @@ async def undo_command(
     
     command = {
         "action": "undo",
-        "payload": {"command_id": request.command_id} if request.command_id else {},
+        "payload": {"command_id": str(request.command_id)} if request.command_id else {},
         "explanation": "Undoing last change"
     }
     
@@ -310,7 +312,7 @@ async def undo_command(
 
 
 class RedoRequest(BaseModel):
-    command_id: Optional[str] = None  # If not provided, redo last undone
+    command_id: Optional[UUID] = None  # If not provided, redo last undone
 
 
 @router.post("/redo")
@@ -326,7 +328,7 @@ async def redo_command(
     
     command = {
         "action": "redo",
-        "payload": {"command_id": request.command_id} if request.command_id else {},
+        "payload": {"command_id": str(request.command_id)} if request.command_id else {},
         "explanation": "Redoing change"
     }
     

@@ -13,6 +13,8 @@ from app.engines.calendar_authority import mirror_onboarding_constraints
 from app.middleware.auth import get_current_user
 
 
+from app.validation import Name, TimezoneName
+
 router = APIRouter()
 
 
@@ -44,8 +46,8 @@ async def get_profile(user: dict = Depends(get_current_user)):
 
 
 class UpdateProfileRequest(BaseModel):
-    name: Optional[str] = None
-    timezone: Optional[str] = None
+    name: Optional[Name] = None
+    timezone: TimezoneName = None
 
 
 @router.patch("/me")

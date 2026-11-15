@@ -4,13 +4,15 @@ Endpoints for user settings and preferences
 """
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Literal, Optional
 
 from app.database import Database
 from app.middleware.auth import get_current_user, require_admin, get_effective_tier, is_in_trial, TRIAL_DURATION_DAYS
 from app.services.email_service import get_email_service
 
+
+from app.validation import Name, OptionalLongText, TimezoneName
 
 router = APIRouter()
 
@@ -18,19 +20,19 @@ router = APIRouter()
 class UpdateSettingsRequest(BaseModel):
     constraint_mode: Optional[str] = None  # binary, weighted
     weighted_mode_enabled: Optional[bool] = None
-    max_concurrent_commitments: Optional[int] = None
+    max_concurrent_commitments: Optional[int] = Field(None, ge=1, le=50)
     notifications_email: Optional[bool] = None
     notifications_push: Optional[bool] = None  # Push notifications
     notifications_whatsapp: Optional[bool] = None  # WhatsApp notifications (legacy)
-    theme: Optional[str] = None  # dark, light, system
-    timezone: Optional[str] = None  # User timezone
+    theme: Optional[Literal["dark", "light", "system"]] = None
+    timezone: TimezoneName = None
 
 
 class ConstraintRequest(BaseModel):
-    name: str
-    description: Optional[str] = None
+    name: Name
+    description: OptionalLongText = None
     rule: dict
-    weight: int = 100
+    weight: int = Field(100, ge=0, le=100)
     is_active: bool = True
 
 
@@ -167,7 +169,8 @@ async def create_constraint(
         "name": data.name,
         "description": data.description,
         "rule": data.rule,
-        "weight": data.weight,
+        # Weights other than the default are part of weighted constraints (Pro).
+        "weight": data.weight if get_effective_tier(user) in {"pro", "admin", "trial"} else 100,
         "is_active": data.is_active,
         "is_system": False
     }

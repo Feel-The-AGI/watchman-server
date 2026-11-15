@@ -4,8 +4,8 @@ Endpoints for calendar day management and generation
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field, model_validator
+from typing import Literal, Optional
 from datetime import date
 
 from app.database import Database
@@ -23,6 +23,11 @@ from app.engines.command_executor import create_command_executor
 
 
 from loguru import logger
+
+from app.validation import MAX_LEAVE_DAYS, MAX_YEAR, MIN_YEAR, Name, OptionalLongText, SaneDate, check_span
+
+from typing import Annotated
+from fastapi import Path
 
 router = APIRouter()
 
@@ -44,16 +49,23 @@ def _free_view(user: dict, days: list) -> dict:
 
 
 class GenerateCalendarRequest(BaseModel):
-    year: int = 2026
+    year: int = Field(2026, ge=MIN_YEAR, le=MAX_YEAR)
     regenerate: bool = False
 
 
 class LeaveBlockRequest(BaseModel):
-    name: str = "Leave"
-    start_date: date
-    end_date: date
-    notes: Optional[str] = None
-    type: Optional[str] = None
+    name: Name = "Leave"
+    start_date: SaneDate
+    end_date: SaneDate
+    notes: OptionalLongText = None
+    type: Optional[Literal["annual", "sick", "personal", "other"]] = None
+
+    @model_validator(mode="after")
+    def _span(self):
+        # The route answers a reversed range itself, with its own message.
+        if self.end_date >= self.start_date:
+            check_span(self.start_date, self.end_date, MAX_LEAVE_DAYS)
+        return self
 
 
 @router.get("")
@@ -118,7 +130,7 @@ def _rebuild_span(days: list, year: int, tier: str):
 
 @router.get("/year/{year}")
 async def get_year(
-    year: int,
+    year: Annotated[int, Path(ge=2000, le=2100)],
     user: dict = Depends(get_current_user)
 ):
     """Get all calendar days for a specific year. Auto-generates if empty or stale."""
@@ -186,8 +198,8 @@ async def get_year(
 
 @router.get("/month/{year}/{month}")
 async def get_month(
-    year: int,
-    month: int,
+    year: Annotated[int, Path(ge=2000, le=2100)],
+    month: Annotated[int, Path(ge=1, le=12)],
     user: dict = Depends(get_current_user)
 ):
     """Get all calendar days for a specific month"""

@@ -5,7 +5,7 @@ Endpoints for managing work rotation cycles
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Literal, Optional, List
 from datetime import date
 
 from app.database import Database
@@ -25,6 +25,10 @@ from app.engines.calendar_authority import (
 from app.onboarding import finish_onboarding_for_saved_cycle
 from loguru import logger
 
+
+from app.validation import Name, OptionalSaneDate, SaneDate
+
+from fastapi import Query
 
 router = APIRouter()
 
@@ -93,24 +97,24 @@ async def rebuild_for_user(db, user_id: str) -> None:
 
 
 class CycleBlockSchema(BaseModel):
-    label: str = Field(..., description="work_day, work_night, or off")
+    label: Literal["work_day", "work_night", "off"] = Field(..., description="work_day, work_night, or off")
     duration: int = Field(..., ge=0, description="Duration in days")
 
 
 class CreateCycleRequest(BaseModel):
-    name: str = "Default Rotation"
-    pattern: List[CycleBlockSchema]
-    anchor_date: date
+    name: Name = "Default Rotation"
+    pattern: List[CycleBlockSchema] = Field(..., min_length=1, max_length=60)
+    anchor_date: SaneDate
     anchor_cycle_day: int = Field(..., ge=1)
     crew: Optional[str] = None
     description: Optional[str] = None
 
 
 class UpdateCycleRequest(BaseModel):
-    name: Optional[str] = None
-    pattern: Optional[List[CycleBlockSchema]] = None
-    anchor_date: Optional[date] = None
-    anchor_cycle_day: Optional[int] = None
+    name: Optional[Name] = None
+    pattern: Optional[List[CycleBlockSchema]] = Field(None, min_length=1, max_length=60)
+    anchor_date: OptionalSaneDate = None
+    anchor_cycle_day: Optional[int] = Field(None, ge=1, le=366)
     is_active: Optional[bool] = None
     crew: Optional[str] = None
     description: Optional[str] = None
@@ -353,7 +357,7 @@ async def delete_cycle(
 @router.post("/{cycle_id}/preview")
 async def preview_cycle(
     cycle_id: str,
-    year: int = 2026,
+    year: int = Query(2026, ge=2000, le=2100),
     user: dict = Depends(get_current_user)
 ):
     """Preview what a year would look like with this cycle"""
