@@ -92,7 +92,25 @@ async def get_yearly_stats(
         }
     
     stats = stats_engine.compute_yearly_stats(calendar_days, year)
-    
+
+    # The count and the list come from the same rows, so they always agree.
+    commitments = [
+        row for row in await db.get_commitments(user["id"]) or []
+        if isinstance(row, dict) and row.get("type") != "leave"
+        and (row.get("status") or "active") == "active"
+    ]
+    stats["commitment_count"] = len(commitments)
+    stats["commitment_breakdown"] = [
+        {
+            "id": item["commitment_id"],
+            "name": item["name"],
+            "type": item["type"],
+            "total_hours": item["total_hours"],
+            "sessions_count": item["scheduled_days"],
+        }
+        for item in stats_engine.compute_commitment_stats(commitments, calendar_days)
+    ]
+
     return {
         "success": True,
         "data": stats
