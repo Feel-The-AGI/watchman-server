@@ -12,6 +12,7 @@ from app.database import Database
 from app.middleware.auth import get_current_user
 from app.engines.calendar_engine import create_calendar_engine, generation_bounds
 from app.engines.rotation_history import earliest_anchor
+from app.engines.command_executor import MAX_CYCLE_DAYS
 from app.engines.command_executor import create_command_executor
 from app.engines.master_settings_service import MasterSettingsService
 from app.engines.calendar_authority import (
@@ -55,6 +56,15 @@ def _overlay_cycle_patch(current_cycle, update_data: dict, cycle_id: str) -> dic
     if not merged.get("id"):
         merged["id"] = cycle_id
     return merged
+
+
+def _check_cycle_length(total: int) -> None:
+    """A rotation has at least one day and repeats within a year."""
+    if total < 1 or total > MAX_CYCLE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A rotation needs between 1 and {MAX_CYCLE_DAYS} days in total.",
+        )
 
 
 async def rebuild_for_user(db, user_id: str) -> None:
@@ -165,6 +175,7 @@ async def create_cycle(
     
     # Calculate cycle length
     cycle_length = sum(block.duration for block in data.pattern)
+    _check_cycle_length(cycle_length)
     
     # Validate
     if data.anchor_cycle_day > cycle_length:
@@ -255,6 +266,7 @@ async def update_cycle(
     if data.pattern is not None:
         update_data["pattern"] = [{"label": b.label, "duration": b.duration} for b in data.pattern]
         update_data["cycle_length"] = sum(b.duration for b in data.pattern)
+        _check_cycle_length(update_data["cycle_length"])
         needs_regeneration = True
     
     if data.anchor_date is not None:

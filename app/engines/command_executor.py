@@ -513,6 +513,8 @@ class CommandExecutor:
             or any(int(block.get("duration") or 0) < 1 for block in normalized_pattern)
         ):
             raise ValueError("A rotation needs at least one block of one day or more.")
+        if sum(int(block.get("duration") or 0) for block in normalized_pattern) > MAX_CYCLE_DAYS:
+            raise ValueError(f"A rotation can repeat over at most {MAX_CYCLE_DAYS} days.")
 
         # Build normalized cycle data with flat anchor format.
         # A missing id stays missing. Inventing one would match no cycles row,
@@ -2123,6 +2125,9 @@ def _iso_day(value) -> Optional[date]:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+MAX_CYCLE_DAYS = 366
 
 
 def _truthy(value) -> bool:

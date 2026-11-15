@@ -271,3 +271,17 @@ def test_free_stats_stop_at_the_horizon():
     days = [{"date": near}, {"date": far}]
     assert _within_plan({"id": "u", "tier": "free"}, days) == [{"date": near}]
     assert _within_plan({"id": "u", "tier": "pro"}, days) == days
+
+
+@pytest.mark.asyncio
+async def test_a_rotation_longer_than_a_year_is_refused():
+    store, executor = await _seeded()
+    before = _days(store)
+    out = await executor.execute({
+        "action": "update_cycle",
+        "payload": {"pattern": [{"label": "work_day", "duration": 999}, {"label": "off", "duration": 1}], "correction": True},
+        "explanation": "x",
+    })
+    assert out["success"] is False
+    assert "366" in out["error"]
+    assert _days(store) == before
