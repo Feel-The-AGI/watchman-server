@@ -316,10 +316,14 @@ async def create_daily_log(
     # One log per day: a second save for the same day updates the first.
     existing = await db.get_daily_log_by_date(user["id"], request.date)
     if existing:
-        result = await db.update_daily_log(existing["id"], {
+        changes = {
             key: value for key, value in log_data.items()
-            if key not in ("user_id", "date") and value is not None
-        })
+            if key not in ("user_id", "date", "note") and value is not None
+        }
+        earlier = str(existing.get("note") or "").strip()
+        added = str(request.note or "").strip()
+        changes["note"] = f"{earlier}\n{added}" if earlier and added and added not in earlier else (added or earlier)
+        result = await db.update_daily_log(existing["id"], changes)
     else:
         result = await db.create_daily_log(log_data)
 
