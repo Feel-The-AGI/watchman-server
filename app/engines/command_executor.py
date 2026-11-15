@@ -1239,7 +1239,10 @@ class CommandExecutor:
             self._claim_status(command["id"], ("undone",), previous)
             raise
         await self._rebuild_created_span(command)
-        return {"undone_command_id": command["id"]}
+        return {
+            "undone_command_id": command["id"],
+            "undone_explanation": command.get("explanation") or "",
+        }
 
     async def _action_redo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Redo the most recently undone command.

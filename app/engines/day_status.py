@@ -57,7 +57,7 @@ _NAMED_MONTH_FIRST = re.compile(
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _CHRISTMAS = re.compile(r"\bchristmas(?:\s+day)?\b", re.IGNORECASE)
 _ASKING = re.compile(
-    r"\b(am i|do i work|am i off|working|on shift|day off|have work)\b",
+    r"\b(am i|do i work|am i off|working|on shift|day off|have work|on leave)\b",
     re.IGNORECASE,
 )
 # A genuine question, not a mention of work inside a note or a log.
@@ -123,7 +123,7 @@ def project_day(
     }
 
 
-def answer_sentence(status: dict, yes_no: bool = True) -> str:
+def answer_sentence(status: dict, yes_no: bool = True, about_leave: bool = False) -> str:
     """One sentence. No second guess about a stored horizon.
 
     ``yes_no`` is False for "what shift am I on…" questions, which are not
@@ -140,6 +140,11 @@ def answer_sentence(status: dict, yes_no: bool = True) -> str:
         text = f"Yes. {when} is {kind}."
     else:
         text = f"No. {when} is {kind}."
+    if about_leave:
+        if status.get("on_leave"):
+            text = f"Yes. {when} is a leave day."
+        else:
+            text = f"No. {when} is not leave. It is {kind}."
     if not yes_no:
         text = text.split(". ", 1)[1] if text.startswith(("Yes. ", "No. ")) else text
     names = [name for name in (status.get("commitment_names") or []) if name]
@@ -358,3 +363,11 @@ def next_day_answer(kind: str, rows: list, after: date) -> str:
                 return f"Your next shift is {_format_day(day)} ({kind_text})."
             return f"Your next {label} is {_format_day(day)}."
     return f"I can't see a {label} in your calendar after {_format_day(after)}."
+
+
+_LEAVE_WORD = re.compile(r"\b(?:on leave|leave day|on holiday|on vacation)\b", re.IGNORECASE)
+
+
+def is_leave_question(text: str) -> bool:
+    """True when the question asks whether a day is leave."""
+    return bool(_LEAVE_WORD.search(text or ""))

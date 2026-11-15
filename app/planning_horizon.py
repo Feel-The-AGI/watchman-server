@@ -84,7 +84,7 @@ def clip_range(
 
 
 def payload_dates(payload: dict) -> list:
-    """Dates a chat or API payload would plan. Anchor dates are not included."""
+    """Dates a chat or API payload would plan, including the start of a rotation change. Anchor dates are not included."""
     payload = payload if isinstance(payload, dict) else {}
     found = []
     sources = [payload]
@@ -92,7 +92,7 @@ def payload_dates(payload: dict) -> list:
     if isinstance(schedule, dict):
         sources.append(schedule)
     for source in sources:
-        for key in ("start_date", "end_date", "date", "target_date"):
+        for key in ("start_date", "end_date", "date", "target_date", "effective_from"):
             day = parse_day(source.get(key))
             if day is not None:
                 found.append(day)

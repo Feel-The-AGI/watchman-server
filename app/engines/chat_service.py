@@ -49,6 +49,7 @@ from app.engines.day_status import (
     answer_sentence,
     combine_events,
     date_from_query,
+    is_leave_question,
     is_yes_no_question,
     next_day_answer,
     next_kind_question,
@@ -699,7 +700,9 @@ class ChatService:
         yes_no = is_yes_no_question(content)
         asked = schedule_question_date(content, today)
         if asked is not None:
-            answer = await self._answer_about_day(asked, master_settings, yes_no=yes_no)
+            answer = await self._answer_about_day(
+                asked, master_settings, yes_no=yes_no, about_leave=is_leave_question(content),
+            )
             assistant_message = await self._save_message("assistant", answer)
             return {
                 "user_message": user_message,
@@ -787,7 +790,10 @@ class ChatService:
             if day is None:
                 answer = "I need one date, like 2026-12-25, to say whether you are working."
             else:
-                answer = await self._answer_about_day(day, master_settings, yes_no=is_yes_no_question(content))
+                answer = await self._answer_about_day(
+                    day, master_settings, yes_no=is_yes_no_question(content),
+                    about_leave=is_leave_question(content),
+                )
             assistant_message = await self._save_message("assistant", answer)
             return {
                 "user_message": user_message,
@@ -948,12 +954,14 @@ class ChatService:
             return None
         return rows
 
-    async def _answer_about_day(self, day, master_settings: dict, yes_no: bool = True) -> str:
+    async def _answer_about_day(
+        self, day, master_settings: dict, yes_no: bool = True, about_leave: bool = False,
+    ) -> str:
         """One sentence. A manual override wins over the projected cycle."""
         stored = await self._stored_day(day)
         state = (stored or {}).get("state_json") or {}
         if isinstance(state, dict) and state.get("manual_override"):
-            return answer_sentence(status_from_stored(stored), yes_no=yes_no)
+            return answer_sentence(status_from_stored(stored), yes_no=yes_no, about_leave=about_leave)
         table_leaves, table_commitments = await self._table_events()
         leaves, commitments = combine_events(
             master_settings.get("leave_blocks"),
@@ -966,7 +974,7 @@ class ChatService:
             day,
             leaves,
             commitments,
-        ), yes_no=yes_no)
+        ), yes_no=yes_no, about_leave=about_leave)
 
     async def _stored_day(self, day):
         getter = getattr(self.db, "get_calendar_day", None)

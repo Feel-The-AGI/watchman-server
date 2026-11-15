@@ -285,3 +285,44 @@ async def test_a_rotation_longer_than_a_year_is_refused():
     assert out["success"] is False
     assert "366" in out["error"]
     assert _days(store) == before
+
+
+def test_browser_timezone_is_validated():
+    from app.routes.chat import valid_timezone
+
+    assert valid_timezone("Africa/Accra") == "Africa/Accra"
+    assert valid_timezone(" America/Los_Angeles ") == "America/Los_Angeles"
+    for bad in (None, "", "Not/AZone", "x" * 100, 5, "../../etc/passwd"):
+        assert valid_timezone(bad) is None
+
+
+def test_leave_questions_get_a_leave_answer():
+    from app.engines.day_status import is_leave_question
+
+    on_leave = {"label": "Sat 28 Nov", "work_type": "off", "on_leave": True}
+    off = {"label": "Sat 5 Dec", "work_type": "off", "on_leave": False}
+    assert answer_sentence(on_leave, about_leave=True) == "Yes. Sat 28 Nov is a leave day."
+    assert answer_sentence(off, about_leave=True) == "No. Sat 5 Dec is not leave. It is off."
+    assert answer_sentence(on_leave) == "No. Sat 28 Nov is leave, so you are not working."
+    assert is_leave_question("Am I on leave on 28 November?")
+    assert not is_leave_question("Am I working on 28 November?")
+
+
+def test_a_rotation_change_past_the_free_horizon_is_a_planned_date():
+    from datetime import timedelta
+
+    from app.planning_horizon import horizon_violation, payload_dates
+
+    far = (date.today() + timedelta(days=200)).isoformat()
+    payload = {"pattern": [{"label": "work_day", "duration": 7}], "effective_from": far, "anchor_date": far}
+    assert horizon_violation("free", payload_dates(payload)) is not None
+    assert horizon_violation("pro", payload_dates(payload)) is None
+    assert horizon_violation("free", payload_dates({"anchor_date": far})) is None
+
+
+@pytest.mark.asyncio
+async def test_undo_reports_what_it_undid():
+    store, executor = await _seeded()
+    await executor.execute({"action": "add_leave", "payload": {"name": "Trip", "date": "2026-06-01"}, "explanation": "Add Trip on Mon 1 Jun"})
+    out = await executor.execute({"action": "undo", "payload": {}}, skip_validation=True)
+    assert out["result"]["undone_explanation"] == "Add Trip on Mon 1 Jun"

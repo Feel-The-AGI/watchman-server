@@ -3,12 +3,13 @@ Chat API Routes
 Handles conversation with the agent
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from typing import Any, Optional, List, Literal
 from loguru import logger
 from datetime import datetime, timezone
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from app.middleware.auth import get_current_user, get_effective_tier
 from app.database import Database
@@ -23,6 +24,20 @@ FREE_HISTORY_LIMIT = 50   # Max history messages to retrieve
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 APPLY_FAILED_REPLY = "I couldn't make that change just now. Nothing was changed. Please try again."
+
+
+def valid_timezone(name: Optional[str]) -> Optional[str]:
+    """An IANA zone name the server knows, or None."""
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name or len(name) > 64:
+        return None
+    try:
+        ZoneInfo(name)
+    except Exception:
+        return None
+    return name
 
 
 def _failure_text(detail: Any) -> str:
@@ -112,7 +127,15 @@ async def apply_now(result: dict, user: dict, db) -> dict:
         }
     outcome = outcome if isinstance(outcome, dict) else {}
     changed = outcome.get("changed") is not False and outcome.get("status") != "no_change"
-    if changed:
+    undone = (outcome.get("result") or {}).get("undone_explanation") if isinstance(outcome.get("result"), dict) else None
+    nothing = (outcome.get("result") or {}).get("message") if isinstance(outcome.get("result"), dict) else None
+    if command.get("action") in ("undo", "redo") and nothing in ("Nothing to undo", "Nothing to redo"):
+        changed = False
+        outcome = {**outcome, "message": "There is nothing to undo." if "undo" in nothing else "There is nothing to redo."}
+    if changed and undone:
+        summary = f"Undo: {str(undone).rstrip('.')}"
+        text = f"Undone: {str(undone).rstrip('.')}."
+    elif changed:
         done = summary or str(outcome.get("message") or "Done.")
         text = f"Done: {done}."
         note = str(command.get("model_text") or "").strip()
@@ -161,7 +184,8 @@ class MessageResponse(BaseModel):
 @router.post("/message")
 async def send_message(
     request: SendMessageRequest,
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
+    x_timezone: Optional[str] = Header(None),
 ):
     """
     Send a message to the agent and get a response.
@@ -237,8 +261,12 @@ async def send_message(
             kwargs["pattern"] = pattern
         if user.get("onboarding_completed") is False:
             kwargs["onboarding_completed"] = False
-        if user.get("timezone"):
-            kwargs["timezone_name"] = user["timezone"]
+        # The browser's own zone is what "today" and "tomorrow" mean to the
+        # person typing. The profile zone comes from an IP lookup and can be
+        # wrong behind a VPN or a proxy.
+        zone = valid_timezone(x_timezone) or user.get("timezone")
+        if zone:
+            kwargs["timezone_name"] = zone
         kwargs["effective_tier"] = effective_tier
         result = await chat_service.send_message(**kwargs)
         result = await apply_now(result, user, db)
