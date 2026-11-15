@@ -281,6 +281,16 @@ async def update_cycle(
         update_data["anchor_cycle_day"] = data.anchor_cycle_day
         needs_regeneration = True
     
+    # The cycle day must be a day of the rotation as it will be saved.
+    current = next(c for c in owned_cycles if c.get("id") == cycle_id)
+    length = update_data.get("cycle_length") or current.get("cycle_length") or 0
+    day = update_data.get("anchor_cycle_day") or current.get("anchor_cycle_day") or 1
+    if needs_regeneration and length and not 1 <= int(day) <= int(length):
+        raise HTTPException(
+            status_code=400,
+            detail=f"The cycle day must be between 1 and {length}, the length of the rotation.",
+        )
+
     if data.is_active is not None:
         update_data["is_active"] = data.is_active
         
